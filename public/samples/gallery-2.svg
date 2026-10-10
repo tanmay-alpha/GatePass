@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" role="img" aria-label="QR specimen study">
+  <rect width="600" height="400" fill="#F7FAFE"/>
+  <rect x="24" y="24" width="552" height="352" fill="none" stroke="#003A70" stroke-width="2"/>
+  <text x="48" y="64" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="11" letter-spacing="3" fill="#003A70">QR TOOLKIT / SPECIMEN 002</text>
+  <line x1="48" y1="80" x2="552" y2="80" stroke="#003A70" stroke-width="1"/>
+  <text x="48" y="172" font-family="ui-serif,Georgia,'Times New Roman',serif" font-size="56" font-weight="600" fill="#003A70">Specimen</text>
+  <text x="48" y="232" font-family="ui-serif,Georgia,'Times New Roman',serif" font-size="56" font-style="italic" font-weight="500" fill="#003A70">study</text>
+  <g transform="translate(420 108)">
+    <rect x="0" y="0" width="120" height="120" fill="#003A70"/>
+    <rect x="14" y="14" width="92" height="92" fill="#F7FAFE"/>
+    <rect x="28" y="28" width="20" height="20" fill="#003A70"/>
+    <rect x="72" y="28" width="20" height="20" fill="#003A70"/>
+    <rect x="28" y="72" width="20" height="20" fill="#003A70"/>
+    <rect x="56" y="56" width="10" height="10" fill="#FDB913"/>
+  </g>
+  <line x1="48" y1="320" x2="552" y2="320" stroke="#003A70" stroke-width="1"/>
+  <text x="48" y="348" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="11" letter-spacing="2" fill="#003A70">EYE FRAME · BODY · MARK</text>
+  <text x="552" y="348" text-anchor="end" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="11" letter-spacing="2" fill="#003A70">SVG · 600 × 400</text>
+</svg>

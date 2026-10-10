@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QR Code Toolkit</title>
+    <meta name="description" content="QR Code Toolkit — generate static and dynamic QR codes with YOURLS-backed routing.">
+    <meta name="theme-color" content="#F7FAFE" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0B1628" media="(prefers-color-scheme: dark)">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap">
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem('ct-theme');
+          var choice = stored === 'light' || stored === 'dark' || stored === 'auto' ? stored : 'auto';
+          var resolved;
+          if (choice === 'auto') {
+            resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          } else {
+            resolved = choice;
+          }
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.dataset.themeChoice = choice;
+        } catch (e) {
+          try {
+            var fallback = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            document.documentElement.dataset.theme = fallback;
+            document.documentElement.dataset.themeChoice = 'auto';
+          } catch (_) {
+            document.documentElement.dataset.theme = 'light';
+            document.documentElement.dataset.themeChoice = 'auto';
+          }
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/client/main.tsx"></script>
+  </body>
+</html>

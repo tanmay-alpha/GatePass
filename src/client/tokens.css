@@ -1,0 +1,112 @@
+/* CompleteTech design tokens
+ * Shared light and dark theme tokens for QR Code Toolkit.
+ *
+ * Rules:
+ *   - tokens.css is the single source of truth.
+ *   - The [data-theme="dark"] block overrides the palette for dark mode.
+ *   - Component CSS reads tokens only — no per-component theme branches.
+ *   - If you change a value, change it in BOTH light and dark blocks where
+ *     a dark override exists.
+ *
+ * State machine:
+ *   localStorage('ct-theme') ∈ {'auto','light','dark'}
+ *   If 'auto', resolve via prefers-color-scheme and write
+ *   data-theme='light'|'dark' on <html> at first paint.
+ */
+
+/* Hint UA chrome (form controls, scrollbars) to render dark-aware. */
+html { color-scheme: light dark; }
+
+:root {
+  /* Palette */
+  --navy:        #003A70;
+  --navy-deep:   #020638;
+  --navy-mid:    #073F78;
+  --blue:        #008CFF;
+  --blue-bright: #31A8FF;
+  --gold:        #FDB913;
+  --gold-soft:   #F2B544;
+  --gold-deep:   #B17800;
+  --paper:       #F7FAFE;
+  --paper-deep:  #E8F1FB;
+  --paper-warm:  #F2F7FD;
+  --ink:         #07142F;
+  --ink-mid:     #1D2B46;
+  --ink-light:   #60708A;
+  --rule:        #C9D9EA;
+  --rule-soft:   #E5EEF8;
+  --green-screen:#00FF00; /* Reserved: live-artifact indicators ONLY. */
+
+  /* Soft ink-tinted drop-shadow used by header chrome. Token-driven so dark
+   * mode can flip it to a visible shadow on a dark page. */
+  --shadow-tint: rgba(7, 20, 47, 0.18);
+
+  /* Always-light text color for content sitting on a dark slab (footer,
+   * contact slab, navy strips). Slabs stay dark in BOTH themes. */
+  --slab-text: #F2F7FD;
+
+  /* Typography */
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-body:    'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:    'JetBrains Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* Scale + layout */
+  --col-max:  1280px;
+  --col-text: 760px;
+  --rhythm:   8px;
+
+  /* Motion */
+  --ease-standard: cubic-bezier(.2,.8,.2,1);
+  --dur-fast: 120ms;
+  --dur-base: 220ms;
+}
+
+/* ============================================================
+ * Dark theme.
+ *   - Brand keeps. Gold and chroma-green carry through unchanged.
+ *   - Navy is dual-role: as ACCENT it lifts (link-readable on dark);
+ *     as SLAB (--navy-deep, --navy-mid) it goes DEEPER than the page
+ *     surface so a punctuating slab still reads as a stop, not a card.
+ *   - Paper inverts to deep navy-tinted dark, never pure black.
+ *   - Ink lifts to paper-tinted near-white, never pure white.
+ *   - --gold-deep lifts so it stays legible on dark.
+ *   - --shadow-tint goes darker so drop-shadows remain visible.
+ * ============================================================ */
+:root[data-theme="dark"] {
+  --navy:        #5F8EC9;  /* accent: lifted to read on dark */
+  --navy-deep:   #04081A;  /* slab: deeper than paper */
+  --navy-mid:    #0F1F3D;  /* slab variant */
+  --blue:        #31A8FF;
+  --blue-bright: #5BBBFF;
+  --gold:        #FDB913;  /* unchanged: brand */
+  --gold-soft:   #F2B544;  /* unchanged: brand */
+  --gold-deep:   #E2A437;  /* lifted for dark legibility */
+  --paper:       #0B1628;  /* page surface, deep navy-tinted */
+  --paper-deep:  #152238;  /* lifted card surface */
+  --paper-warm:  #101C32;  /* warm hover surface */
+  --ink:         #EAF1FB;  /* primary text */
+  --ink-mid:     #B8C5D9;  /* body */
+  --ink-light:   #7A8AA3;  /* metadata */
+  --rule:        #27375A;  /* hairline */
+  --rule-soft:   #1A263F;  /* softer hairline */
+  --green-screen:#00FF00;  /* unchanged: reserved live-artifact indicator */
+
+  --shadow-tint: rgba(0, 0, 0, 0.55);
+}
+
+/* Bootstrap variable aliases — keep markup that references --bs-* working
+ * without per-component edits. Aliases are theme-agnostic; they re-resolve
+ * automatically when [data-theme="dark"] flips. */
+:root {
+  --bs-primary:           var(--navy);
+  --bs-primary-dark:      var(--navy-deep);
+  --bs-primary-light:     var(--paper-deep);
+  --bs-secondary:         var(--ink);
+  --bs-secondary-dark:    var(--ink-mid);
+  --bs-font-sans-serif:   var(--font-body);
+  --bs-font-monospace:    var(--font-mono);
+  --bs-body-color:        var(--ink);
+  --bs-body-bg:           var(--paper);
+  --bs-link-color:        var(--navy);
+  --bs-link-hover-color:  var(--gold-deep);
+}

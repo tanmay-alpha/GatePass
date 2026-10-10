@@ -1,0 +1,28 @@
+.local/
+.env
+.env.*
+!.env.example
+
+# Local TLS and private material. Generated certs live under .local/, but keep
+# broad key patterns ignored in case paths change during local setup.
+*.key
+*.pem
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# Dependencies/build output for future app implementation.
+node_modules/
+dist/
+build/
+coverage/
+.next/
+.nuxt/
+.vite/
+
+# Editor and OS noise.
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
