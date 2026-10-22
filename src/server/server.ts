@@ -11,7 +11,7 @@ import { JSDOM } from 'jsdom';
 import { defaultDesignConfig, normalizeDesignConfig } from '../qr/design';
 import { buildPayload, isLandingPageType, payloadSchemas } from '../qr/payloads';
 import { clampSize, renderQr } from '../qr/renderer';
-import type { ContentType, OutputFormat, QrMode, QrRecord } from '../shared/types';
+import type { ContentType, QrMode, QrRecord } from '../shared/types';
 import { YourlsClient } from '../yourls/client';
 import { JsonStore, publicBaseUrl } from './store';
 
@@ -34,10 +34,12 @@ app.use('/uploads', express.static(path.resolve(process.env.UPLOAD_DIR || '.loca
   }
 }));
 
+const outputFormatSchema = z.enum(['png', 'svg', 'pdf', 'eps']);
+
 const qrCustomSchema = z.object({
   data: z.string().min(1),
   size: z.coerce.number().optional().default(300),
-  file: z.enum(['png', 'svg', 'pdf', 'eps']).optional().default('png'),
+  file: outputFormatSchema.optional().default('png'),
   download: z.coerce.boolean().optional().default(false),
   config: z.record(z.string(), z.unknown()).optional().default({})
 });
@@ -191,7 +193,7 @@ app.get('/api/qr-codes/:id/render', optionalAdminAuth, async (req, res, next) =>
     await sendQr(res, {
       data: qr.encodedPayload,
       size: Number(req.query.size || qr.sizePx),
-      file: (req.query.file || 'svg') as OutputFormat,
+      file: outputFormatSchema.parse(req.query.file ?? 'svg'),
       download: false,
       config: qr.designConfig as unknown as Record<string, unknown>
     });
@@ -230,13 +232,31 @@ app.get('/l/:id', async (req, res, next) => {
   res.type('html').send(renderLandingPage(qr));
 });
 
-app.post('/api/landing/:id/feedback', rateLimit('feedback', 30), async (req, res, next) => {
-  const db = await store.all();
-  const qr = db.qrCodes.find((item) => item.id === req.params.id);
-  if (!qr) return next(httpError(404, 'Landing page not found'));
-  db.feedback.unshift({ id: randomUUID(), qrCodeId: qr.id, submission: req.body, createdAt: new Date().toISOString() });
-  await store.save();
-  res.json({ ok: true });
+const feedbackSchema = z.object({
+  name: z.string().trim().max(200).optional().default(''),
+  message: z.string().trim().max(5000).optional().default('')
+}).refine((value) => value.name.length > 0 || value.message.length > 0, { message: 'Feedback must include a name or a message' });
+
+// The landing page form posts application/x-www-form-urlencoded; API clients may post JSON.
+app.post('/api/landing/:id/feedback', rateLimit('feedback', 30), express.urlencoded({ extended: false, limit: '64kb' }), async (req, res, next) => {
+  const fromForm = Boolean(req.is('application/x-www-form-urlencoded'));
+  try {
+    const db = await store.all();
+    const qr = db.qrCodes.find((item) => item.id === req.params.id);
+    if (!qr || !['rating', 'feedback'].includes(qr.contentType)) throw httpError(404, 'Landing page not found');
+    if (!req.body || typeof req.body !== 'object') throw httpError(400, 'Feedback must be sent as a form or JSON body');
+    const parsed = feedbackSchema.safeParse(req.body);
+    if (!parsed.success) throw httpError(400, parsed.error.issues[0]?.message || 'Invalid feedback');
+    db.feedback.unshift({ id: randomUUID(), qrCodeId: qr.id, submission: parsed.data, createdAt: new Date().toISOString() });
+    await store.save();
+    if (fromForm) return res.type('html').send(renderFeedbackResult(qr, true, 'Thanks, your feedback was received.'));
+    res.json({ ok: true });
+  } catch (error) {
+    if (!fromForm) return next(error);
+    const status = typeof error === 'object' && error && 'status' in error ? Number((error as { status: number }).status) : 500;
+    const message = status < 500 && error instanceof Error ? error.message : 'Your feedback could not be saved. Please try again.';
+    res.status(status).type('html').send(renderFeedbackResult(null, false, message));
+  }
 });
 
 if (process.env.NODE_ENV === 'production') {
@@ -412,6 +432,11 @@ ${body}
 </main>
 </body>
 </html>`;
+}
+
+function renderFeedbackResult(qr: QrRecord | null, ok: boolean, message: string): string {
+  const back = qr ? `<p><a href="/l/${escapeAttr(qr.id)}">Back</a></p>` : '';
+  return `<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${ok ? 'Thank you' : 'Feedback not sent'}</title><style>body{font-family:system-ui,sans-serif;max-width:640px;margin:56px auto;padding:0 22px;}</style></head><body><main><h1>${ok ? 'Thank you' : 'Feedback not sent'}</h1><p role="status">${escapeHtml(message)}</p>${back}</main></body></html>`;
 }
 
 function httpError(status: number, message: string): Error & { status: number } {

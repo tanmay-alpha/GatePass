@@ -12,11 +12,19 @@ export interface RenderRequest {
   config?: Partial<DesignConfig>;
 }
 
+export class UnsupportedFormatError extends Error {
+  readonly status = 400;
+  constructor(format: string) {
+    super(`${format.toUpperCase()} export is not supported (disabled in this MVP); use PNG or SVG.`);
+    this.name = 'UnsupportedFormatError';
+  }
+}
+
 export async function renderQr({ data, size, file, config }: RenderRequest): Promise<{ body: Buffer | string; contentType: string; filename: string }> {
   const design = normalizeDesignConfig(config);
   const width = clampSize(size);
   if (file === 'pdf' || file === 'eps') {
-    throw new Error(`${file.toUpperCase()} export is intentionally disabled in this MVP; PNG and SVG are supported.`);
+    throw new UnsupportedFormatError(file);
   }
   if (file === 'svg') {
     return { body: renderStyledSvg(data, width, design), contentType: 'image/svg+xml', filename: 'qr.svg' };
@@ -72,11 +80,13 @@ function renderStyledSvg(data: string, width: number, design: DesignConfig): str
   const unit = width / (count + margin * 2);
   const gradientId = `bodyGradient-${hashString(`${data}:${design.gradientColor1}:${design.gradientColor2}:${design.gradientType}`)}`;
   const fill = design.gradientColor1 && design.gradientColor2 ? `url(#${gradientId})` : design.bodyColor;
+  // userSpaceOnUse makes one gradient span the whole code instead of restarting inside every module.
   const defs = design.gradientColor1 && design.gradientColor2
     ? design.gradientType === 'radial'
-      ? `<radialGradient id="${gradientId}"><stop offset="0%" stop-color="${design.gradientColor1}"/><stop offset="100%" stop-color="${design.gradientColor2}"/></radialGradient>`
-      : `<linearGradient id="${gradientId}" x1="0%" x2="100%" y1="0%" y2="100%"><stop offset="0%" stop-color="${design.gradientColor1}"/><stop offset="100%" stop-color="${design.gradientColor2}"/></linearGradient>`
+      ? `<radialGradient id="${gradientId}" gradientUnits="userSpaceOnUse" cx="${width / 2}" cy="${width / 2}" r="${width / 2}"><stop offset="0%" stop-color="${design.gradientColor1}"/><stop offset="100%" stop-color="${design.gradientColor2}"/></radialGradient>`
+      : `<linearGradient id="${gradientId}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${width}" y2="${width}"><stop offset="0%" stop-color="${design.gradientColor1}"/><stop offset="100%" stop-color="${design.gradientColor2}"/></linearGradient>`
     : '';
+  const eyeFill = (color: string) => (defs && design.gradientOnEyes ? fill : color);
   const parts = [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${width}" width="${width}" height="${width}" role="img" aria-label="QR code">`,
     defs ? `<defs>${defs}</defs>` : '',
@@ -88,9 +98,9 @@ function renderStyledSvg(data: string, width: number, design: DesignConfig): str
       parts.push(drawBodyModule((col + margin) * unit, (row + margin) * unit, unit, fill, design.body));
     }
   }
-  parts.push(drawEye(margin * unit, margin * unit, unit, design.eye1Color, design.eyeBall1Color, design));
-  parts.push(drawEye((count - 7 + margin) * unit, margin * unit, unit, design.eye2Color, design.eyeBall2Color, design));
-  parts.push(drawEye(margin * unit, (count - 7 + margin) * unit, unit, design.eye3Color, design.eyeBall3Color, design));
+  parts.push(drawEye(margin * unit, margin * unit, unit, eyeFill(design.eye1Color), eyeFill(design.eyeBall1Color), design));
+  parts.push(drawEye((count - 7 + margin) * unit, margin * unit, unit, eyeFill(design.eye2Color), eyeFill(design.eyeBall2Color), design));
+  parts.push(drawEye(margin * unit, (count - 7 + margin) * unit, unit, eyeFill(design.eye3Color), eyeFill(design.eyeBall3Color), design));
   parts.push('</svg>');
   return injectLogo(parts.join(''), design);
 }

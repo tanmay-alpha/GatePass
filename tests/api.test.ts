@@ -65,6 +65,73 @@ describe('API', () => {
     expect(detail.body.auditEvents.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('keeps the created audit snapshot intact after later edits', async () => {
+    const created = await request(app).post('/api/qr-codes').send({
+      name: 'Audit', mode: 'dynamic_url', contentType: 'url', contentPayload: { url: 'https://example.com/original' }
+    });
+    expect(created.status).toBe(201);
+    await request(app).patch(`/api/qr-codes/${created.body.id}`).send({ name: 'Renamed', contentPayload: { url: 'https://example.com/first-edit' } });
+    await request(app).patch(`/api/qr-codes/${created.body.id}`).send({ contentPayload: { url: 'https://example.com/second-edit' } });
+
+    const detail = await request(app).get(`/api/qr-codes/${created.body.id}`);
+    const events = detail.body.auditEvents as Array<{ eventType: string; previous: any; next: any }>;
+    const createdEvent = events.find((event) => event.eventType === 'created')!;
+    expect(createdEvent.next.name).toBe('Audit');
+    expect(createdEvent.next.contentPayload.url).toBe('https://example.com/original');
+    const updates = events.filter((event) => event.eventType === 'updated').reverse();
+    expect(updates[0].previous.contentPayload.url).toBe('https://example.com/original');
+    expect(updates[0].next.contentPayload.url).toBe('https://example.com/first-edit');
+    expect(updates[1].previous.contentPayload.url).toBe('https://example.com/first-edit');
+    expect(updates[1].next.contentPayload.url).toBe('https://example.com/second-edit');
+  });
+
+  it('stores landing-page feedback posted by the HTML form (urlencoded)', async () => {
+    const created = await request(app).post('/api/qr-codes').send({
+      name: 'Rate us', mode: 'dynamic_payload', contentType: 'rating', contentPayload: { title: 'Rate us', question: 'How did we do?' }
+    });
+    expect(created.status).toBe(201);
+    const page = await request(app).get(`/l/${created.body.id}`);
+    expect(page.text).toContain(`action="/api/landing/${created.body.id}/feedback"`);
+
+    const form = await request(app).post(`/api/landing/${created.body.id}/feedback`).type('form').send({ name: 'Ada', message: 'Great' });
+    expect(form.status).toBe(200);
+    expect(form.headers['content-type']).toContain('text/html');
+
+    const json = await request(app).post(`/api/landing/${created.body.id}/feedback`).send({ name: 'Grace', message: 'Also great' });
+    expect(json.status).toBe(200);
+    expect(json.body).toEqual({ ok: true });
+
+    const detail = await request(app).get(`/api/qr-codes/${created.body.id}`);
+    const submissions = detail.body.feedback.map((item: { submission: unknown }) => item.submission);
+    expect(submissions).toContainEqual({ name: 'Ada', message: 'Great' });
+    expect(submissions).toContainEqual({ name: 'Grace', message: 'Also great' });
+  });
+
+  it('rejects empty or unparseable feedback instead of reporting success', async () => {
+    const created = await request(app).post('/api/qr-codes').send({
+      name: 'Feedback', mode: 'dynamic_payload', contentType: 'feedback', contentPayload: { title: 'Tell us' }
+    });
+    const empty = await request(app).post(`/api/landing/${created.body.id}/feedback`).type('form').send({ name: '', message: '' });
+    expect(empty.status).toBe(400);
+    const plain = await request(app).post(`/api/landing/${created.body.id}/feedback`).set('Content-Type', 'text/plain').send('hello');
+    expect(plain.status).toBe(400);
+    const detail = await request(app).get(`/api/qr-codes/${created.body.id}`);
+    expect(detail.body.feedback).toEqual([]);
+  });
+
+  it('answers PDF/EPS export requests with a 4xx instead of a 500', async () => {
+    for (const file of ['pdf', 'eps']) {
+      const post = await request(app).post('/api/qr/custom').send({ data: 'https://example.com', file });
+      expect(post.status).toBe(400);
+      expect(post.body.error).toMatch(/not supported/i);
+      const get = await request(app).get('/qr/custom').query({ data: 'https://example.com', file });
+      expect(get.status).toBe(400);
+    }
+    const created = await request(app).post('/api/qr-codes').send({ name: 'Static', contentType: 'url', contentPayload: { url: 'https://example.com' } });
+    expect((await request(app).get(`/api/qr-codes/${created.body.id}/render`).query({ file: 'pdf' })).status).toBe(400);
+    expect((await request(app).get(`/api/qr-codes/${created.body.id}/render`).query({ file: 'gif' })).status).toBe(400);
+  });
+
   it('accepts safe SVG upload and rejects active SVG', async () => {
     const safe = await request(app).post('/api/qr/upload-image').attach('file', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'), { filename: 'logo.svg', contentType: 'image/svg+xml' });
     expect(safe.status).toBe(200);
