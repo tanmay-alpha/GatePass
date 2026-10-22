@@ -63,3 +63,25 @@ describe('design and renderer', () => {
     await expect(renderQr({ data: 'https://example.com', size: 300, file: 'eps', config: defaultDesignConfig })).rejects.toThrow('disabled');
   });
 });
+
+describe('gradient on eyes', () => {
+  const base = { ...defaultDesignConfig, gradientColor1: '#ff0000', gradientColor2: '#0000ff', eye1Color: '#123456', eyeBall1Color: '#abcdef' };
+
+  it('keeps eye colors when gradientOnEyes is off', async () => {
+    const svg = String((await renderQr({ data: 'https://example.com', size: 300, file: 'svg', config: { ...base, gradientOnEyes: false } })).body);
+    expect(svg).toContain('fill="#123456"');
+    expect(svg).toContain('fill="#abcdef"');
+  });
+
+  it('paints eye frames and balls with the body gradient when gradientOnEyes is on', async () => {
+    const render = async (gradientOnEyes: boolean) => String((await renderQr({ data: 'https://example.com', size: 300, file: 'svg', config: { ...base, gradientOnEyes } })).body);
+    const off = await render(false);
+    const on = await render(true);
+    expect(on).not.toContain('fill="#123456"');
+    expect(on).not.toContain('fill="#abcdef"');
+    expect(on).toContain('gradientUnits="userSpaceOnUse"');
+    const gradientFills = (svg: string) => svg.split('fill="url(#').length - 1;
+    // 3 eyes x (frame + ball) switch to the gradient.
+    expect(gradientFills(on)).toBe(gradientFills(off) + 6);
+  });
+});

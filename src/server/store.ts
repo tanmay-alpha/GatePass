@@ -46,7 +46,14 @@ export class JsonStore {
 
   async addAudit(event: Omit<AuditEvent, 'id' | 'createdAt'>): Promise<AuditEvent> {
     const db = await this.all();
-    const saved = { ...event, id: randomUUID(), createdAt: new Date().toISOString() };
+    // Snapshot previous/next so later in-place edits of the live record cannot rewrite history.
+    const saved: AuditEvent = {
+      ...event,
+      previous: structuredClone(event.previous),
+      next: structuredClone(event.next),
+      id: randomUUID(),
+      createdAt: new Date().toISOString()
+    };
     db.auditEvents.unshift(saved);
     await this.save();
     return saved;
