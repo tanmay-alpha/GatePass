@@ -7,7 +7,7 @@
 # The client bundle and the bundled server (dist/server/index.js) are
 # platform-independent JavaScript, so this stage runs on the builder's native
 # platform even when cross-building for another arch.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS build
+FROM --platform=$BUILDPLATFORM node:25-bookworm-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -18,7 +18,7 @@ COPY . .
 RUN npm run build
 
 # ---------------------------------------------------------------- runtime
-FROM node:22-bookworm-slim AS runtime
+FROM node:25-bookworm-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \
