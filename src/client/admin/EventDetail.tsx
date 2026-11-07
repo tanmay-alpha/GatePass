@@ -1,5 +1,5 @@
 import { Calendar, MapPin } from 'lucide-react';
-import { useRef, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { EventSummary } from '../../shared/types';
 import { Stat, ToneBadge, formatDateRange } from '../ui';
 import { AccessPanel } from './AccessPanel';
@@ -8,6 +8,7 @@ import { DesignPanel } from './DesignPanel';
 import { OperationsPanel } from './OperationsPanel';
 import { PassesPanel } from './PassesPanel';
 import { SettingsPanel } from './SettingsPanel';
+import { SetupChecklist, needsSetup, type SetupTarget } from './SetupChecklist';
 
 export const EVENT_TABS = [
   { id: 'operations', label: 'Operations' },
@@ -29,8 +30,44 @@ interface Props {
 }
 
 export function EventDetail({ token, event, tab, onTab, onChanged }: Props) {
+  const tabList = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Partial<Record<EventTab, HTMLButtonElement | null>>>({});
+  const [focusTarget, setFocusTarget] = useState<string | null>(null);
   const unused = Math.max(event.passCount - event.redeemedCount - event.revokedCount, 0);
+
+  /** On narrow screens the tab bar scrolls sideways; keep the active tab visible. */
+  useEffect(() => {
+    const list = tabList.current;
+    const active = tabRefs.current[tab];
+    if (!list || !active || list.scrollWidth <= list.clientWidth) return;
+    const listBox = list.getBoundingClientRect();
+    const box = active.getBoundingClientRect();
+    if (box.left >= listBox.left && box.right <= listBox.right) return;
+    list.scrollLeft += box.left - listBox.left - (listBox.width - box.width) / 2;
+  }, [tab]);
+
+  /** After a checklist action switches tab, scroll to and focus the relevant control once it has rendered. */
+  useEffect(() => {
+    if (!focusTarget) return;
+    let frame = 0;
+    let tries = 0;
+    const attempt = () => {
+      const element = document.querySelector<HTMLElement>(focusTarget);
+      if (element) {
+        element.scrollIntoView({ block: 'center' });
+        element.focus({ preventScroll: true });
+        setFocusTarget(null);
+      } else if (++tries < 60) frame = requestAnimationFrame(attempt);
+      else setFocusTarget(null);
+    };
+    frame = requestAnimationFrame(attempt);
+    return () => cancelAnimationFrame(frame);
+  }, [focusTarget, tab]);
+
+  function go(target: SetupTarget) {
+    onTab(target.tab);
+    setFocusTarget(target.focus);
+  }
 
   /** Roving focus: arrows, Home and End move between tabs and activate them. */
   function onTabKey(e: KeyboardEvent) {
@@ -71,7 +108,9 @@ export function EventDetail({ token, event, tab, onTab, onChanged }: Props) {
         </div>
       </section>
 
-      <div className="tabs" role="tablist" aria-label="Event sections" onKeyDown={onTabKey}>
+      {needsSetup(event) ? <SetupChecklist event={event} onGo={go} /> : null}
+
+      <div ref={tabList} className="tabs" role="tablist" aria-label="Event sections" onKeyDown={onTabKey}>
         {EVENT_TABS.map((item) => (
           <button
             key={item.id}
@@ -95,7 +134,7 @@ export function EventDetail({ token, event, tab, onTab, onChanged }: Props) {
       <section className="panel" role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={-1}>
         {tab === 'operations' && <OperationsPanel token={token} event={event} onChanged={onChanged} />}
         {tab === 'passes' && <PassesPanel token={token} event={event} onChanged={onChanged} />}
-        {tab === 'access' && <AccessPanel token={token} event={event} />}
+        {tab === 'access' && <AccessPanel token={token} event={event} onChanged={onChanged} />}
         {tab === 'design' && <DesignPanel token={token} event={event} onChanged={onChanged} />}
         {tab === 'settings' && <SettingsPanel token={token} event={event} onChanged={onChanged} />}
         {tab === 'audit' && <AuditPanel token={token} event={event} />}

@@ -8,7 +8,7 @@ import { useResource } from './hooks';
 import { useToast } from './toast';
 
 /** Door devices: each gets its own event-scoped key, optionally bound to one gate. */
-export function ScannersSection({ token, event, gates }: { token: string; event: EventSummary; gates: Gate[] }) {
+export function ScannersSection({ token, event, gates, onChanged }: { token: string; event: EventSummary; gates: Gate[]; onChanged: () => Promise<void> }) {
   const scanners = useResource<Scanner[]>(`/api/events/${event.id}/scanners`, token);
   const [label, setLabel] = useState('');
   const [gateId, setGateId] = useState('');
@@ -30,7 +30,7 @@ export function ScannersSection({ token, event, gates }: { token: string; event:
       // The key travels in the URL fragment, which browsers never send to the server.
       setCreated({ label: result.scanner.label, gateName: result.scanner.gateName, setupUrl: `${window.location.origin}/scan#key=${result.key}` });
       setLabel('');
-      await scanners.reload();
+      await Promise.all([scanners.reload(), onChanged()]);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -49,7 +49,7 @@ export function ScannersSection({ token, event, gates }: { token: string; event:
     setError('');
     try {
       await api(`/api/scanners/${scanner.id}/revoke`, token, { method: 'POST' });
-      await scanners.reload();
+      await Promise.all([scanners.reload(), onChanged()]);
       notify(`“${scanner.label}” revoked`);
     } catch (err) {
       setError(errorMessage(err));
@@ -67,7 +67,15 @@ export function ScannersSection({ token, event, gates }: { token: string; event:
         <form className="device-form" onSubmit={create}>
           <label className="grow">
             Device label
-            <input placeholder="e.g. North door phone 1" value={label} onChange={(e) => setLabel(e.target.value)} maxLength={100} required disabled={closed} />
+            <input
+              id="device-label-input"
+              placeholder="e.g. North door phone 1"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              maxLength={100}
+              required
+              disabled={closed}
+            />
           </label>
           <label>
             Gate

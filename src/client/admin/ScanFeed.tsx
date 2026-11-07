@@ -11,15 +11,18 @@ export function ScanFeed({ token, event, onChanged }: { token: string; event: Ev
   const [scans, setScans] = useState<ScanRecord[] | null>(null);
   const [error, setError] = useState('');
   const lastId = useRef(0);
+  /** False until the first poll; that poll returns history, not new scans. */
+  const loaded = useRef(false);
 
   const poll = useCallback(async () => {
     try {
       const fresh = await api<ScanRecord[]>(`/api/events/${event.id}/scans?after=${lastId.current}&limit=100`, token);
-      const hadPrevious = lastId.current > 0;
+      const isNew = loaded.current;
+      loaded.current = true;
       if (fresh.length) lastId.current = fresh[0].id;
       setScans((current) => [...fresh, ...(current ?? [])].slice(0, MAX_ROWS));
-      // New check-ins change the event's counters in the header.
-      if (fresh.length && hadPrevious) void onChanged();
+      // New check-ins change the event's counters in the header and the setup checklist.
+      if (fresh.length && isNew) void onChanged();
       setError('');
     } catch (err) {
       setError(errorMessage(err));

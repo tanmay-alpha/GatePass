@@ -9,15 +9,30 @@ import { ScannersSection } from './ScannersSection';
 import { useToast } from './toast';
 
 /** Where and when passes are accepted: gates, admission policies and the door devices bound to gates. */
-export function AccessPanel({ token, event }: { token: string; event: EventSummary }) {
+export function AccessPanel({ token, event, onChanged }: { token: string; event: EventSummary; onChanged: () => Promise<void> }) {
   const gates = useResource<Gate[]>(`/api/events/${event.id}/gates`, token);
   const policies = useResource<AdmissionPolicy[]>(`/api/events/${event.id}/policies`, token);
 
+  // Gate, policy and device changes also refresh the event, which drives the setup checklist.
+  async function gateCreated() {
+    await Promise.all([gates.reload(), onChanged()]);
+  }
+  async function policiesChanged() {
+    await Promise.all([policies.reload(), onChanged()]);
+  }
+
   return (
     <div className="stack-lg">
-      <GatesSection token={token} event={event} gates={gates.data} error={gates.error} onCreated={gates.reload} />
-      <PoliciesSection token={token} event={event} gates={gates.data ?? []} policies={policies.data} error={policies.error} onChanged={policies.reload} />
-      <ScannersSection token={token} event={event} gates={gates.data ?? []} />
+      <GatesSection token={token} event={event} gates={gates.data} error={gates.error} onCreated={gateCreated} />
+      <PoliciesSection
+        token={token}
+        event={event}
+        gates={gates.data ?? []}
+        policies={policies.data}
+        error={policies.error}
+        onChanged={policiesChanged}
+      />
+      <ScannersSection token={token} event={event} gates={gates.data ?? []} onChanged={onChanged} />
     </div>
   );
 }
@@ -72,7 +87,15 @@ function GatesSection({ token, event, gates, error: loadError, onCreated }: Gate
         <form className="inline-form gate-form" onSubmit={create}>
           <label className="grow">
             <span className="sr-only">Gate name</span>
-            <input placeholder="Gate name, e.g. North entrance" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} required disabled={event.status !== 'active'} />
+            <input
+              id="gate-name-input"
+              placeholder="Gate name, e.g. North entrance"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={100}
+              required
+              disabled={event.status !== 'active'}
+            />
           </label>
           <button className="btn btn-secondary" disabled={busy || event.status !== 'active' || !name.trim()}>
             <Plus size={16} aria-hidden /> {busy ? 'Adding…' : 'Add gate'}

@@ -55,6 +55,20 @@ export function ErrorNote({ message }: { message: string }) {
   ) : null;
 }
 
+/** Inline message under one field; the control points at it with `aria-describedby` and sets `aria-invalid`. */
+export function FieldError({ id, message }: { id: string; message?: string }) {
+  return message ? (
+    <span id={id} className="field-error">
+      {message}
+    </span>
+  ) : null;
+}
+
+/** After a failed submit, moves focus to the first invalid control once React has rendered the messages. */
+export function focusFirstInvalid(form: HTMLFormElement) {
+  requestAnimationFrame(() => form.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus());
+}
+
 export function Stat({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="stat">
