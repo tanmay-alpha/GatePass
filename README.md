@@ -362,6 +362,7 @@ Product names and logos in the built-in logo presets belong to their owners and 
 | [@playwright/test](https://github.com/microsoft/playwright) | Apache-2.0 | End-to-end tests (development only) |
 | [react](https://github.com/facebook/react), react-dom | MIT | Admin and scanner UI (bundled) |
 | [lucide-react](https://github.com/lucide-icons/lucide) | ISC | UI icons (bundled) |
+| [Inter](https://github.com/rsms/inter) via [@fontsource-variable/inter](https://github.com/fontsource/font-files) | OFL-1.1 | UI typeface (bundled, self-hosted) |
 | [barcode-detector](https://github.com/Sec-ant/barcode-detector) | MIT | `BarcodeDetector` ponyfill (bundled) |
 | [zxing-wasm](https://github.com/Sec-ant/zxing-wasm) | MIT | WebAssembly build of ZXing-C++ (bundled) |
 | [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) | Apache-2.0 | Decoder compiled into `zxing-wasm` |

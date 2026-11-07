@@ -2,7 +2,7 @@ import { Ticket } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, IssuedPass } from '../../shared/types';
 import { api, formatDateTime, fromLocalInput } from '../api';
-import { ErrorNote, errorMessage } from '../ui';
+import { ErrorNote, SectionHead, errorMessage } from '../ui';
 
 /** Parses "Name, email" lines; either part may be empty. */
 function parseAttendees(text: string): Array<{ name: string; email: string }> {
@@ -54,12 +54,10 @@ export function IssueForm({ token, event, policies, onIssued }: Props) {
   }
 
   return (
-    <details className="issue-panel" open={event.passCount === 0}>
-      <summary>
-        <Ticket size={16} aria-hidden /> Issue passes
-      </summary>
-      <form className="issue-form" onSubmit={submit}>
-        <div className="segmented" role="radiogroup" aria-label="Who the passes are for">
+    <section className="card" aria-labelledby="issue-title">
+      <SectionHead id="issue-title" title="Issue passes" />
+      <form className="stack" onSubmit={submit}>
+        <div className="segmented segmented-block" role="radiogroup" aria-label="Who the passes are for">
           <button type="button" role="radio" aria-checked={mode === 'named'} className={mode === 'named' ? 'active' : ''} onClick={() => setMode('named')}>
             Named attendees
           </button>
@@ -91,36 +89,32 @@ export function IssueForm({ token, event, policies, onIssued }: Props) {
             </span>
           </label>
         )}
-        <div className="form-grid">
-          <label>
-            Admission policy
-            <select value={policyId} onChange={(e) => setPolicyId(e.target.value)} aria-describedby="issue-policy-hint">
-              <option value="">No policy</option>
-              {policies.map((policy) => (
-                <option key={policy.id} value={policy.id}>
-                  {policy.name}
-                </option>
-              ))}
-            </select>
-            <span id="issue-policy-hint" className="field-hint">
-              {policies.length ? 'No policy: any gate, any time during the event.' : 'Create policies on the Access tab to restrict gates, times or capacity.'}
-            </span>
-          </label>
-          <label>
-            Expires
-            <input type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} aria-describedby="issue-expiry-hint" />
-            <span id="issue-expiry-hint" className="field-hint">
-              Empty: event end ({formatDateTime(event.endsAt)})
-            </span>
-          </label>
-        </div>
+        <label>
+          Admission policy
+          <select value={policyId} onChange={(e) => setPolicyId(e.target.value)} aria-describedby="issue-policy-hint">
+            <option value="">No policy</option>
+            {policies.map((policy) => (
+              <option key={policy.id} value={policy.id}>
+                {policy.name}
+              </option>
+            ))}
+          </select>
+          <span id="issue-policy-hint" className="field-hint">
+            {policies.length ? 'No policy: any gate, any time during the event.' : 'Create policies on the Access tab to restrict gates, times or capacity.'}
+          </span>
+        </label>
+        <label>
+          Expires
+          <input type="datetime-local" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} aria-describedby="issue-expiry-hint" />
+          <span id="issue-expiry-hint" className="field-hint">
+            Empty: event end ({formatDateTime(event.endsAt)})
+          </span>
+        </label>
         <ErrorNote message={error} />
-        <div className="actions">
-          <button className="btn btn-primary" disabled={busy || total < 1}>
-            <Ticket size={16} aria-hidden /> {busy ? 'Issuing…' : total > 0 ? `Issue ${total} pass${total === 1 ? '' : 'es'}` : 'Issue passes'}
-          </button>
-        </div>
+        <button className="btn btn-primary btn-block" disabled={busy || total < 1}>
+          <Ticket size={16} aria-hidden /> {busy ? 'Issuing…' : total > 0 ? `Issue ${total} pass${total === 1 ? '' : 'es'}` : 'Issue passes'}
+        </button>
       </form>
-    </details>
+    </section>
   );
 }

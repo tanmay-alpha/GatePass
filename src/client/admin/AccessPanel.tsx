@@ -1,8 +1,8 @@
 import { Plus } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, Gate } from '../../shared/types';
-import { api, formatDateTime } from '../api';
-import { ErrorNote, SectionHead, TableMessage, errorMessage } from '../ui';
+import { api } from '../api';
+import { ErrorNote, SectionHead, errorMessage } from '../ui';
 import { useResource } from './hooks';
 import { PoliciesSection } from './PoliciesSection';
 import { ScannersSection } from './ScannersSection';
@@ -55,40 +55,33 @@ function GatesSection({ token, event, gates, error: loadError, onCreated }: Gate
   return (
     <section className="card" aria-labelledby="gates-title">
       <SectionHead id="gates-title" title="Gates" description="Physical entrances. Bind scanner devices to a gate and limit policies to specific gates." />
-      <form className="inline-form" onSubmit={create}>
-        <label className="grow">
-          <span className="sr-only">Gate name</span>
-          <input placeholder="Gate name, e.g. North entrance" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} required disabled={event.status !== 'active'} />
-        </label>
-        <button className="btn btn-primary" disabled={busy || event.status !== 'active' || !name.trim()}>
-          <Plus size={16} aria-hidden /> {busy ? 'Adding…' : 'Add gate'}
-        </button>
-      </form>
-      <ErrorNote message={error || loadError} />
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">Gate</th>
-              <th scope="col" className="num">
-                Admitted
-              </th>
-              <th scope="col">Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {gates?.map((gate) => (
-              <tr key={gate.id}>
-                <td>{gate.name}</td>
-                <td className="num">{gate.admittedCount}</td>
-                <td className="small">{formatDateTime(gate.createdAt)}</td>
-              </tr>
+      <div className="gate-row">
+        {gates?.length ? (
+          <ul className="chips" aria-label="Gates">
+            {gates.map((gate) => (
+              <li key={gate.id} className="chip">
+                <span>{gate.name}</span>
+                <span className="chip-count num" title={`${gate.admittedCount} admitted`}>
+                  {gate.admittedCount}
+                  <span className="sr-only"> admitted</span>
+                </span>
+              </li>
             ))}
-            {gates === null && !loadError ? <TableMessage colSpan={3}>Loading gates…</TableMessage> : null}
-            {gates?.length === 0 ? <TableMessage colSpan={3}>No gates yet. Without gates every device scans for the whole venue; add one per entrance to track and restrict entry by gate.</TableMessage> : null}
-          </tbody>
-        </table>
+          </ul>
+        ) : null}
+        <form className="inline-form gate-form" onSubmit={create}>
+          <label className="grow">
+            <span className="sr-only">Gate name</span>
+            <input placeholder="Gate name, e.g. North entrance" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} required disabled={event.status !== 'active'} />
+          </label>
+          <button className="btn btn-secondary" disabled={busy || event.status !== 'active' || !name.trim()}>
+            <Plus size={16} aria-hidden /> {busy ? 'Adding…' : 'Add gate'}
+          </button>
+        </form>
       </div>
+      {gates === null && !loadError ? <p className="muted small" role="status">Loading gates…</p> : null}
+      {gates?.length === 0 ? <p className="muted small">No gates yet. Without gates every device scans for the whole venue; add one per entrance to track and restrict entry by gate.</p> : null}
+      <ErrorNote message={error || loadError} />
     </section>
   );
 }

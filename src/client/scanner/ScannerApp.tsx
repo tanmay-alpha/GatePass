@@ -3,6 +3,7 @@ import type { ScannerSession } from '../../shared/types';
 import { api, ApiError } from '../api';
 import { ErrorNote, errorMessage } from '../ui';
 import { ScannerStation } from './ScannerStation';
+import './scanner.css';
 
 const KEY_STORAGE = 'gatepass.scannerKey';
 

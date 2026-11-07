@@ -1,0 +1,167 @@
+/* ---------------------------------------------------------------------------
+   Scanner (door staff). Phone-first and full-bleed; on wide screens the same
+   layout sits in a 390px device frame. Selectors are scoped to `main.scanner`
+   so they win over the shared styles.css rules regardless of bundle order.
+   --------------------------------------------------------------------------- */
+main.scanner {
+  /* Verdict colours are fixed in both schemes so staff learn one set. Text
+     colours keep at least AA contrast on their background. */
+  --verdict-admit: #22c55e;
+  --verdict-admit-fg: #052e16;
+  --verdict-warn: #f5a524;
+  --verdict-warn-fg: #2a1700;
+  --verdict-deny: #f05252;
+  --verdict-deny-fg: #1f0505;
+  --verdict-error: #5f646b;
+  --verdict-error-fg: #ffffff;
+  --scanner-pad: var(--space-4);
+  --viewfinder-bg: #111316;
+
+  position: relative; display: flex; flex-direction: column; gap: 0;
+  width: 100%; max-width: none; height: 100vh; height: 100dvh; min-height: 0; margin: 0; padding: 0;
+  overflow: hidden; background: var(--bg); color: var(--fg);
+}
+
+/* Sign-in and connecting states: one centred card. */
+main.scanner.scanner-center {
+  justify-content: center; align-items: center; gap: var(--space-4);
+  padding: calc(var(--space-5) + env(safe-area-inset-top)) var(--space-5) calc(var(--space-5) + env(safe-area-inset-bottom));
+}
+main.scanner .login-card { width: 100%; max-width: 360px; border-radius: 12px; }
+main.scanner .login-card h1 { font-size: var(--text-lg); letter-spacing: -0.01em; }
+
+/* Header ------------------------------------------------------------------ */
+main.scanner .scanner-bar {
+  display: grid; gap: 6px; flex-shrink: 0;
+  padding: calc(var(--space-3) + env(safe-area-inset-top)) calc(var(--scanner-pad) + env(safe-area-inset-right)) var(--space-3) calc(var(--scanner-pad) + env(safe-area-inset-left));
+  border-bottom: 1px solid var(--border);
+}
+main.scanner .scanner-bar-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
+main.scanner .scanner-event {
+  margin: 0; min-width: 0; font-size: var(--text-md); font-weight: 650; letter-spacing: -0.01em; line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Full 44px touch targets, pulled into the header's padding so they do not make it taller. */
+main.scanner .scanner-tools { display: flex; gap: 0; flex-shrink: 0; margin: -10px -12px -10px 0; }
+main.scanner .scanner-tools .icon-btn { border-radius: 10px; color: var(--fg); transition: color 120ms, background-color 120ms; }
+main.scanner .scanner-tools .icon-btn[aria-pressed='false'] { color: var(--muted); }
+main.scanner .scanner-tools .icon-btn:hover { background: var(--surface-2); }
+
+main.scanner .scanner-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: var(--text-sm); color: var(--muted); min-width: 0; }
+main.scanner .scanner-device { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
+main.scanner .scanner-device svg, main.scanner .scanner-gate svg { flex-shrink: 0; }
+main.scanner .scanner-gate {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px var(--space-2); line-height: 1.5;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--fg); font-weight: 500;
+}
+main.scanner .scanner-net { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+main.scanner .scanner-net-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); transition: background-color 120ms; }
+main.scanner .scanner-net.is-offline .scanner-net-dot { background: var(--muted); }
+
+/* Scrolling body ---------------------------------------------------------- */
+main.scanner .scanner-body {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: var(--space-4);
+  padding: var(--scanner-pad) calc(var(--scanner-pad) + env(safe-area-inset-right)) calc(var(--scanner-pad) + env(safe-area-inset-bottom)) calc(var(--scanner-pad) + env(safe-area-inset-left));
+}
+
+/* Viewfinder: always dark, it frames a camera image. */
+main.scanner .viewfinder {
+  position: relative; flex-shrink: 0; width: 100%; aspect-ratio: 1;
+  background: var(--viewfinder-bg); border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+}
+main.scanner .viewfinder video { width: 100%; height: 100%; object-fit: cover; display: block; }
+main.scanner .viewfinder-off { display: grid; place-items: center; height: 100%; padding: var(--space-5); text-align: center; color: #8b8f98; font-size: var(--text-sm); }
+main.scanner .reticle { position: absolute; inset: 19%; border: 0; border-radius: 0; pointer-events: none; }
+main.scanner .reticle-corner { position: absolute; width: 44px; height: 44px; border: 2px solid rgb(255 255 255 / 0.92); }
+main.scanner .reticle-tl { top: 0; left: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 12px; }
+main.scanner .reticle-tr { top: 0; right: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 12px; }
+main.scanner .reticle-bl { bottom: 0; left: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 12px; }
+main.scanner .reticle-br { bottom: 0; right: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 12px; }
+main.scanner .viewfinder-caption {
+  position: absolute; left: 0; right: 0; bottom: var(--space-4); margin: 0; padding: 0 var(--space-4);
+  text-align: center; font-size: var(--text-sm); color: rgb(255 255 255 / 0.72); text-shadow: 0 1px 2px rgb(0 0 0 / 0.6); pointer-events: none;
+}
+
+/* Manual entry ------------------------------------------------------------ */
+main.scanner .manual-form { display: flex; gap: var(--space-2); align-items: stretch; }
+main.scanner .manual-form input {
+  min-height: 48px; padding: 0 14px; font-size: 1rem;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  transition: border-color 120ms;
+}
+main.scanner .manual-form input::placeholder { color: var(--muted); }
+main.scanner .manual-form input:focus-visible { border-color: var(--accent); }
+main.scanner .manual-form .btn { min-height: 48px; padding: 0 22px; border-radius: 10px; font-weight: 600; transition: background-color 120ms, opacity 120ms; }
+
+/* Recent scans: full-bleed rows with hairline dividers. */
+main.scanner .recent {
+  display: flex; flex-direction: column;
+  margin: 0 calc(-1 * var(--scanner-pad)); padding-top: var(--space-4); border-top: 1px solid var(--border);
+}
+main.scanner .recent-title {
+  margin: 0 0 var(--space-1); padding: 0 var(--scanner-pad);
+  font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+}
+main.scanner .history { list-style: none; margin: 0; padding: 0; display: block; }
+main.scanner .history-item {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 0 var(--space-3);
+  padding: 10px var(--scanner-pad); background: none; border: 0; border-bottom: 1px solid var(--border); border-radius: 0;
+  font-variant-numeric: tabular-nums;
+}
+main.scanner .history-item:last-child { border-bottom: 0; }
+main.scanner .history-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+main.scanner .history-admit .history-dot { background: var(--ok); }
+main.scanner .history-warn .history-dot { background: var(--warn); }
+main.scanner .history-deny .history-dot { background: var(--bad); }
+main.scanner .history-main { min-width: 0; }
+main.scanner .history-name, main.scanner .history-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+main.scanner .history-name { font-weight: 600; }
+main.scanner .history-detail { font-size: var(--text-xs); color: var(--muted); }
+main.scanner .history-verdict, main.scanner .history-time { font-size: var(--text-sm); color: var(--muted); white-space: nowrap; }
+main.scanner .history-empty { padding: 10px var(--scanner-pad); font-size: var(--text-sm); color: var(--muted); }
+
+/* Verdict overlay: covers the whole scanner, one solid colour per verdict. */
+main.scanner .result {
+  position: absolute; inset: 0; z-index: 5; width: 100%; height: 100%; margin: 0; border: 0; border-radius: inherit;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3);
+  padding: calc(var(--space-6) + env(safe-area-inset-top)) var(--space-5) calc(var(--space-6) + env(safe-area-inset-bottom));
+  font: inherit; text-align: center; cursor: pointer;
+  background: var(--result-bg); color: var(--result-fg);
+}
+main.scanner .result:focus-visible { outline: 3px solid currentColor; outline-offset: -10px; }
+main.scanner .result-admit { --result-bg: var(--verdict-admit); --result-fg: var(--verdict-admit-fg); }
+main.scanner .result-warn { --result-bg: var(--verdict-warn); --result-fg: var(--verdict-warn-fg); }
+main.scanner .result-deny { --result-bg: var(--verdict-deny); --result-fg: var(--verdict-deny-fg); }
+main.scanner .result-error { --result-bg: var(--verdict-error); --result-fg: var(--verdict-error-fg); }
+/* An outlined ring: the glyph's shape reads even where colour does not. */
+main.scanner .result-ring {
+  display: grid; place-items: center; width: 128px; height: 128px; margin-bottom: var(--space-2);
+  border: 3px solid currentColor; border-radius: 50%;
+}
+main.scanner .result .result-icon { width: 64px; height: 64px; padding: 0; border-radius: 0; background: none; color: currentColor; }
+main.scanner .result-title { font-size: 2.5rem; font-weight: 800; line-height: 1.05; letter-spacing: -0.01em; text-transform: uppercase; }
+main.scanner .result-name { font-size: 1.375rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+main.scanner .result-reason { font-size: 1.0625rem; font-weight: 650; }
+main.scanner .result-detail { max-width: 30ch; font-size: 1.0625rem; font-weight: 450; line-height: 1.4; }
+main.scanner .result-next {
+  margin-top: var(--space-6); padding: var(--space-3) var(--space-5);
+  border: 2px solid currentColor; border-radius: 12px; font-size: 1rem; font-weight: 600;
+}
+
+@media (max-width: 380px) {
+  main.scanner { --scanner-pad: var(--space-3); }
+  main.scanner .result-title { font-size: 2.125rem; }
+  main.scanner .result-ring { width: 112px; height: 112px; }
+  main.scanner .result .result-icon { width: 56px; height: 56px; }
+  main.scanner .result-next { margin-top: var(--space-5); }
+}
+
+/* Wide screens: centre the scanner in a phone-sized device frame. */
+@media (min-width: 600px) {
+  main.scanner {
+    width: 390px; height: min(844px, calc(100dvh - 2 * var(--space-5)));
+    margin: max(var(--space-5), calc((100dvh - 844px) / 2)) auto var(--space-5);
+    border: 1px solid var(--border); border-radius: 28px;
+  }
+}

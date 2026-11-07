@@ -1,7 +1,7 @@
 import { Pencil, Plus } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, Gate } from '../../shared/types';
-import { api, formatDateTime, fromLocalInput, toLocalInput } from '../api';
+import { api, formatDateTime, formatTime, fromLocalInput, toLocalInput } from '../api';
 import { Modal } from '../dialog';
 import { CapacityLine, EmptyState, ErrorNote, SectionHead, errorMessage } from '../ui';
 import { useToast } from './toast';
@@ -27,7 +27,7 @@ export function PoliciesSection({ token, event, gates, policies, error, onChange
         title="Admission policies"
         description="Who may enter, where and when. Passes without a policy can enter at any gate while the event runs."
       >
-        <button className="btn btn-primary" onClick={() => setEditing('new')} disabled={event.status !== 'active'}>
+        <button className="btn btn-secondary" onClick={() => setEditing('new')} disabled={event.status !== 'active'}>
           <Plus size={16} aria-hidden /> New policy
         </button>
       </SectionHead>
@@ -37,35 +37,44 @@ export function PoliciesSection({ token, event, gates, policies, error, onChange
         <EmptyState title="No admission policies yet">Create one to give a group of passes its own entry window, gates or capacity, for example “Early entry” or “VIP”.</EmptyState>
       ) : null}
       {policies?.length ? (
-        <ul className="policy-list">
-          {policies.map((policy) => (
-            <li key={policy.id} className="policy-item">
-              <div className="policy-main">
-                <div className="policy-name">{policy.name}</div>
-                <dl className="policy-facts small">
-                  <div>
-                    <dt>Window</dt>
-                    <dd>
-                      {policy.opensAt ? formatDateTime(policy.opensAt) : 'Event start'} – {policy.closesAt ? formatDateTime(policy.closesAt) : 'Event end'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Gates</dt>
-                    <dd>{policy.gateIds.length ? policy.gateIds.map((id) => gateNames.get(id) ?? 'Unknown gate').join(', ') : 'Any gate'}</dd>
-                  </div>
-                  <div>
-                    <dt>Passes</dt>
-                    <dd className="num">{policy.passCount}</dd>
-                  </div>
-                </dl>
-                <CapacityLine admitted={policy.admittedCount} capacity={policy.capacity} />
-              </div>
-              <button className="btn btn-secondary btn-small" onClick={() => setEditing(policy)} aria-label={`Edit policy ${policy.name}`}>
-                <Pencil size={14} aria-hidden /> Edit
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Window</th>
+                <th scope="col">Capacity</th>
+                <th scope="col">Allowed gates</th>
+                <th scope="col" className="num">
+                  Passes
+                </th>
+                <th scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {policies.map((policy) => (
+                <tr key={policy.id}>
+                  <td className="strong">{policy.name}</td>
+                  <td className="num nowrap">
+                    {policy.opensAt ? formatTime(policy.opensAt) : 'Event start'} – {policy.closesAt ? formatTime(policy.closesAt) : 'Event end'}
+                  </td>
+                  <td className="capacity-cell">
+                    <CapacityLine admitted={policy.admittedCount} capacity={policy.capacity} />
+                  </td>
+                  <td>{policy.gateIds.length ? policy.gateIds.map((id) => gateNames.get(id) ?? 'Unknown gate').join(', ') : <span className="muted">Any gate</span>}</td>
+                  <td className="num">{policy.passCount}</td>
+                  <td className="row-actions">
+                    <button className="btn btn-ghost btn-small" onClick={() => setEditing(policy)} aria-label={`Edit policy ${policy.name}`}>
+                      <Pencil size={14} aria-hidden /> Edit
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : null}
       {editing ? (
         <PolicyDialog

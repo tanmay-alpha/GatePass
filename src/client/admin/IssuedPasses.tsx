@@ -1,4 +1,4 @@
-import { Copy, Download, X } from 'lucide-react';
+import { Copy, Download, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { EventSummary, IssuedPass } from '../../shared/types';
 import { renderQrObjectUrl } from '../api';
@@ -30,19 +30,21 @@ export function IssuedPasses({ token, event, passes, policyNames, onClose }: Pro
   }
 
   return (
-    <section className="issued" aria-labelledby="issued-title">
-      <div className="issued-head">
-        <div>
-          <h3 id="issued-title">
+    <section className="card issued" aria-labelledby="issued-title">
+      <div className="section-head">
+        <div className="section-title">
+          <h2 id="issued-title">
             {passes.length} pass{passes.length === 1 ? '' : 'es'} ready
-          </h3>
-          <p className="warning-text">Download or send these now. Codes cannot be shown again; use Reissue if one is lost.</p>
+          </h2>
+          <p className="warning-text small with-icon">
+            <TriangleAlert size={14} aria-hidden /> Download or send these now. Codes cannot be shown again; use Reissue if one is lost.
+          </p>
         </div>
         <div className="actions">
           <button className="btn btn-secondary btn-small" onClick={downloadCsv}>
             <Download size={14} aria-hidden /> CSV of links
           </button>
-          <button className="btn btn-ghost btn-small" onClick={onClose} aria-label="Close issued passes">
+          <button className="btn btn-ghost btn-icon" onClick={onClose} aria-label="Close issued passes" title="Close">
             <X size={16} aria-hidden />
           </button>
         </div>

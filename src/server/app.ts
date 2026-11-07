@@ -199,8 +199,13 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir, 
       res.status(404).type('html').send(renderPassPage(null));
       return;
     }
+    const policy = service.access.admissionPolicy(found.pass.policyId);
+    const admission = {
+      policyName: policy ? policy.name : null,
+      gates: policy ? policy.gates.map((g) => g.name) : []
+    };
     const qr = await renderQr({ data: service.passUrl(req.params.token), size: 320, file: 'svg', config: found.event.design });
-    res.type('html').send(renderPassPage({ ...found, qrSvg: String(qr.body) }));
+    res.type('html').send(renderPassPage({ ...found, admission, qrSvg: String(qr.body) }));
   });
 
   // ------------------------------------------------------------ admin

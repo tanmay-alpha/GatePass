@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { AdminApp } from './admin/AdminApp';
 import { ScannerApp } from './scanner/ScannerApp';
+import '@fontsource-variable/inter';
 import './styles.css';
 
 const container = document.getElementById('root');

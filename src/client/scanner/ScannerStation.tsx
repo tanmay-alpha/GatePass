@@ -1,4 +1,4 @@
-import { Camera, CameraOff, Keyboard, LogOut, MapPin, Volume2, VolumeX } from 'lucide-react';
+import { Camera, CameraOff, LogOut, MapPin, Smartphone, Volume2, VolumeX } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { ScanResult, ScannerSession } from '../../shared/types';
 import { api, ApiError } from '../api';
@@ -6,14 +6,17 @@ import { useConfirm } from '../dialog';
 import { createQrDetector } from '../qr-detector';
 import { ErrorNote, errorMessage } from '../ui';
 import { beep, loadMuted, saveMuted, unlockAudio } from './beep';
-import { VERDICT_HEADLINE, explain, explainFailure, reasonLabel, verdictOf } from './outcome';
-import { ResultOverlay, VERDICT_ICON, type ScanDisplay } from './ResultOverlay';
+import { VERDICT_HEADLINE, explain, explainFailure, reasonLabel, verdictOf, type Verdict } from './outcome';
+import { ResultOverlay, type ScanDisplay } from './ResultOverlay';
 
 /** Ignore the same code for this long so a QR held in frame is not re-submitted every frame. */
 const REPEAT_COOLDOWN_MS = 4000;
 const RESULT_HOLD_MS = 2500;
 const DETECT_INTERVAL_MS = 150;
 const HISTORY_SIZE = 15;
+
+/** Short verdict words for the recent list. */
+const HISTORY_WORD: Record<Verdict, string> = { admit: 'Admit', warn: 'Used', deny: 'Denied', error: 'Not verified' };
 
 interface Props {
   scannerKey: string;
@@ -31,6 +34,7 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
   const [checking, setChecking] = useState(false);
   const [muted, setMuted] = useState(loadMuted);
   const [confirm, dialog] = useConfirm();
+  const online = useOnline();
   const videoRef = useRef<HTMLVideoElement>(null);
   const busy = useRef(false);
   const lastCode = useRef({ value: '', at: 0 });
@@ -164,77 +168,108 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
   return (
     <main className="scanner">
       <header className="scanner-bar">
-        <div className="scanner-id">
-          <div className="scanner-event">{session.event.name}</div>
-          <div className="scanner-device small">
-            <span>{session.scanner.label}</span>
-            <span className="scanner-gate">
-              <MapPin size={14} aria-hidden /> {session.gate?.name ?? 'Any gate'}
-            </span>
+        <div className="scanner-bar-top">
+          <h1 className="scanner-event">{session.event.name}</h1>
+          <div className="scanner-tools">
+            <button className="icon-btn" onClick={toggleMute} aria-pressed={!muted} aria-label="Sound">
+              {muted ? <VolumeX size={18} aria-hidden /> : <Volume2 size={18} aria-hidden />}
+            </button>
+            <button className="icon-btn" onClick={() => setCameraOn((on) => !on)} aria-pressed={cameraOn} aria-label="Camera">
+              {cameraOn ? <Camera size={18} aria-hidden /> : <CameraOff size={18} aria-hidden />}
+            </button>
+            <button className="icon-btn" onClick={() => void signOut()} aria-label="Sign out">
+              <LogOut size={18} aria-hidden />
+            </button>
           </div>
         </div>
-        <div className="scanner-tools">
-          <button className="icon-btn" onClick={toggleMute} aria-pressed={!muted} aria-label="Sound">
-            {muted ? <VolumeX size={20} aria-hidden /> : <Volume2 size={20} aria-hidden />}
-          </button>
-          <button className="icon-btn" onClick={() => setCameraOn((on) => !on)} aria-pressed={cameraOn} aria-label="Camera">
-            {cameraOn ? <Camera size={20} aria-hidden /> : <CameraOff size={20} aria-hidden />}
-          </button>
-          <button className="icon-btn" onClick={() => void signOut()} aria-label="Sign out">
-            <LogOut size={20} aria-hidden />
-          </button>
+        <div className="scanner-meta">
+          <span className="scanner-device">
+            <Smartphone size={14} aria-hidden />
+            <span>{session.scanner.label}</span>
+          </span>
+          <span className="scanner-gate">
+            <MapPin size={14} aria-hidden />
+            {session.gate ? `Gate: ${session.gate.name}` : 'Any gate'}
+          </span>
+          <span className={`scanner-net ${online ? 'is-online' : 'is-offline'}`} role="status">
+            <span className="scanner-net-dot" aria-hidden />
+            {online ? 'Online' : 'Offline'}
+          </span>
         </div>
       </header>
-      {session.event.status !== 'active' ? <p className="error">This event is archived. Every pass will be rejected.</p> : null}
 
-      <div className="viewfinder">
-        {cameraOn ? <video ref={videoRef} playsInline muted aria-label="Camera view" /> : <div className="viewfinder-off">Camera off. Use manual entry below.</div>}
-        {cameraOn && !cameraError ? <div className="reticle" aria-hidden /> : null}
-        {display ? <ResultOverlay display={display} onDismiss={() => setDisplay(null)} /> : null}
-      </div>
-      <p className="sr-only" aria-live="assertive" aria-atomic>
-        {latest ? [VERDICT_HEADLINE[latest.verdict], latest.reason, latest.name, latest.explanation].filter(Boolean).join('. ') : ''}
-      </p>
-      <ErrorNote message={cameraError} />
+      <div className="scanner-body">
+        {session.event.status !== 'active' ? <p className="error">This event is archived. Every pass will be rejected.</p> : null}
 
-      <form className="manual-form" onSubmit={submitManual}>
-        <label className="grow">
-          <span className="sr-only">Pass link or code</span>
-          <input value={manual} onChange={(e) => setManual(e.target.value)} placeholder="Pass link or code" autoComplete="off" autoCapitalize="off" spellCheck={false} enterKeyHint="go" />
-        </label>
-        <button className="btn btn-primary" disabled={checking || !manual.trim()}>
-          <Keyboard size={18} aria-hidden /> {checking ? 'Checking…' : 'Check'}
-        </button>
-      </form>
+        <div className="viewfinder">
+          {cameraOn ? <video ref={videoRef} playsInline muted aria-label="Camera view" /> : <div className="viewfinder-off">Camera off. Use manual entry below.</div>}
+          {cameraOn && !cameraError ? (
+            <>
+              <div className="reticle" aria-hidden>
+                <span className="reticle-corner reticle-tl" />
+                <span className="reticle-corner reticle-tr" />
+                <span className="reticle-corner reticle-bl" />
+                <span className="reticle-corner reticle-br" />
+              </div>
+              <p className="viewfinder-caption">Point at a pass QR code</p>
+            </>
+          ) : null}
+        </div>
+        <p className="sr-only" aria-live="assertive" aria-atomic>
+          {latest ? [VERDICT_HEADLINE[latest.verdict], latest.reason, latest.name, latest.explanation].filter(Boolean).join('. ') : ''}
+        </p>
+        <ErrorNote message={cameraError} />
 
-      <section aria-labelledby="recent-title">
-        <h2 id="recent-title" className="small-heading">
-          Recent on this device
-        </h2>
-        <ul className="history">
-          {history.map((item) => {
-            const Icon = VERDICT_ICON[item.verdict];
-            return (
+        <form className="manual-form" onSubmit={submitManual}>
+          <label className="grow">
+            <span className="sr-only">Pass link or code</span>
+            <input value={manual} onChange={(e) => setManual(e.target.value)} placeholder="Pass link or code" autoComplete="off" autoCapitalize="off" spellCheck={false} enterKeyHint="go" />
+          </label>
+          <button className="btn btn-primary" disabled={checking || !manual.trim()}>
+            {checking ? 'Checking…' : 'Check'}
+          </button>
+        </form>
+
+        <section className="recent" aria-labelledby="recent-title">
+          <h2 id="recent-title" className="recent-title">
+            Recent
+          </h2>
+          <ul className="history">
+            {history.map((item) => (
               <li key={item.id} className={`history-item history-${item.verdict}`}>
-                <Icon className="history-icon" size={20} strokeWidth={3} aria-hidden />
+                <span className="history-dot" aria-hidden />
                 <div className="history-main">
-                  <div className="history-outcome">
-                    {VERDICT_HEADLINE[item.verdict]}
-                    {item.reason ? ` · ${item.reason}` : ''}
-                    {item.name ? <span className="history-name"> · {item.name}</span> : null}
-                  </div>
-                  <div className="muted small">{item.explanation}</div>
+                  <div className="history-name">{item.name ?? 'Unknown code'}</div>
+                  <div className="history-detail">{[item.reason, item.explanation].filter(Boolean).join(' · ')}</div>
                 </div>
-                <time className="muted small num" dateTime={item.at}>
-                  {new Date(item.at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                <span className="history-verdict">{HISTORY_WORD[item.verdict]}</span>
+                <time className="history-time" dateTime={item.at}>
+                  {new Date(item.at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
                 </time>
               </li>
-            );
-          })}
-          {history.length === 0 ? <li className="muted small">No scans yet. Point the camera at a pass QR code.</li> : null}
-        </ul>
-      </section>
+            ))}
+            {history.length === 0 ? <li className="history-empty">No scans yet.</li> : null}
+          </ul>
+        </section>
+      </div>
+
+      {display ? <ResultOverlay display={display} onDismiss={() => setDisplay(null)} /> : null}
       {dialog}
     </main>
   );
+}
+
+/** True while the browser reports a network connection; the server is still the only authority. */
+function useOnline(): boolean {
+  const [online, setOnline] = useState(() => navigator.onLine);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('offline', update);
+    };
+  }, []);
+  return online;
 }

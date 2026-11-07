@@ -1,7 +1,7 @@
+import { Calendar, MapPin } from 'lucide-react';
 import { useRef, type KeyboardEvent } from 'react';
 import type { EventSummary } from '../../shared/types';
-import { formatDateTime } from '../api';
-import { Stat, ToneBadge } from '../ui';
+import { Stat, ToneBadge, formatDateRange } from '../ui';
 import { AccessPanel } from './AccessPanel';
 import { AuditPanel } from './AuditPanel';
 import { DesignPanel } from './DesignPanel';
@@ -45,18 +45,22 @@ export function EventDetail({ token, event, tab, onTab, onChanged }: Props) {
   }
 
   return (
-    <div className="stack">
-      <section className="card event-summary" aria-labelledby="event-title">
+    <div className="stack-lg">
+      <section className="event-summary" aria-labelledby="event-title">
         <div className="event-head">
-          <div>
-            <h1 id="event-title">
-              {event.name} {event.status === 'archived' ? <ToneBadge tone="muted">Archived</ToneBadge> : null}
-            </h1>
-            <p className="muted">
-              {formatDateTime(event.startsAt)} – {formatDateTime(event.endsAt)}
-              {event.venue ? ` · ${event.venue}` : ''}
-            </p>
-          </div>
+          <h1 id="event-title">
+            {event.name} {event.status === 'archived' ? <ToneBadge tone="muted">Archived</ToneBadge> : null}
+          </h1>
+          <p className="event-meta">
+            <span>
+              <Calendar size={15} aria-hidden /> <span className="num">{formatDateRange(event.startsAt, event.endsAt)}</span>
+            </span>
+            {event.venue ? (
+              <span>
+                <MapPin size={15} aria-hidden /> {event.venue}
+              </span>
+            ) : null}
+          </p>
         </div>
         <div className="stats">
           <Stat label="Passes issued" value={event.passCount} />

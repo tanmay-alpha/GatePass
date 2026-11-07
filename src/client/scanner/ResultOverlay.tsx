@@ -12,23 +12,29 @@ export interface ScanDisplay {
   explanation: string;
 }
 
-export const VERDICT_ICON: Record<Verdict, LucideIcon> = {
+const VERDICT_ICON: Record<Verdict, LucideIcon> = {
   admit: Check,
   warn: CircleAlert,
   deny: X,
   error: CircleQuestionMark
 };
 
-/** Colour, icon and headline all differ per verdict, so no single cue has to carry the meaning. */
+/**
+ * Covers the whole scanner. Colour, icon and headline all differ per verdict,
+ * so no single cue has to carry the meaning.
+ */
 export function ResultOverlay({ display, onDismiss }: { display: ScanDisplay; onDismiss: () => void }) {
   const Icon = VERDICT_ICON[display.verdict];
   return (
     <button type="button" className={`result result-${display.verdict}`} onClick={onDismiss} aria-label={`${VERDICT_HEADLINE[display.verdict]}. Tap to dismiss.`}>
-      <Icon className="result-icon" size={96} strokeWidth={3} aria-hidden />
+      <span className="result-ring" aria-hidden>
+        <Icon className="result-icon" size={64} strokeWidth={2.75} />
+      </span>
       <span className="result-title">{VERDICT_HEADLINE[display.verdict]}</span>
-      {display.reason ? <span className="result-reason">{display.reason}</span> : null}
       {display.name ? <span className="result-name">{display.name}</span> : null}
+      {display.reason ? <span className="result-reason">{display.reason}</span> : null}
       <span className="result-detail">{display.explanation}</span>
+      <span className="result-next">Tap to scan next</span>
     </button>
   );
 }

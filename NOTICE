@@ -23,6 +23,8 @@ Third-party components bundled into the client build:
   ZXing-C++ (Apache License 2.0, https://github.com/zxing-cpp/zxing-cpp)
 - react, react-dom (MIT License)
 - lucide-react (ISC License)
+- Inter typeface by Rasmus Andersson, via @fontsource-variable/inter
+  (SIL Open Font License 1.1; font files bundled and served from the app's origin)
 
 Runtime server dependencies (not bundled; installed from npm): express,
 helmet, express-rate-limit, qrcode, zod (all MIT License).

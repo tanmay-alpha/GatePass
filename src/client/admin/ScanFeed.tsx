@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import type { EventSummary, ScanRecord } from '../../shared/types';
 import { api, formatTime } from '../api';
-import { Badge, ErrorNote, TableMessage, errorMessage } from '../ui';
+import { ErrorNote, OutcomeBadge, TableMessage, errorMessage } from '../ui';
 import { LIVE_POLL_MS, usePolling } from './hooks';
 
 const MAX_ROWS = 300;
@@ -29,7 +29,7 @@ export function ScanFeed({ token, event, onChanged }: { token: string; event: Ev
   usePolling(poll, LIVE_POLL_MS);
 
   return (
-    <div className="stack">
+    <div className="stack-sm">
       <ErrorNote message={error} />
       <div className="table-wrap">
         <table>
@@ -45,13 +45,13 @@ export function ScanFeed({ token, event, onChanged }: { token: string; event: Ev
           <tbody>
             {scans?.map((scan) => (
               <tr key={scan.id}>
-                <td className="small num">{formatTime(scan.createdAt)}</td>
+                <td className="num muted">{formatTime(scan.createdAt)}</td>
                 <td>
-                  <Badge value={scan.outcome} />
+                  <OutcomeBadge outcome={scan.outcome} />
                 </td>
-                <td>{scan.passId ? scan.attendeeName || <code>{scan.passId.slice(0, 8)}</code> : <span className="muted">—</span>}</td>
-                <td className="small">{scan.gateName ?? <span className="muted">Any gate</span>}</td>
-                <td className="small">{scan.scannerLabel}</td>
+                <td className="strong">{scan.passId ? scan.attendeeName || <code>{scan.passId.slice(0, 8)}</code> : <span className="muted">—</span>}</td>
+                <td>{scan.gateName ?? <span className="muted">Any gate</span>}</td>
+                <td className="muted">{scan.scannerLabel}</td>
               </tr>
             ))}
             {scans === null && !error ? <TableMessage colSpan={5}>Loading scans…</TableMessage> : null}

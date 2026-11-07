@@ -1,9 +1,9 @@
-import { Ban, RefreshCw, Shuffle } from 'lucide-react';
+import { Ban, RefreshCw, Search, Shuffle } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, IssuedPass, Pass, PassStatus } from '../../shared/types';
-import { api, formatDateTime } from '../api';
+import { api } from '../api';
 import { Modal, useConfirm } from '../dialog';
-import { Badge, ErrorNote, TableMessage, errorMessage } from '../ui';
+import { ErrorNote, PassStatusBadge, TableMessage, errorMessage, formatShortDateTime } from '../ui';
 import { useDebounced, useResource } from './hooks';
 import { IssuedPasses } from './IssuedPasses';
 import { IssueForm } from './IssueForm';
@@ -70,98 +70,119 @@ export function PassesPanel({ token, event, onChanged }: Props) {
 
   return (
     <div className="stack-lg">
-      {event.status === 'active' ? (
-        <IssueForm
-          token={token}
-          event={event}
-          policies={policies.data ?? []}
-          onIssued={async (result) => {
-            setIssued(result);
-            await Promise.all([passes.reload(), policies.reload(), onChanged()]);
-            notify(`${result.length} pass${result.length === 1 ? '' : 'es'} issued`);
-          }}
-        />
-      ) : (
-        <p className="notice">This event is archived; no new passes can be issued. Reopen it in Settings to issue passes.</p>
-      )}
-
       {issued.length > 0 ? <IssuedPasses token={token} event={event} passes={issued} policyNames={policyNames} onClose={() => setIssued([])} /> : null}
 
-      <section className="card stack" aria-label="Passes">
-        <div className="toolbar">
-          <label className="grow">
-            <span className="sr-only">Search passes</span>
-            <input type="search" placeholder="Search name, email or pass ID" value={query} onChange={(e) => setQuery(e.target.value)} />
-          </label>
-          <label>
-            <span className="sr-only">Filter by status</span>
-            <select value={status} onChange={(e) => setStatus(e.target.value as PassStatus | '')}>
-              <option value="">All statuses</option>
-              <option value="active">Active</option>
-              <option value="redeemed">Redeemed</option>
-              <option value="revoked">Revoked</option>
-              <option value="expired">Expired</option>
-            </select>
-          </label>
-        </div>
-        <ErrorNote message={error || passes.error || policies.error} />
+      <div className="passes-layout">
+        {event.status === 'active' ? (
+          <IssueForm
+            token={token}
+            event={event}
+            policies={policies.data ?? []}
+            onIssued={async (result) => {
+              setIssued(result);
+              await Promise.all([passes.reload(), policies.reload(), onChanged()]);
+              notify(`${result.length} pass${result.length === 1 ? '' : 'es'} issued`);
+            }}
+          />
+        ) : (
+          <p className="notice">This event is archived; no new passes can be issued. Reopen it in Settings to issue passes.</p>
+        )}
 
-        <div className="table-wrap">
-          <table aria-busy={passes.loading}>
-            <thead>
-              <tr>
-                <th scope="col">Attendee</th>
-                <th scope="col">Status</th>
-                <th scope="col">Policy</th>
-                <th scope="col">Expires</th>
-                <th scope="col">Checked in</th>
-                <th scope="col">
-                  <span className="sr-only">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {passes.data?.map((pass) => (
-                <tr key={pass.id}>
-                  <td>
-                    <div>{pass.attendeeName || <span className="muted">Unnamed</span>}</div>
-                    <div className="muted small">{pass.attendeeEmail || <code>{pass.id.slice(0, 8)}</code>}</div>
-                  </td>
-                  <td>
-                    <Badge value={pass.status} />
-                  </td>
-                  <td className="small">{pass.policyId ? (policyNames.get(pass.policyId) ?? '…') : <span className="muted">None</span>}</td>
-                  <td className="small">{formatDateTime(pass.expiresAt)}</td>
-                  <td className="small">{formatDateTime(pass.redeemedAt)}</td>
-                  <td className="row-actions">
-                    {pass.status === 'active' ? (
-                      <>
-                        <button className="btn btn-ghost btn-small" onClick={() => setChanging(pass)} disabled={pending === pass.id} aria-label={`Change policy for ${describePass(pass)}`}>
-                          <Shuffle size={14} aria-hidden /> Change policy
-                        </button>
-                        <button className="btn btn-ghost btn-small" onClick={() => void act(pass, 'reissue')} disabled={pending === pass.id} aria-label={`Reissue pass for ${describePass(pass)}`}>
-                          <RefreshCw size={14} aria-hidden /> Reissue
-                        </button>
-                      </>
-                    ) : null}
-                    {pass.status === 'active' || pass.status === 'expired' ? (
-                      <button className="btn btn-ghost btn-small danger" onClick={() => void act(pass, 'revoke')} disabled={pending === pass.id} aria-label={`Revoke pass for ${describePass(pass)}`}>
-                        <Ban size={14} aria-hidden /> {pending === pass.id ? 'Working…' : 'Revoke'}
-                      </button>
-                    ) : null}
-                  </td>
+        <section className="card" aria-label="Passes">
+          <div className="toolbar">
+            <label className="grow search">
+              <span className="sr-only">Search passes</span>
+              <Search size={15} className="search-icon" aria-hidden />
+              <input type="search" placeholder="Search name, email or pass ID" value={query} onChange={(e) => setQuery(e.target.value)} />
+            </label>
+            <label>
+              <span className="sr-only">Filter by status</span>
+              <select value={status} onChange={(e) => setStatus(e.target.value as PassStatus | '')}>
+                <option value="">All statuses</option>
+                <option value="active">Active</option>
+                <option value="redeemed">Redeemed</option>
+                <option value="revoked">Revoked</option>
+                <option value="expired">Expired</option>
+              </select>
+            </label>
+          </div>
+          <ErrorNote message={error || passes.error || policies.error} />
+
+          <div className="table-wrap">
+            <table aria-busy={passes.loading}>
+              <thead>
+                <tr>
+                  <th scope="col">Attendee</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Policy</th>
+                  <th scope="col">Expires</th>
+                  <th scope="col">Checked in</th>
+                  <th scope="col">
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
-              ))}
-              {passes.data === null && !passes.error ? <TableMessage colSpan={6}>Loading passes…</TableMessage> : null}
-              {passes.data?.length === 0 ? (
-                <TableMessage colSpan={6}>
-                  {filtered ? 'No passes match this search or filter.' : event.status === 'active' ? 'No passes yet. Use “Issue passes” above to create the first ones.' : 'No passes were issued for this event.'}
-                </TableMessage>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-      </section>
+              </thead>
+              <tbody>
+                {passes.data?.map((pass) => (
+                  <tr key={pass.id}>
+                    <td>
+                      <div className="strong">{pass.attendeeName || <span className="muted">Unnamed</span>}</div>
+                      <div className="muted small">{pass.attendeeEmail || <code>{pass.id.slice(0, 8)}</code>}</div>
+                    </td>
+                    <td>
+                      <PassStatusBadge status={pass.status} />
+                    </td>
+                    <td>{pass.policyId ? (policyNames.get(pass.policyId) ?? '…') : <span className="muted">None</span>}</td>
+                    <td className="num muted nowrap">{formatShortDateTime(pass.expiresAt)}</td>
+                    <td className="num muted nowrap">{formatShortDateTime(pass.redeemedAt)}</td>
+                    <td className="row-actions">
+                      {pass.status === 'active' ? (
+                        <>
+                          <button
+                            className="btn btn-ghost btn-icon"
+                            onClick={() => setChanging(pass)}
+                            disabled={pending === pass.id}
+                            aria-label={`Change policy for ${describePass(pass)}`}
+                            title="Change policy"
+                          >
+                            <Shuffle size={15} aria-hidden />
+                          </button>
+                          <button
+                            className="btn btn-ghost btn-icon"
+                            onClick={() => void act(pass, 'reissue')}
+                            disabled={pending === pass.id}
+                            aria-label={`Reissue pass for ${describePass(pass)}`}
+                            title="Reissue"
+                          >
+                            <RefreshCw size={15} aria-hidden />
+                          </button>
+                        </>
+                      ) : null}
+                      {pass.status === 'active' || pass.status === 'expired' ? (
+                        <button
+                          className="btn btn-ghost btn-icon danger"
+                          onClick={() => void act(pass, 'revoke')}
+                          disabled={pending === pass.id}
+                          aria-label={`Revoke pass for ${describePass(pass)}`}
+                          title="Revoke"
+                        >
+                          <Ban size={15} aria-hidden />
+                        </button>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+                {passes.data === null && !passes.error ? <TableMessage colSpan={6}>Loading passes…</TableMessage> : null}
+                {passes.data?.length === 0 ? (
+                  <TableMessage colSpan={6}>
+                    {filtered ? 'No passes match this search or filter.' : event.status === 'active' ? 'No passes yet. Use “Issue passes” to create the first ones.' : 'No passes were issued for this event.'}
+                  </TableMessage>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
       {changing ? (
         <ChangePolicyDialog
           token={token}

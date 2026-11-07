@@ -122,4 +122,19 @@ describe('attendee pass page', () => {
     expect(page.text).not.toContain('<img src=x');
     expect(page.text).toContain('&lt;img src=x onerror=alert(1)&gt;');
   });
+
+  it('renders ticket details with admission policy, gates, and short pass reference', async () => {
+    const { event } = await seedEvent(h, 1);
+    const gate = (await h.admin(request(h.app).post(`/api/events/${event.id}/gates`)).send({ name: 'North' }).expect(201)).body;
+    const policy = (await h.admin(request(h.app).post(`/api/events/${event.id}/policies`)).send({ name: 'VIP', gateIds: [gate.id] }).expect(201)).body;
+    const [pass] = (await h.admin(request(h.app).post(`/api/events/${event.id}/passes`)).send({ policyId: policy.id, attendees: [{ name: 'Barbara Liskov' }] }).expect(201)).body;
+
+    const page = await request(h.app).get(`/p/${pass.token}`).expect(200);
+    expect(page.text).toContain('GATEPASS');
+    expect(page.text).toContain('Barbara Liskov');
+    expect(page.text).toContain('VIP · North');
+    expect(page.text).toContain(pass.id.slice(0, 8).toUpperCase());
+    expect(page.text).toContain('Valid — show this code at the entrance.');
+    expect(page.text).toContain('Opening this page does not check you in.');
+  });
 });

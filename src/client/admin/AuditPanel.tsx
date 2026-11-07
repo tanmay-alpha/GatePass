@@ -53,10 +53,10 @@ export function AuditPanel({ token, event }: { token: string; event: EventSummar
           <tbody>
             {audit.data?.map((entry) => (
               <tr key={entry.id}>
-                <td className="small">{formatDateTime(entry.createdAt)}</td>
-                <td>{actionLabel(entry.action)}</td>
-                <td className="small">{describe(entry)}</td>
-                <td className="small">{entry.actor}</td>
+                <td className="num muted nowrap">{formatDateTime(entry.createdAt)}</td>
+                <td className="strong">{actionLabel(entry.action)}</td>
+                <td>{describe(entry)}</td>
+                <td className="muted">{entry.actor}</td>
               </tr>
             ))}
             {audit.data === null && !audit.error ? <TableMessage colSpan={4}>Loading audit log…</TableMessage> : null}
