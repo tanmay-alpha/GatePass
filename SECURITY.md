@@ -8,17 +8,17 @@ Please include the affected route or file, steps to reproduce, and the impact. O
 
 ## Threat model summary
 
-GatePass is meant for one organiser (or one trusted team sharing a token) running a single instance. The full model is in [README.md#security-model](README.md#security-model). In short:
+GatePass is meant for one organiser (or one trusted team sharing a token) running a single instance. The full threat model, with threats, mitigations, tests and this iteration's review findings, is in [docs/threat-model.md](docs/threat-model.md); the user-facing summary is [README.md#security-model](README.md#security-model). In short:
 
 | Asset | Protection |
 | --- | --- |
 | Pass tokens | 256-bit random; only SHA-256 stored; shown once at issue/reissue; reissue rotates the token. |
-| Single-use entry | Redemption inside a `BEGIN IMMEDIATE` transaction plus a primary key on `redemptions.pass_id`; checked under concurrent HTTP requests, a second connection, and 8 worker threads. |
+| Single-use entry and capacity | Redemption inside a `BEGIN IMMEDIATE` transaction plus a primary key on `redemptions.pass_id` and a capacity `CHECK`; checked under concurrent HTTP requests, a second connection, and worker threads with separate connections. |
 | Admin API | Mandatory `ADMIN_TOKEN` (at least 24 chars) bearer auth, compared in constant time; the server will not start without it. |
 | Scanner API | Per-device `gps_` keys, stored as SHA-256 hashes, scoped to one event, individually revocable. |
 | Attendee privacy across events | A pass scanned at another event is reported as `invalid`, with no details. |
 | Server internals | Generic 500 responses; zod validation with 400 responses; strict CSP; `no-store` on API and pass page responses. |
-| Abuse | Per-IP rate limits: 600/min API, 240/min redeem, 60/min pass page, 120/min QR render. |
+| Abuse | Per IP: 600/min on `/api` except scanner routes, 60/min pass page, 120/min QR render. Per scanner device: 60/min session, 240/min redeem. Failed authentication: after 60 failures per IP in 5 minutes, further invalid attempts get 429; valid credentials are not blocked. |
 
 Known gaps, by design:
 

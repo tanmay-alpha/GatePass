@@ -1,6 +1,8 @@
 # GatePass
 
-GatePass issues QR entry passes for events and checks them at the door. Each pass can be redeemed once. Only authenticated scanner devices can redeem it.
+GatePass issues QR entry passes for events and checks them at the door. Each pass can be redeemed once, only through authenticated scanner devices, and only where and when its admission policy allows.
+
+Engineering docs: [architecture](docs/architecture.md) · [threat model](docs/threat-model.md) · [design decisions](docs/decisions/README.md) · [testing and benchmarks](docs/testing.md) · [deployment](docs/deployment.md) · [optional Vercel front](docs/deployment-vercel.md) · [upstream audit](docs/audit.md)
 
 ## The problem
 
@@ -19,9 +21,10 @@ Only features that exist in this repository are listed.
 - **Reissue**: replaces the token of an active pass (for example, when a code is lost or leaked). The pass ID and attendee stay the same, and the old QR code stops working immediately.
 - **Scanner device keys**: each door device gets its own key for one event. The admin UI shows a setup link and QR code in the form `/scan#key=gps_...`. The key is in the URL fragment, which browsers do not send to the server. The scanner page saves the key on the device and removes the fragment from the address bar. Keys can be revoked one at a time; a revoked key is rejected on its next request.
 - **Mobile scanner** at `/scan`: reads codes from the rear camera with [`barcode-detector`](https://github.com/Sec-ant/barcode-detector). It uses the browser's native `BarcodeDetector` when that supports QR codes, and otherwise the ZXing-C++ WebAssembly decoder served from the same origin (no CDN). Codes can also be typed or pasted (a full pass link or a bare token).
-- **Scan outcomes**: `admitted`, `already_redeemed`, `expired`, `revoked`, `invalid`, `event_closed`. A pass from another event is reported as `invalid`.
-- **Live scan feed**: the admin event page polls every 3 seconds for new scans.
-- **Audit log**: admin actions (event created/updated, passes issued, pass revoked/reissued, scanner created/revoked) are stored per event. Every scan attempt is stored separately in the scan history.
+- **Admission policy engine**: organisers define entry **gates** and **admission policies** (an optional entry window, an optional capacity, and the gates it may use). Passes are assigned a policy at issuance or later, until they are used. Scanner devices can be bound to a gate. The server evaluates the policy inside the redeem transaction; capacity is claimed with a conditional `UPDATE` and backed by a `CHECK (admitted_count <= capacity)` constraint, so concurrent scans can never over-admit. Passes without a policy are admitted at any gate during the event window. Design: [ADR 0004](docs/decisions/0004-admission-policy-engine.md).
+- **Scan outcomes**: `admitted`, `already_redeemed`, `expired`, `revoked`, `invalid`, `event_closed`, `too_early`, `too_late`, `wrong_gate`, `capacity_full`. Policy denials carry safe details for door staff (opening/closing time, allowed gate names, policy name and capacity). A pass from another event is reported as `invalid` with no details.
+- **Operations dashboard** (default event tab, refreshes every 5 seconds): scans, admissions and denials; admissions per gate; capacity usage per policy; outcome breakdown; a 15-minute timeline; the live scan feed; and alerts for repeated duplicates (possible shared screenshots), passes scanned at several gates, bursts of invalid codes from one device, and policies near capacity.
+- **Audit log**: admin actions (event, gate and policy changes, passes issued, pass revoked/reissued/moved to another policy, scanner created/revoked) are stored per event. Every scan attempt is stored separately in the scan history.
 - **Per-event pass design**: uses the upstream QR renderer (module shapes, eye styles, colours, gradients, built-in logo presets, templates). Each preview is decoded in the browser with the same detector the scanner uses. The admin UI will not save a design that fails this check.
 - **Attendee pass page** at `/p/<token>`: the URL inside every QR code. It shows the event, the attendee name (if any), the pass status and, while the pass is active, the QR code. Opening it never redeems the pass.
 
@@ -242,12 +245,12 @@ What is protected, and how:
 - **Pass tokens**: 32 bytes from `crypto.randomBytes`, base64url-encoded (43 characters, 256 bits). The database stores only `sha256(token)` (`passes.token_hash`, unique). The raw token is returned only in the issue/reissue response, so a lost pass is reissued, not recovered. Because the token has 256 bits of entropy, a leaked database cannot be brute-forced back into working tokens.
 - **Admin authentication**: every management route requires `Authorization: Bearer <ADMIN_TOKEN>`. The comparison is constant-time: both values are SHA-256 hashed, then compared with `timingSafeEqual`. There is no unauthenticated mode, and the server refuses to start without a token of at least 24 characters.
 - **Scanner keys**: `gps_` followed by a 256-bit random token. Only the SHA-256 hash is stored, and the key is shown once. Each key is tied to one event. It can only read its own session and redeem, and it cannot call admin routes. Revocation takes effect on the next request.
-- **Single-use redemption**: the entire check-and-insert runs inside one `BEGIN IMMEDIATE` transaction, which takes SQLite's write lock before reading. `redemptions.pass_id` is a primary key, and the insert uses `ON CONFLICT (pass_id) DO NOTHING`. Exactly one concurrent scan gets `admitted`. Tests check this with 25 concurrent HTTP requests, with a second database connection, and with 8 worker threads that each open their own connection and are released at the same moment.
-- **No state change on GET**: no GET route redeems, revokes or otherwise changes a pass, event or redemption. Opening or previewing `/p/<token>` (for example, by a link-preview bot) never checks anyone in. The only write on a GET is the scanner's `last_used_at` timestamp, updated when a scanner key authenticates.
+- **Single-use redemption**: the entire check-and-insert runs inside one `BEGIN IMMEDIATE` transaction, which takes SQLite's write lock before reading. `redemptions.pass_id` is a primary key, and the insert uses `ON CONFLICT (pass_id) DO NOTHING`. Exactly one concurrent scan gets `admitted`. Tests check this with 25 concurrent HTTP requests, with a second database connection, and with 8 worker threads that each open their own connection and are released at the same moment. Capacity-limited policies are checked the same way (12 threads racing for 5 places).
+- **No state change on GET**: no GET route writes to the database. Opening or previewing `/p/<token>` (for example, by a link-preview bot) never checks anyone in. Scanner authentication is read-only; the scanner's `last_used_at` is updated by `POST /api/scanner/redeem`.
 - **Cross-event scans**: a valid pass scanned by another event's scanner is reported as `invalid`, with no pass details. It is stored as `wrong_event` so the admin feed can tell it apart from garbage input.
 - **Error handling**: validation errors return 400 with the field path. Every other server error is logged and returned as a generic `500 {"error": "Internal server error"}`, with no SQL, file paths or stack traces.
 - **Headers**: helmet with a strict Content Security Policy (`default-src 'self'`, `script-src 'self' 'wasm-unsafe-eval'` for the WebAssembly decoder, `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'none'`). Also `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` (pass URLs do not leak through `Referer`), and `Permissions-Policy: camera=(self), microphone=(), geolocation=()`. `/api` and `/p` responses are `no-store`. The pass page has its own CSP (`default-src 'none'`, no scripts), sends `X-Robots-Tag: noindex, nofollow`, and HTML-escapes all names.
-- **Rate limits** (per client IP, fixed one-minute window, `express-rate-limit`): 600/min across all `/api` routes, 240/min on `/api/scanner/redeem` (counted before authentication), 60/min on `/p/:token`, and 120/min on `/api/qr/custom`. Behind a reverse proxy, set `TRUST_PROXY` so the real client IP is used.
+- **Rate limits** (fixed windows, in process memory): 600/min per client IP across `/api` except `/api/scanner/*`; per scanner device, keyed after authentication so gates behind one NAT address do not share a bucket: 60/min on `/api/scanner/session` and 240/min on `/api/scanner/redeem`; per IP: 60/min on `/p/:token` and 120/min on `/api/qr/custom`. Failed authentication is counted per IP: after 60 failures in 5 minutes, further invalid admin or scanner credentials get 429 with `Retry-After`, while valid credentials from the same IP keep working. Behind a reverse proxy, set `TRUST_PROXY` to the hop count so the real client IP is used.
 - **Input validation**: every request body and query is parsed with zod strict schemas. Pass designs are normalised: unknown keys are dropped, colours must be `#rrggbb`, and logos must be built-in `#preset` references. User-supplied values cannot inject SVG attributes or point to external images.
 
 What is **not** protected:
@@ -256,7 +259,7 @@ What is **not** protected:
 - Rate-limit counters live in process memory. They reset on restart and are not shared between processes.
 - Anyone who holds a pass link can open the pass page and see the event and the attendee name. The link is the pass; treat it like a ticket.
 - A scanner key stored on a device (`localStorage`) works until it is revoked. A lost device must be revoked from the admin UI.
-- `/api/qr/custom` is public (rate-limited) and renders any text up to 1024 characters.
+- `/api/qr/custom` requires the admin token and is rate-limited; it renders any text up to 1024 characters.
 - TLS is not enforced by the application. Run it behind HTTPS in production.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
@@ -267,75 +270,82 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 npm test           # vitest run
 npm run typecheck  # tsc --noEmit
 npm run smoke:qr   # renders a sample pass QR to .local/smoke/
+npm run build && npm run test:e2e   # Playwright against the built server
+npm run bench      # redemption benchmark
 ```
+
+Details, benchmark method and results, and what has and has not been verified: [docs/testing.md](docs/testing.md).
 
 The tests use file-backed SQLite databases in a temp directory (not `:memory:`), so WAL mode and multiple connections are exercised for real.
 
 | File | Covers |
 | --- | --- |
-| `tests/database.test.ts` | Schema constraints (foreign keys, uniqueness, checks); at most one `redemptions` row per pass; events with passes cannot be deleted; raw tokens never stored; migrations run once and data survives reopen; a corrupt database file fails loudly instead of being replaced; a failed batch issuance rolls back completely; exactly one admission across a second connection and across 8 worker threads with separate connections. |
+| `tests/database.test.ts` | Schema constraints (foreign keys, uniqueness, checks, capacity `CHECK`, cross-event triggers); at most one `redemptions` row per pass; events with passes cannot be deleted; raw tokens never stored; migrations upgrade existing data after a backup, roll back on failure and refuse a newer schema; data survives reopen; a corrupt database file fails loudly instead of being replaced; a failed batch issuance rolls back completely; backup and restore; exactly one admission across a second connection and across 8 worker threads, and exactly 5 of 12 threads admitted for capacity 5. |
 | `tests/events-api.test.ts` | Event create/list/update/archive; UTC normalisation; validation errors; inverted time windows rejected; 404s; named and unnamed issuance with custom expiry and attendee counts; batch limits (1–500); no issuance for archived events; pass filtering and search (LIKE wildcards escaped); idempotent revocation with audit entries; reissue invalidates the old token and keeps the pass ID. |
 | `tests/redemption.test.ts` | Admit once, then `already_redeemed` with the original time; exactly one admission among 25 concurrent HTTP scans; expiry boundary; revoked passes; unknown, malformed and injection-style codes reported as `invalid`; cross-event passes neither admitted nor revealed; `event_closed` after archiving; scanner session and the cursor-based scan feed; pass page never redeems; unknown and malformed tokens get identical 404 pages; HTML escaping on the pass page. |
-| `tests/security-api.test.ts` | Every admin route rejects no token, a wrong token, a scanner key, a token without `Bearer`, and Basic auth; admin token rejected as a scanner key; revoked scanner keys rejected immediately; keys, tokens and hashes never returned from list endpoints; generic 500 responses; health check returns 503 when the database is closed; security and `no-store` headers; malformed JSON and oversized bodies return 4xx; redeem rate limit; QR render endpoint returns 400 for invalid input. |
+| `tests/security-api.test.ts` | Every admin route rejects no token, a wrong token, a scanner key, a token without `Bearer`, and Basic auth; admin token rejected as a scanner key; revoked scanner keys rejected immediately; keys, tokens and hashes never returned from list endpoints; generic 500 responses; health check returns 503 when the database is closed; security and `no-store` headers; malformed JSON and oversized bodies return 4xx; per-device scan limits (625 scans from one IP across 3 devices); failed-authentication throttling that does not lock out valid credentials from the same IP; spoofed `X-Forwarded-For` ignored; `ORIGIN_SECRET` and `TRUST_PROXY` checks; QR render endpoint requires the admin token and returns 400 for invalid input. |
+| `tests/admission.test.ts` | The pure admission rules: decision order, event and policy windows (start inclusive, end exclusive), gate restrictions, capacity. |
+| `tests/policies-api.test.ts` | Gates and admission policies through the API: duplicates, cross-event (IDOR) refusals, moving passes between policies, capacity changes; at the door: wrong gate, timed windows, passes scanned before the event starts rejected, capacity under 30 concurrent scans; operations dashboard aggregates and alerts. |
+| `tests/csv.test.ts` | Attendee CSV export (`src/client/csv.ts`): formula-injection prefixes and RFC 4180 quoting. |
 | `tests/tokens.test.ts` | Token format and uniqueness; deterministic hashing; token extraction from raw codes and pass URLs only; constant-time comparison of different-length secrets. |
 | `tests/qr-core.test.ts` | Retained upstream renderer: templates, logo presets, SVG/PNG output, PDF/EPS disabled, `gradientOnEyes`. |
 | `tests/security.test.ts` | Design input validation: SVG attribute injection and non-preset logos rejected; unknown keys dropped. |
+| `e2e/admission.spec.ts` | Playwright, built server: organiser sets up gates and a capped policy and door staff see admitted, duplicate, wrong gate and full; revoked passes and revoked scanner devices refused; expired passes refused and the pass page says so. |
 
 Shared setup is in `tests/helpers.ts` (temp database, controllable clock, seeded events). The worker-thread redemption fixture is `tests/fixtures/redeem-worker.mjs`.
 
-The server and database behaviour above is covered by automated tests. The client has no unit tests. The UI shown under [Screenshots](#screenshots) was checked in headless Chromium, which has no native `BarcodeDetector`. That check exercised the ZXing WebAssembly fallback through the pass design scan check. Live camera capture has not been tested in automation, because the headless browser had no camera.
+The only client unit tests cover the CSV export. The Playwright suite (`e2e/`) drives the admin and scanner UIs in headless Chromium with manual code entry. The UI shown under [Screenshots](#screenshots) was checked in headless Chromium, which has no native `BarcodeDetector`; that check exercised the ZXing WebAssembly fallback through the pass design scan check. Live camera capture has not been tested in automation, because the headless browser has no camera.
 
 ## Screenshots
 
+![Admin: operations dashboard with alerts, per-gate admissions and policy capacity](docs/screenshots/admin-operations.png)
+
+![Admin: gates, admission policies and gate-bound scanner devices](docs/screenshots/admin-access.png)
+
 ![Admin: passes for an event](docs/screenshots/admin-passes.png)
 
-![Admin: live scan feed](docs/screenshots/admin-live-scans.png)
-
-![Admin: pass design with scan check](docs/screenshots/admin-design.png)
-
-![Scanner: pass admitted](docs/screenshots/scanner-admitted.png)
-
-![Scanner: duplicate scan (already redeemed)](docs/screenshots/scanner-duplicate.png)
-
-![Scanner: invalid code](docs/screenshots/scanner-invalid.png)
+![Scanner: admitted](docs/screenshots/scanner-admitted.png) ![Scanner: already used](docs/screenshots/scanner-duplicate.png) ![Scanner: denied with reason](docs/screenshots/scanner-denied.png)
 
 ![Attendee pass page](docs/screenshots/pass-page.png)
 
 ## Deployment
 
-[docs/deployment.md](docs/deployment.md) covers running GatePass with Docker, building for `linux/arm64`, and hosting on an Oracle Cloud VM behind an HTTPS reverse proxy. Production requirements that come from the code:
+**Recommended: one host.** [docs/deployment.md](docs/deployment.md) runs the Docker image (amd64 or arm64) with Caddy for automatic HTTPS, for example on an Oracle Cloud Always Free Ampere A1 VM. **Optional:** [docs/deployment-vercel.md](docs/deployment-vercel.md) serves the static UI from Vercel and proxies `/api/*` and `/p/*` to that server ([`vercel.mjs`](vercel.mjs)). Vercel cannot host the API itself: SQLite needs a persistent local disk, which Vercel Functions do not have. The reasoning, including Render's costs, is in [ADR 0007](docs/decisions/0007-hosting.md).
 
-- `npm run build` creates `dist/client`. At runtime only `dependencies` are needed, so the image can use `npm ci --omit=dev`.
+Status: the production image was exercised end to end over public HTTPS (temporary tunnel, persistence across restart, backup/restore drill) — see [testing.md](docs/testing.md#deployment-verification-2026-11-07-temporary-public-https). A permanent deployment on an Oracle VM or a Vercel account has **not** been performed: it needs the owner's VM access and Vercel login.
+
+Production requirements that come from the code:
+
+- `npm run build` creates `dist/client` and the bundled server `dist/server/index.js`. At runtime only `dependencies` are needed (`npm ci --omit=dev`).
 - `APP_PUBLIC_URL` must be the public HTTPS origin, because it is printed into every pass QR code. If you change it later, passes that were already issued still scan (the scanner only reads the `/p/<token>` part), but their links open the old origin.
-- `HOST=0.0.0.0` inside a container. Set `TRUST_PROXY` when behind a proxy.
-- Put the `DATABASE_FILE` directory on a persistent volume, and back up the database together with its `-wal` file.
-- Run exactly one instance.
-- Use `GET /api/health` as the health check.
-- The scanner camera needs HTTPS.
+- `HOST=0.0.0.0` inside a container. Set `TRUST_PROXY` to the number of proxy hops (`true` is refused).
+- Put the `DATABASE_FILE` directory on a persistent local volume. Back up with `node dist/server/index.js backup <file>` (consistent `VACUUM INTO` copy, integrity-checked).
+- Run exactly one instance. Use `GET /api/health` as the health check. The scanner camera needs HTTPS.
 
 ## Known limitations
 
 - **Single process, single instance.** SQLite and the in-memory rate limiter assume one Node.js process. Do not run replicas against the same database file.
 - **`node:sqlite` is experimental in Node.js.** Its API may still change between Node releases; `npm start`/`npm run dev` pass `--disable-warning=ExperimentalWarning` to hide the startup warning. The module has no native build step, which is why it was chosen.
-- **Polling, not push.** The admin scan feed polls every 3 seconds.
+- **Polling, not push.** The operations dashboard polls every 5 seconds.
 - **No offline scanning.** Every redemption is a server request, so the scanner needs network access. If the network is down, nobody can be admitted.
 - **No email or SMS delivery.** Passes are distributed by copying links, the CSV, or PNG files.
 - **PNG export lacks SVG styling.** PNGs are rendered by `qrcode` with only the body and background colours. Module shapes, eye styles, gradients and logos appear only in SVG (the pass page and previews).
 - **No multi-user admin.** One shared token, no roles.
-- **Event time window not enforced at the door.** Scans are accepted before `startsAt`. A pass stops working at its own `expiresAt` (by default the event end) or when the event is archived.
+- **Capacity is per policy, not per gate.** Gates restrict where a pass may enter; capacity belongs to the entry group (policy).
 - **No deletion.** Events, passes and scanners can be archived or revoked but not deleted through the API.
-- **Camera scanning not tested in automation.** Only the ZXing WebAssembly decoder was exercised, and only on rendered images. The native `BarcodeDetector` path and live camera capture have not been tested automatically. Test the actual door devices before an event.
+- **Camera scanning not verified on a real phone.** Automated tests use manual entry and the ZXing WebAssembly decoder on rendered images. The native `BarcodeDetector` path and live camera capture have not been tested. Test the actual door devices before an event.
 
 ## Attribution
 
-GatePass is built on [CompleteTech-LLC/qr-code-toolkit](https://github.com/CompleteTech-LLC/qr-code-toolkit) (MIT License, Copyright (c) 2026 CompleteTech LLC). The upstream commits are retained in this repository with their original authors, dates and content. The messages of two upstream commits (the PR #1 and PR #4 commits) were edited to remove co-author trailers, so those commits, and every commit after them, have different hashes from upstream. The following upstream parts are retained:
+GatePass is built on [CompleteTech-LLC/qr-code-toolkit](https://github.com/CompleteTech-LLC/qr-code-toolkit) (MIT License, Copyright (c) 2026 CompleteTech LLC). The upstream commits are retained in this repository with their original authors, dates and content. The messages of two upstream commits (the PR #1 and PR #4 commits) were edited to remove co-author trailers, so those commits, and every commit after them, have different hashes from upstream.
 
-- the QR renderer: `src/qr/renderer.ts`, `src/qr/design.ts`, `src/qr/logo-icons.ts`
-- the design presets and templates
-- the built-in logo icons
-- the theme tokens
+### Original GatePass work vs retained upstream components
 
-Removed from upstream: YOURLS integration, dynamic QR codes and redirects, landing pages, the JSON file store, logo uploads, payload builders and the generic studio UI. [docs/audit.md](docs/audit.md) records the audit behind these decisions.
+| Retained from upstream | Written for GatePass |
+| --- | --- |
+| QR rendering (`src/qr/renderer.ts`), design presets and templates (`src/qr/design.ts`, logo rule narrowed to built-in presets), built-in logo icons (`src/qr/logo-icons.ts`); the original TypeScript/Vite/Express/Vitest tooling | Everything in `src/server` (event model, hashed pass tokens, scanner keys, atomic redemption, admission policy engine, operations queries, SQLite schema and migrations, backups, security middleware), `src/client` (admin dashboard, mobile scanner), `src/shared`, `tests`, `e2e`, `scripts/bench*`, `docs/decisions`, threat model and the Docker/Caddy/Vercel deployment files |
+
+Removed from upstream: YOURLS integration, dynamic QR codes and redirects, landing pages, the JSON file store, logo uploads, payload builders, theme tokens and the generic studio UI. [docs/audit.md](docs/audit.md) records the audit behind these decisions.
 
 Product names and logos in the built-in logo presets belong to their owners and do not imply endorsement.
 
