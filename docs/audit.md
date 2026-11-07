@@ -81,7 +81,8 @@ flowchart LR
 | `POST/GET /api/qr/custom` | **Retain**, add rate limit, map validation errors to 400 | Useful for pass previews and existing regression tests. |
 | QR core tests (`qr-core.test.ts`, design part of `security.test.ts`) | **Retain** | Regression coverage for retained rendering. |
 | Express + zod + Vite + React + Vitest | **Retain** | Target stack. |
-| In-memory rate limiter | **Refactor**: bucket eviction, `TRUST_PROXY` support | Single-process deployment keeps this sufficient. |
+| In-memory rate limiter | **Replace** with `express-rate-limit` (in-memory store), `TRUST_PROXY` support | Maintained library with eviction and standard headers; single process keeps the memory store sufficient. |
+| `nosniff`-only headers | **Replace** with `helmet` + explicit CSP | Maintained defaults (frame, referrer, HSTS, CSP) instead of hand-set headers. |
 | Error handler | **Refactor**: generic 500s, zod → 400 with field path | Stops leaking internals. |
 | `optionalAdminAuth` | **Replace** with mandatory bearer auth (admin token + hashed per-event scanner keys, constant-time compare) | Fail-closed; scanner and admin privileges separated. |
 | `JsonStore` | **Remove** → SQLite (`node:sqlite`) | Needs transactions, constraints and atomic redemption. `node:sqlite` has no native build step, which matters for ARM64. |
@@ -89,7 +90,7 @@ flowchart LR
 | YOURLS client + PHP plugin | **Remove** | Short links are irrelevant to pass verification; plugin is a self-described scaffold. |
 | Logo uploads (`multer`, `dompurify`, `jsdom`) | **Remove** | Source of critical/high advisories; built-in logos cover pass branding. |
 | `payloads.ts`, `sample-content.ts`, generic studio UI | **Remove** | GatePass encodes only pass URLs; keeping 22 unused payload builders is dead weight. |
-| Theme tokens / theme toggle | **Retain** | Working light/dark support, reused by the new UI. |
+| Theme tokens / theme toggle | **Remove**; CSS follows `prefers-color-scheme` | The toggle needed an inline pre-paint script that conflicts with a strict `script-src 'self'` CSP, and the CompleteTech brand tokens and Google Fonts do not apply to GatePass. |
 | Gallery scripts, `public/samples` | **Remove** | Tied to removed landing pages/studio. |
 
 ## Smallest safe approach
@@ -98,8 +99,8 @@ flowchart LR
 2. Model `events`, `passes`, `scanners`, `scans` (every attempt, including failures) and `audit_log`.
 3. Pass token = 32 random bytes (base64url). Only `sha256(token)` is stored (`UNIQUE`). The token is shown once at issuance; lost tokens are rotated (`reissue`), not recovered.
 4. The QR encodes `APP_PUBLIC_URL/p/<token>`. `GET /p/<token>` shows the holder their pass and never changes state. Only an authenticated scanner `POST /api/scanner/redeem` redeems.
-5. Redemption is one conditional `UPDATE … WHERE redeemed_at IS NULL AND revoked_at IS NULL AND expires_at > now` inside a transaction; `changes === 1` decides the winner, so two concurrent scans (or two processes) cannot both succeed.
-6. React UI split by path: `/` admin dashboard, `/scan` mobile scanner using `jsqr` on camera frames, with manual entry fallback.
+5. Redemption runs in one `BEGIN IMMEDIATE` transaction: look up the pass by hash, check event/revocation/expiry, then `INSERT INTO redemptions … ON CONFLICT (pass_id) DO NOTHING`. The primary key on `redemptions.pass_id` makes a second redemption impossible even across connections; `changes === 1` decides the winner.
+6. React UI split by path: `/` admin dashboard, `/scan` mobile scanner. Camera decoding uses [`barcode-detector`](https://github.com/Sec-ant/barcode-detector) (MIT): the native `BarcodeDetector` where available, otherwise ZXing-C++ compiled to WebAssembly, self-hosted. `jsQR` was considered and rejected as unmaintained. Manual entry is the fallback.
 
 ## Implementation plan
 

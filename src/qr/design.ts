@@ -340,13 +340,17 @@ export const templates: Array<{ name: string; config: DesignConfig }> = [
 ];
 
 export function normalizeDesignConfig(input: Partial<DesignConfig> = {}): DesignConfig {
-  const merged = { ...defaultDesignConfig, ...input };
+  // Copy only known keys so arbitrary client fields are never persisted.
+  const merged = { ...defaultDesignConfig };
+  for (const key of Object.keys(defaultDesignConfig) as Array<keyof DesignConfig>) {
+    if (input[key] !== undefined) (merged as Record<string, unknown>)[key] = input[key];
+  }
   for (const key of ['bgColor', 'bodyColor', 'eye1Color', 'eye2Color', 'eye3Color', 'eyeBall1Color', 'eyeBall2Color', 'eyeBall3Color', 'gradientColor1', 'gradientColor2'] as const) {
     const color = merged[key];
-    if (color && (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color))) throw new Error('Colors must be six-digit hex values');
+    if (color && (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color))) throw new DesignError('Colors must be six-digit hex values');
   }
-  if (merged.logo && (typeof merged.logo !== 'string' || !/^(#[a-z0-9-]+|\/uploads\/[a-z0-9-]+\.(png|jpg|gif|svg))$/i.test(merged.logo))) {
-    throw new Error('Choose a built-in logo or an uploaded image');
+  if (merged.logo && (typeof merged.logo !== 'string' || !/^#[a-z0-9-]+$/i.test(merged.logo))) {
+    throw new DesignError('Choose a built-in logo');
   }
   return {
     ...merged,
@@ -354,6 +358,12 @@ export function normalizeDesignConfig(input: Partial<DesignConfig> = {}): Design
     eye: eyeFrames.includes(merged.eye as never) ? merged.eye : defaultDesignConfig.eye,
     eyeBall: eyeBalls.includes(merged.eyeBall as never) ? merged.eyeBall : defaultDesignConfig.eyeBall,
     gradientType: merged.gradientType === 'radial' ? 'radial' : 'linear',
+    gradientOnEyes: merged.gradientOnEyes === true,
     logoMode: merged.logoMode === 'clean' ? 'clean' : 'default'
   };
+}
+
+/** Invalid user-supplied design input; HTTP layer maps it to 400. */
+export class DesignError extends Error {
+  readonly status = 400;
 }
