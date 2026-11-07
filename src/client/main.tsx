@@ -1,32 +1,14 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './App';
-import { mountThemeToggle } from './theme-toggle';
+import { AdminApp } from './admin/AdminApp';
+import { ScannerApp } from './scanner/ScannerApp';
 import './styles.css';
 
 const container = document.getElementById('root');
-if (!container) {
-  throw new Error('Root element #root is missing from index.html');
-}
+if (!container) throw new Error('Root element #root is missing from index.html');
 
-createRoot(container).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+// Two independent apps share one bundle: /scan for door staff, everything else for admins.
+const isScanner = window.location.pathname.startsWith('/scan');
+document.title = isScanner ? 'GatePass Scanner' : 'GatePass Admin';
 
-// Mount the theme toggle into the .theme-strip rendered by App.tsx.
-// Use rAF so React has a chance to commit the DOM first; then poll once
-// more on the next frame in case StrictMode double-invocation hasn't
-// finalized. Guarded so a missing strip just no-ops.
-requestAnimationFrame(() => {
-  const strip = document.querySelector<HTMLElement>('.theme-strip');
-  if (strip) {
-    mountThemeToggle(strip);
-  } else {
-    requestAnimationFrame(() => {
-      const retry = document.querySelector<HTMLElement>('.theme-strip');
-      if (retry) mountThemeToggle(retry);
-    });
-  }
-});
+createRoot(container).render(<React.StrictMode>{isScanner ? <ScannerApp /> : <AdminApp />}</React.StrictMode>);
