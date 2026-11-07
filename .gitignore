@@ -26,3 +26,5 @@ coverage/
 Thumbs.db
 .vscode/
 *.swp
+test-results/
+playwright-report/

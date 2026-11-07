@@ -36,7 +36,7 @@ Camera scanning on `/scan` needs a secure context: HTTPS, or `http://localhost` 
 
 ## Oracle Cloud ARM64 (Ampere A1) with Docker
 
-The image is built from `node:22-bookworm-slim`, which is published for `linux/arm64`, so building directly on the VM produces a native arm64 image. The runtime has no native addons apart from esbuild (used by `tsx`), which `npm ci` installs for the target architecture.
+The image is built from `node:22-bookworm-slim`, which is published for `linux/arm64`, so building directly on the VM produces a native arm64 image. The runtime image contains only the prebuilt `dist/` output (client and bundled server) and production dependencies; there are no native addons.
 
 What you end up with:
 
@@ -333,7 +333,7 @@ Group=gatepass
 WorkingDirectory=/opt/gatepass
 EnvironmentFile=/etc/gatepass/gatepass.env
 Environment=NODE_ENV=production
-ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning --import tsx src/server/index.ts
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning dist/server/index.js
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15
@@ -377,7 +377,9 @@ curl -fsS http://127.0.0.1:3000/api/health
 systemd-analyze security gatepass   # review the remaining exposure
 ```
 
-`ProtectSystem=strict` leaves only `/var/lib/gatepass` and the private `/tmp` (used by tsx's compile cache) writable. If you move `DATABASE_FILE`, add its directory to `ReadWritePaths=`.
+`ProtectSystem=strict` leaves only `/var/lib/gatepass` and the private `/tmp` writable. If you move `DATABASE_FILE`, add its directory to `ReadWritePaths=`.
+
+`npm run build` bundles the server into `dist/server/index.js`, so production runs plain JavaScript with no TypeScript transpiler at runtime. The QR render endpoint `/api/qr/custom` requires the admin token; it is no longer public.
 
 ### Reverse proxy on the host
 

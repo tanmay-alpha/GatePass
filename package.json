@@ -5,11 +5,14 @@
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build",
-    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --import tsx src/server/index.ts",
+    "build": "tsc --noEmit && vite build && npm run build:server",
+    "build:server": "vite build --ssr src/server/index.ts --outDir dist/server --emptyOutDir",
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning dist/server/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "smoke:qr": "tsx scripts/qr-smoke.ts"
+    "test:e2e": "playwright test",
+    "smoke:qr": "tsx scripts/qr-smoke.ts",
+    "bench": "tsx --disable-warning=ExperimentalWarning scripts/bench.ts"
   },
   "license": "MIT",
   "type": "module",
@@ -22,10 +25,10 @@
     "express-rate-limit": "^8.7.3",
     "helmet": "^8.3.0",
     "qrcode": "^1.5.4",
-    "tsx": "^4.21.0",
     "zod": "^4.6.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@types/express": "^5.0.6",
     "@types/node": "^25.6.0",
     "@types/qrcode": "^1.5.6",
@@ -38,6 +41,7 @@
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "supertest": "^7.2.2",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.11",
     "vitest": "^4.1.5",
