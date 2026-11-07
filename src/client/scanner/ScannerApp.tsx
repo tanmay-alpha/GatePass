@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ScannerSession } from '../../shared/types';
-import { api, ApiError } from '../api';
+import { api, ApiError, WAKING_MESSAGE } from '../api';
 import { ErrorNote, errorMessage } from '../ui';
 import { ScannerStation } from './ScannerStation';
 import './scanner.css';
 
 const KEY_STORAGE = 'gatepass.scannerKey';
+/** Long enough for the free demo backend to wake from sleep; then offer a retry. */
+const SESSION_TIMEOUT_MS = 60_000;
 
 /** Reads a key from `#key=...` (setup link) once, then removes it from the address bar and history. */
 function takeKeyFromFragment(): string | null {
@@ -23,6 +25,7 @@ export function ScannerApp() {
   });
   const [session, setSession] = useState<ScannerSession | null>(null);
   const [error, setError] = useState('');
+  const [slow, setSlow] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
   const signOut = useCallback(() => {
@@ -33,15 +36,27 @@ export function ScannerApp() {
 
   useEffect(() => {
     if (!key) return;
+    let live = true;
     setError('');
-    api<ScannerSession>('/api/scanner/session', key)
-      .then(setSession)
+    setSlow(false);
+    api<ScannerSession>('/api/scanner/session', key, { timeoutMs: SESSION_TIMEOUT_MS, onSlow: () => live && setSlow(true) })
+      .then((value) => {
+        if (live) setSession(value);
+      })
       .catch((err) => {
+        if (!live) return;
         if (err instanceof ApiError && err.status === 401) {
           signOut();
           setError('This scanner key is not valid or has been revoked. Ask the organiser for a new setup link.');
-        } else setError(`Could not reach the server: ${errorMessage(err)}`);
+        } else if (err instanceof ApiError && err.status === 0) setError(err.message);
+        else setError(`Could not reach the server: ${errorMessage(err)}`);
+      })
+      .finally(() => {
+        if (live) setSlow(false);
       });
+    return () => {
+      live = false;
+    };
   }, [key, signOut, attempt]);
 
   const onUnauthorized = useCallback(() => {
@@ -72,7 +87,7 @@ export function ScannerApp() {
           </div>
         ) : (
           <p className="muted" role="status">
-            Connecting…
+            {slow ? WAKING_MESSAGE : 'Connecting…'}
           </p>
         )}
       </main>

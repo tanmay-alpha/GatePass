@@ -1,8 +1,9 @@
 import { CalendarPlus, LogOut, Plus, ScanLine } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { EventSummary } from '../../shared/types';
-import { api, ApiError } from '../api';
+import { api, ApiError, WAKING_MESSAGE } from '../api';
 import { EmptyState, ErrorNote, SectionHead, ToneBadge, errorMessage, formatDate } from '../ui';
+import { DemoBanner } from './DemoBanner';
 import { EVENT_TABS, EventDetail, type EventTab } from './EventDetail';
 import { EventForm } from './EventForm';
 import { ToastProvider } from './toast';
@@ -33,27 +34,36 @@ export function AdminApp() {
   );
 }
 
+/** The free demo backend can take most of a minute to wake from sleep. */
+const SIGN_IN_TIMEOUT_MS = 70_000;
+
 function AdminLogin({ onSignIn }: { onSignIn: (token: string) => void }) {
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [slow, setSlow] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
+    setSlow(false);
     setError('');
     try {
-      await api('/api/admin/session', value.trim());
+      await api('/api/admin/session', value.trim(), { timeoutMs: SIGN_IN_TIMEOUT_MS, onSlow: () => setSlow(true) });
       onSignIn(value.trim());
     } catch (err) {
-      setError(err instanceof ApiError && err.status === 401 ? 'That admin token is not valid.' : errorMessage(err));
+      if (err instanceof ApiError && err.status === 401) setError('That admin token is not valid.');
+      else if (err instanceof ApiError && err.status === 429) setError('Too many failed attempts. Wait a few minutes and try again.');
+      else setError(errorMessage(err));
     } finally {
       setBusy(false);
+      setSlow(false);
     }
   }
 
   return (
     <main className="login">
+      <DemoBanner />
       <form className="card login-card" onSubmit={submit}>
         <div className="login-head">
           <span className="brand">GatePass</span>
@@ -70,6 +80,11 @@ function AdminLogin({ onSignIn }: { onSignIn: (token: string) => void }) {
         <button className="btn btn-primary btn-block" disabled={busy || !value.trim()}>
           {busy ? 'Checking…' : 'Sign in'}
         </button>
+        {busy && slow ? (
+          <p className="muted small" role="status">
+            {WAKING_MESSAGE}
+          </p>
+        ) : null}
         <p className="muted small login-foot">
           Door staff: open <a href="/scan">the scanner</a> instead.
         </p>
@@ -136,14 +151,32 @@ function Dashboard({ token, onSignOut }: { token: string; onSignOut: () => void 
           </button>
         </nav>
       </header>
+      <DemoBanner />
       <div className="layout">
         <aside className="sidebar" aria-label="Events">
           <div className="sidebar-head">
             <h2 className="label">Events</h2>
-            <button className="btn btn-ghost btn-icon" onClick={() => setCreating(true)} aria-label="New event" title="New event">
+            <button className="btn btn-ghost btn-icon sidebar-new" onClick={() => setCreating(true)} aria-label="New event" title="New event">
               <Plus size={16} aria-hidden />
+              <span className="sidebar-new-text" aria-hidden>
+                New event
+              </span>
             </button>
           </div>
+          {events?.length ? (
+            /* Narrow screens show this picker instead of the list. */
+            <label className="event-select">
+              <span className="sr-only">Event</span>
+              <select value={creating ? '' : (selected?.id ?? '')} onChange={(e) => e.target.value && navigate(e.target.value)}>
+                {creating || !selected ? <option value="">{creating ? 'New event' : 'Choose an event'}</option> : null}
+                {events.map((event) => (
+                  <option key={event.id} value={event.id}>
+                    {event.status === 'archived' ? `${event.name} (archived)` : event.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <ErrorNote message={error} />
           {events === null && !error ? <p className="muted small sidebar-note" role="status">Loading events…</p> : null}
           {events?.length === 0 ? <p className="muted small sidebar-note">No events yet.</p> : null}
@@ -176,7 +209,7 @@ function Dashboard({ token, onSignOut }: { token: string; onSignOut: () => void 
                 onCancel={() => setCreating(false)}
                 onSaved={async (event) => {
                   await loadEvents();
-                  navigate(event.id, 'passes');
+                  navigate(event.id);
                 }}
               />
             </section>

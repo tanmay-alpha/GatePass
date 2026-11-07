@@ -31,32 +31,44 @@ main.scanner .login-card { width: 100%; max-width: 360px; border-radius: 12px; }
 main.scanner .login-card h1 { font-size: var(--text-lg); letter-spacing: -0.01em; }
 
 /* Header ------------------------------------------------------------------ */
+/* The event name gets its own line; device, gate and network sit below it with the icon buttons right-aligned. */
 main.scanner .scanner-bar {
-  display: grid; gap: 6px; flex-shrink: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'title title' 'meta tools';
+  align-items: center; gap: 6px var(--space-2); flex-shrink: 0;
   padding: calc(var(--space-3) + env(safe-area-inset-top)) calc(var(--scanner-pad) + env(safe-area-inset-right)) var(--space-3) calc(var(--scanner-pad) + env(safe-area-inset-left));
   border-bottom: 1px solid var(--border);
 }
-main.scanner .scanner-bar-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
 main.scanner .scanner-event {
-  margin: 0; min-width: 0; font-size: var(--text-md); font-weight: 650; letter-spacing: -0.01em; line-height: 1.3;
+  grid-area: title; margin: 0; min-width: 0; font-size: var(--text-md); font-weight: 650; letter-spacing: -0.01em; line-height: 1.3;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* Full 44px touch targets, pulled into the header's padding so they do not make it taller. */
-main.scanner .scanner-tools { display: flex; gap: 0; flex-shrink: 0; margin: -10px -12px -10px 0; }
+main.scanner .scanner-tools { grid-area: tools; justify-self: end; display: flex; gap: 0; flex-shrink: 0; margin: -10px -12px -10px 0; }
 main.scanner .scanner-tools .icon-btn { border-radius: 10px; color: var(--fg); transition: color 120ms, background-color 120ms; }
 main.scanner .scanner-tools .icon-btn[aria-pressed='false'] { color: var(--muted); }
 main.scanner .scanner-tools .icon-btn:hover { background: var(--surface-2); }
 
-main.scanner .scanner-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: var(--text-sm); color: var(--muted); min-width: 0; }
+main.scanner .scanner-meta { grid-area: meta; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: var(--text-sm); color: var(--muted); min-width: 0; }
 main.scanner .scanner-device { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
+main.scanner .scanner-device > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 main.scanner .scanner-device svg, main.scanner .scanner-gate svg { flex-shrink: 0; }
 main.scanner .scanner-gate {
   display: inline-flex; align-items: center; gap: 5px; padding: 1px var(--space-2); line-height: 1.5;
   border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--fg); font-weight: 500;
 }
-main.scanner .scanner-net { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+main.scanner .scanner-net { display: inline-flex; align-items: center; gap: 6px; }
 main.scanner .scanner-net-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); transition: background-color 120ms; }
-main.scanner .scanner-net.is-offline .scanner-net-dot { background: var(--muted); }
+main.scanner .scanner-net.is-offline { color: var(--fg); font-weight: 600; }
+main.scanner .scanner-net.is-offline .scanner-net-dot { background: var(--bad); }
+
+/* Persistent while offline: no pass can be verified, so staff must not admit. */
+main.scanner .scanner-offline {
+  display: flex; align-items: flex-start; gap: var(--space-2); flex-shrink: 0; margin: 0;
+  padding: var(--space-3) calc(var(--scanner-pad) + env(safe-area-inset-right)) var(--space-3) calc(var(--scanner-pad) + env(safe-area-inset-left));
+  background: var(--bad-bg); color: var(--bad); border-bottom: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
+  font-size: var(--text-sm); font-weight: 600; line-height: 1.4;
+}
+main.scanner .scanner-offline svg { flex-shrink: 0; margin-top: 1px; }
 
 /* Scrolling body ---------------------------------------------------------- */
 main.scanner .scanner-body {
@@ -83,6 +95,18 @@ main.scanner .viewfinder-caption {
   text-align: center; font-size: var(--text-sm); color: rgb(255 255 255 / 0.72); text-shadow: 0 1px 2px rgb(0 0 0 / 0.6); pointer-events: none;
 }
 
+/* Slow check: a neutral wash over the viewfinder, deliberately not a verdict colour. */
+main.scanner .viewfinder-pending {
+  position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: var(--space-3);
+  padding: var(--space-5); text-align: center; background: rgb(17 19 22 / 0.78); color: #fff;
+  font-size: var(--text-md); font-weight: 600;
+}
+main.scanner .viewfinder-pending svg { animation: scanner-spin 900ms linear infinite; }
+@keyframes scanner-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  main.scanner .viewfinder-pending svg { animation: none; }
+}
+
 /* Manual entry ------------------------------------------------------------ */
 main.scanner .manual-form { display: flex; gap: var(--space-2); align-items: stretch; }
 main.scanner .manual-form input {
@@ -93,6 +117,8 @@ main.scanner .manual-form input {
 main.scanner .manual-form input::placeholder { color: var(--muted); }
 main.scanner .manual-form input:focus-visible { border-color: var(--accent); }
 main.scanner .manual-form .btn { min-height: 48px; padding: 0 22px; border-radius: 10px; font-weight: 600; transition: background-color 120ms, opacity 120ms; }
+/* "Checking… slow connection" wraps onto two short lines instead of squeezing the input. */
+main.scanner .manual-form .btn.is-slow { max-width: 9.5rem; padding: 4px 14px; white-space: normal; line-height: 1.2; font-size: var(--text-sm); }
 
 /* Recent scans: full-bleed rows with hairline dividers. */
 main.scanner .recent {

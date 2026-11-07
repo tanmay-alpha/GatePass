@@ -1,4 +1,4 @@
-import { Camera, CameraOff, LogOut, MapPin, Smartphone, Volume2, VolumeX } from 'lucide-react';
+import { Camera, CameraOff, LoaderCircle, LogOut, MapPin, Smartphone, Volume2, VolumeX, WifiOff } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { ScanResult, ScannerSession } from '../../shared/types';
 import { api, ApiError } from '../api';
@@ -14,6 +14,12 @@ const REPEAT_COOLDOWN_MS = 4000;
 const RESULT_HOLD_MS = 2500;
 const DETECT_INTERVAL_MS = 150;
 const HISTORY_SIZE = 15;
+/** A door cannot wait on a hung request: give up and show "Not verified". */
+const REDEEM_TIMEOUT_MS = 12_000;
+/** After this long a pending check is shown as a slow connection. */
+const SLOW_CHECK_MS = 1500;
+const OFFLINE_MESSAGE = 'Offline — passes cannot be verified. Do not admit until the connection returns.';
+const SLOW_MESSAGE = 'Checking… slow connection';
 
 /** Short verdict words for the recent list. */
 const HISTORY_WORD: Record<Verdict, string> = { admit: 'Admit', warn: 'Used', deny: 'Denied', error: 'Not verified' };
@@ -32,6 +38,7 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
   const [history, setHistory] = useState<ScanDisplay[]>([]);
   const [manual, setManual] = useState('');
   const [checking, setChecking] = useState(false);
+  const [slow, setSlow] = useState(false);
   const [muted, setMuted] = useState(loadMuted);
   const [confirm, dialog] = useConfirm();
   const online = useOnline();
@@ -63,11 +70,18 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
 
   const submit = useCallback(
     async (code: string) => {
+      // One request at a time: a scan is never sent twice while its result is pending.
       if (busy.current) return;
       busy.current = true;
       setChecking(true);
+      setSlow(false);
       try {
-        const result = await api<ScanResult>('/api/scanner/redeem', scannerKey, { body: { code } });
+        const result = await api<ScanResult>('/api/scanner/redeem', scannerKey, {
+          body: { code },
+          timeoutMs: REDEEM_TIMEOUT_MS,
+          slowAfterMs: SLOW_CHECK_MS,
+          onSlow: () => setSlow(true)
+        });
         show({
           id: `scan-${result.scanId}`,
           at: result.checkedAt,
@@ -82,8 +96,11 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
         // Never imply admission on failure: the server is the only authority.
         show({ id: `error-${Date.now()}`, at: new Date().toISOString(), verdict: 'error', reason: null, name: null, explanation: explainFailure(err) });
       } finally {
+        // Restart the repeat cooldown from the result, so a slow check does not let the same code straight back in.
+        if (lastCode.current.value === code) lastCode.current.at = Date.now();
         busy.current = false;
         setChecking(false);
+        setSlow(false);
       }
     },
     [scannerKey, onUnauthorized, show]
@@ -141,7 +158,7 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
 
   function submitManual(e: FormEvent) {
     e.preventDefault();
-    if (!manual.trim()) return;
+    if (!online || busy.current || !manual.trim()) return;
     void submit(manual.trim());
     setManual('');
   }
@@ -168,20 +185,9 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
   return (
     <main className="scanner">
       <header className="scanner-bar">
-        <div className="scanner-bar-top">
-          <h1 className="scanner-event">{session.event.name}</h1>
-          <div className="scanner-tools">
-            <button className="icon-btn" onClick={toggleMute} aria-pressed={!muted} aria-label="Sound">
-              {muted ? <VolumeX size={18} aria-hidden /> : <Volume2 size={18} aria-hidden />}
-            </button>
-            <button className="icon-btn" onClick={() => setCameraOn((on) => !on)} aria-pressed={cameraOn} aria-label="Camera">
-              {cameraOn ? <Camera size={18} aria-hidden /> : <CameraOff size={18} aria-hidden />}
-            </button>
-            <button className="icon-btn" onClick={() => void signOut()} aria-label="Sign out">
-              <LogOut size={18} aria-hidden />
-            </button>
-          </div>
-        </div>
+        <h1 className="scanner-event" title={session.event.name}>
+          {session.event.name}
+        </h1>
         <div className="scanner-meta">
           <span className="scanner-device">
             <Smartphone size={14} aria-hidden />
@@ -196,7 +202,25 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
             {online ? 'Online' : 'Offline'}
           </span>
         </div>
+        <div className="scanner-tools">
+          <button className="icon-btn" onClick={toggleMute} aria-pressed={!muted} aria-label="Sound">
+            {muted ? <VolumeX size={18} aria-hidden /> : <Volume2 size={18} aria-hidden />}
+          </button>
+          <button className="icon-btn" onClick={() => setCameraOn((on) => !on)} aria-pressed={cameraOn} aria-label="Camera">
+            {cameraOn ? <Camera size={18} aria-hidden /> : <CameraOff size={18} aria-hidden />}
+          </button>
+          <button className="icon-btn" onClick={() => void signOut()} aria-label="Sign out">
+            <LogOut size={18} aria-hidden />
+          </button>
+        </div>
       </header>
+
+      {online ? null : (
+        <p id="scanner-offline" className="scanner-offline" role="alert">
+          <WifiOff size={18} aria-hidden />
+          <span>{OFFLINE_MESSAGE}</span>
+        </p>
+      )}
 
       <div className="scanner-body">
         {session.event.status !== 'active' ? <p className="error">This event is archived. Every pass will be rejected.</p> : null}
@@ -214,6 +238,12 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
               <p className="viewfinder-caption">Point at a pass QR code</p>
             </>
           ) : null}
+          {slow ? (
+            <div className="viewfinder-pending" role="status">
+              <LoaderCircle size={28} aria-hidden />
+              <span>{SLOW_MESSAGE}</span>
+            </div>
+          ) : null}
         </div>
         <p className="sr-only" aria-live="assertive" aria-atomic>
           {latest ? [VERDICT_HEADLINE[latest.verdict], latest.reason, latest.name, latest.explanation].filter(Boolean).join('. ') : ''}
@@ -225,8 +255,8 @@ export function ScannerStation({ scannerKey, session, onSignOut, onUnauthorized 
             <span className="sr-only">Pass link or code</span>
             <input value={manual} onChange={(e) => setManual(e.target.value)} placeholder="Pass link or code" autoComplete="off" autoCapitalize="off" spellCheck={false} enterKeyHint="go" />
           </label>
-          <button className="btn btn-primary" disabled={checking || !manual.trim()}>
-            {checking ? 'Checking…' : 'Check'}
+          <button className={`btn btn-primary${slow ? ' is-slow' : ''}`} disabled={!online || checking || !manual.trim()} aria-describedby={online ? undefined : 'scanner-offline'} title={online ? undefined : OFFLINE_MESSAGE}>
+            {checking ? (slow ? SLOW_MESSAGE : 'Checking…') : 'Check'}
           </button>
         </form>
 

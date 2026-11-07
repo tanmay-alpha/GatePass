@@ -56,6 +56,8 @@ export function reasonLabel(result: ScanResult): string | null {
  */
 export function explainFailure(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.failure === 'timeout') return 'No response from the server. Do not admit; scan again.';
+    if (error.failure === 'network') return 'No connection to the server. Do not admit; scan again.';
     if (error.status === 429) return error.retryAfter ? `Too many scans, wait ${error.retryAfter} s` : 'Too many scans, wait a moment';
     if (error.status >= 500) return 'Server error. Do not admit; scan again.';
     return `${error.message.replace(/\.$/, '')}. Do not admit; scan again.`;
