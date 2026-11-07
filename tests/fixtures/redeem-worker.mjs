@@ -14,10 +14,15 @@ const barrier = new Int32Array(workerData.barrier);
 parentPort.postMessage({ ready: true });
 Atomics.wait(barrier, 0, 0);
 
+// Close the connection before reporting, so once the main thread has every
+// result no worker still holds the database, -wal or -shm file open (on
+// Windows an open handle makes the harness's temp-directory cleanup fail).
+let result;
 try {
-  parentPort.postMessage({ outcome: service.redeem(workerData.scanner, workerData.code).outcome });
+  result = { outcome: service.redeem(workerData.scanner, workerData.code).outcome };
 } catch (error) {
-  parentPort.postMessage({ error: String(error) });
+  result = { error: String(error) };
 } finally {
   db.close();
 }
+parentPort.postMessage(result);

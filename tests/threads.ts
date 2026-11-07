@@ -4,7 +4,9 @@ import type { AuthenticatedScanner } from '../src/server/gatepass';
 /**
  * Runs each redemption in its own worker thread with its own SQLite
  * connection, releasing all of them at the same instant so their
- * transactions genuinely contend for the write lock.
+ * transactions genuinely contend for the write lock. Resolves only after
+ * every worker has exited, so no thread still has the database files open
+ * when the caller removes them.
  */
 export async function redeemInThreads(dbFile: string, jobs: Array<{ code: string; scanner: AuthenticatedScanner }>): Promise<string[]> {
   const barrier = new SharedArrayBuffer(4);
@@ -13,10 +15,17 @@ export async function redeemInThreads(dbFile: string, jobs: Array<{ code: string
     const worker = new Worker(new URL('./fixtures/redeem-worker.mjs', import.meta.url), { workerData: { dbFile, barrier, code, scanner } });
     const isReady = Promise.withResolvers<void>();
     const done = Promise.withResolvers<{ outcome?: string; error?: string }>();
-    worker.on('message', (message: { ready?: boolean; outcome?: string; error?: string }) => (message.ready ? isReady.resolve() : done.resolve(message)));
+    let result: { outcome?: string; error?: string } | undefined;
+    worker.on('message', (message: { ready?: boolean; outcome?: string; error?: string }) => (message.ready ? isReady.resolve() : (result = message)));
     worker.once('error', (error) => {
       isReady.reject(error);
       done.reject(error);
+    });
+    worker.once('exit', (code) => {
+      const error = new Error(`Redeem worker exited with code ${code} before reporting a result`);
+      isReady.reject(error);
+      if (result) done.resolve(result);
+      else done.reject(error);
     });
     ready.push(isReady.promise);
     return done.promise;
