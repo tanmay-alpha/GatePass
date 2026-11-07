@@ -23,9 +23,22 @@ const envSchema = z.object({
     .optional(),
   /** Shared secret a fronting CDN adds as X-Origin-Secret; requests without it are refused. */
   ORIGIN_SECRET: z.string().min(32, 'ORIGIN_SECRET must be at least 32 characters').optional(),
+  /**
+   * Header the fronting CDN sets to the visitor IP (Vercel: x-vercel-forwarded-for).
+   * Used for rate limiting instead of X-Forwarded-For hop counting, which breaks
+   * when the hosting platform adds its own proxies. Only honoured together with
+   * ORIGIN_SECRET, so the value can only come from the CDN.
+   */
+  CLIENT_IP_HEADER: z
+    .string()
+    .regex(/^[a-z0-9-]+$/i, 'CLIENT_IP_HEADER must be a header name')
+    .transform((value) => value.toLowerCase())
+    .optional(),
   CLIENT_DIR: z.string().default('dist/client'),
   HTTPS_CERT_FILE: z.string().optional(),
   HTTPS_KEY_FILE: z.string().optional()
+}).refine((env) => !env.CLIENT_IP_HEADER || env.ORIGIN_SECRET, {
+  message: 'CLIENT_IP_HEADER requires ORIGIN_SECRET; without it any client could set the header and pick its own rate-limit bucket'
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

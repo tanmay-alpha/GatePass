@@ -22,6 +22,11 @@ export interface AppOptions {
    * clients cannot bypass it and spoof forwarding headers.
    */
   originSecret?: string;
+  /**
+   * Header the fronting CDN sets to the visitor IP. Requires `originSecret`.
+   * Replaces `req.ip` for rate limiting and failure throttling.
+   */
+  clientIpHeader?: string;
   /** Disable rate limiting (benchmarks only). */
   rateLimits?: boolean;
 }
@@ -88,7 +93,7 @@ const qrSchema = z.object({
 const ADMIN = 'admin';
 const passThrough: Middleware = (_req, _res, next) => next();
 
-export function createApp({ service, adminToken, trustProxy = false, clientDir, originSecret, rateLimits = true }: AppOptions): express.Express {
+export function createApp({ service, adminToken, trustProxy = false, clientDir, originSecret, clientIpHeader, rateLimits = true }: AppOptions): express.Express {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', trustProxy);
@@ -99,6 +104,13 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir, 
       if (req.path === '/api/health' || safeEqual(req.header('x-origin-secret') ?? '', originSecret)) return next();
       res.status(403).json({ error: 'Forbidden' });
     });
+    if (clientIpHeader) {
+      app.use((req, _res, next) => {
+        const ip = req.header(clientIpHeader)?.split(',')[0].trim();
+        if (ip) Object.defineProperty(req, 'ip', { value: ip, configurable: true });
+        next();
+      });
+    }
   }
 
   app.use(

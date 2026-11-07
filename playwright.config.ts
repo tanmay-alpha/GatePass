@@ -19,7 +19,9 @@ if (!deployed && !process.env.TEST_WORKER_INDEX) {
 export default defineConfig({
   testDir: 'e2e',
   reporter: 'list',
-  timeout: deployed ? 90_000 : 30_000,
+  timeout: deployed ? 120_000 : 30_000,
+  // A deployed instance adds network and cold-start latency (e.g. a free Render instance).
+  expect: { timeout: deployed ? 20_000 : 5_000 },
   use: {
     baseURL: BASE_URL
   },

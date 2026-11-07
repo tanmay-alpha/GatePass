@@ -156,6 +156,20 @@ describe('information exposure', () => {
 });
 
 describe('deployment boundaries', () => {
+  it('rate-limits by the CDN-provided client IP, not by spoofable X-Forwarded-For', async () => {
+    const secret = 's'.repeat(40);
+    const app = createApp({ service: h.service, adminToken: ADMIN_TOKEN, originSecret: secret, clientIpHeader: 'x-vercel-forwarded-for' });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const attempt = (cdnIp: string, spoof: string) =>
+      request(app).get('/api/events').set('X-Origin-Secret', secret).set('x-vercel-forwarded-for', cdnIp).set('X-Forwarded-For', spoof).set('Authorization', 'Bearer wrong');
+    const statuses: number[] = [];
+    for (let i = 0; i < 61; i += 1) statuses.push((await attempt('203.0.113.7', `198.51.100.${i}`)).status);
+    expect(statuses.at(-1)).toBe(429);
+    // A different visitor (different CDN-reported IP) is unaffected.
+    expect((await attempt('203.0.113.8', '198.51.100.1')).status).toBe(401);
+    expect(() => loadConfig({ ADMIN_TOKEN, CLIENT_IP_HEADER: 'x-vercel-forwarded-for' })).toThrow(/requires ORIGIN_SECRET/);
+  });
+
   it('refuses requests without the origin secret when a CDN fronts the API', async () => {
     const app = createApp({ service: h.service, adminToken: ADMIN_TOKEN, originSecret: 's'.repeat(40) });
     await request(app).get('/api/health').expect(200);

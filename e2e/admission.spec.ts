@@ -139,15 +139,17 @@ test('expired passes are refused once their expiry passes, and the pass page say
   test.setTimeout(150_000);
   const headers = { Authorization: `Bearer ${ADMIN_TOKEN}` };
   const now = Date.now();
-  const event = await (
-    await request.post('/api/events', { headers, data: { name: 'E2E Expiry', startsAt: new Date(now - 3_600_000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString() } })
-  ).json();
-  const [pass] = await (await request.post(`/api/events/${event.id}/passes`, { headers, data: { count: 1, expiresAt: new Date(now + 20_000).toISOString() } })).json();
+  const created = await request.post('/api/events', { headers, data: { name: 'E2E Expiry', startsAt: new Date(now - 3_600_000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString() } });
+  const event = await created.json();
+  // The server decides expiry, so use its clock (Date header) rather than this machine's.
+  const skew = new Date(created.headers()['date']).getTime() - Date.now();
+  const expiresAt = Date.now() + skew + 20_000;
+  const [pass] = await (await request.post(`/api/events/${event.id}/passes`, { headers, data: { count: 1, expiresAt: new Date(expiresAt).toISOString() } })).json();
   const scanner = await (await request.post(`/api/events/${event.id}/scanners`, { headers, data: { label: 'Expiry phone' } })).json();
 
   await page.goto(pass.passUrl);
   await expect(page.getByRole('status')).toHaveText(/^Valid/);
-  await page.waitForTimeout(Math.max(0, now + 21_000 - Date.now())); // real clock: the server decides expiry
+  await page.waitForTimeout(Math.max(0, expiresAt - skew + 2_000 - Date.now())); // Date header has 1 s resolution
   await page.reload();
   await expect(page.getByRole('status')).toHaveText(/expired/);
 

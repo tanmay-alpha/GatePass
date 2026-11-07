@@ -42,7 +42,8 @@ const app = createApp({
   adminToken: config.ADMIN_TOKEN,
   trustProxy: trustProxySetting(config.TRUST_PROXY),
   clientDir: config.CLIENT_DIR,
-  originSecret: config.ORIGIN_SECRET
+  originSecret: config.ORIGIN_SECRET,
+  clientIpHeader: config.CLIENT_IP_HEADER
 });
 
 const tls = config.HTTPS_CERT_FILE && config.HTTPS_KEY_FILE
