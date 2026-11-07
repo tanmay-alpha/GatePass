@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { renderQr } from '../qr/renderer';
 import type { DesignConfig } from '../shared/types';
 import type { AuthenticatedScanner, GatePass } from './gatepass';
-import { authFailureLimit, bearerToken, errorHandler, httpError, type Middleware, rateLimit } from './http';
+import { bearerToken, errorHandler, FailureThrottle, httpError, type Middleware, rateLimit } from './http';
 import { renderPassPage } from './pass-page';
 import { safeEqual } from './tokens';
 
@@ -132,23 +132,34 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir, 
     res.setHeader('Cache-Control', 'no-store');
     next();
   });
-  app.use('/api', limit(600));
-  if (rateLimits) app.use('/api', authFailureLimit(60));
+  // Per-IP limit for admin and public API traffic. Scanner routes are limited
+  // per device instead (below): every gate at a venue often shares one NAT address.
+  const apiLimit = limit(600);
+  app.use('/api', (req, res, next) => (req.path.startsWith('/scanner/') ? next() : apiLimit(req, res, next)));
   app.use(express.json({ limit: '100kb' }));
+
+  // Only requests with invalid credentials are throttled; valid ones always pass.
+  const failures = new FailureThrottle(60, 5 * 60_000);
+  const refuse = (req: express.Request<unknown>, res: express.Response, message: string) => {
+    const wait = rateLimits ? failures.fail(req.ip ?? 'unknown') : 0;
+    if (wait > 0) {
+      res.setHeader('Retry-After', String(wait));
+      res.status(429).json({ error: 'Too many failed authentication attempts' });
+      return;
+    }
+    res.status(401).json({ error: message });
+  };
 
   const requireAdmin: Middleware = (req, res, next) => {
     const token = bearerToken(req.header('authorization'));
     if (token && safeEqual(token, adminToken)) return next();
-    res.status(401).json({ error: 'Admin authentication required' });
+    refuse(req, res, 'Admin authentication required');
   };
 
   const requireScanner: Middleware = (req, res, next) => {
     const key = bearerToken(req.header('authorization'));
     const scanner = key ? service.authenticateScanner(key) : null;
-    if (!scanner) {
-      res.status(401).json({ error: 'Scanner authentication required' });
-      return;
-    }
+    if (!scanner) return refuse(req, res, 'Scanner authentication required');
     res.locals.scanner = scanner;
     next();
   };
@@ -294,7 +305,7 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir, 
 
   // ------------------------------------------------------------ scanner
 
-  app.get('/api/scanner/session', requireScanner, (_req, res) => {
+  app.get('/api/scanner/session', requireScanner, limit(60, (_req, res) => `scanner-session:${scannerOf(res).id}`), (_req, res) => {
     res.json(service.scannerSession(scannerOf(res)));
   });
 

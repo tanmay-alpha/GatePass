@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-const ADMIN_TOKEN = 'e2e-admin-token-0123456789abcdef';
+const ADMIN_TOKEN = process.env.E2E_ADMIN_TOKEN ?? 'e2e-admin-token-0123456789abcdef';
 
 /** `datetime-local` value (local time, minute precision) `minutes` from now. */
 function localInput(minutes: number): string {
@@ -133,4 +133,24 @@ test('revoked passes and revoked scanner devices are refused at the door', async
   await scan(page, pass.passUrl);
   await expect(page.getByLabel('Scanner key')).toBeVisible();
   await expect(page.getByText(/revoked/i).first()).toBeVisible();
+});
+
+test('expired passes are refused once their expiry passes, and the pass page says so', async ({ page, request }) => {
+  test.setTimeout(150_000);
+  const headers = { Authorization: `Bearer ${ADMIN_TOKEN}` };
+  const now = Date.now();
+  const event = await (
+    await request.post('/api/events', { headers, data: { name: 'E2E Expiry', startsAt: new Date(now - 3_600_000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString() } })
+  ).json();
+  const [pass] = await (await request.post(`/api/events/${event.id}/passes`, { headers, data: { count: 1, expiresAt: new Date(now + 20_000).toISOString() } })).json();
+  const scanner = await (await request.post(`/api/events/${event.id}/scanners`, { headers, data: { label: 'Expiry phone' } })).json();
+
+  await page.goto(pass.passUrl);
+  await expect(page.getByRole('status')).toHaveText(/^Valid/);
+  await page.waitForTimeout(Math.max(0, now + 21_000 - Date.now())); // real clock: the server decides expiry
+  await page.reload();
+  await expect(page.getByRole('status')).toHaveText(/expired/);
+
+  const result = await request.post('/api/scanner/redeem', { headers: { Authorization: `Bearer ${scanner.key}` }, data: { code: pass.passUrl } });
+  expect((await result.json()).outcome).toBe('expired');
 });

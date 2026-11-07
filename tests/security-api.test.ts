@@ -122,20 +122,27 @@ describe('information exposure', () => {
 
   it('rate-limits scans per device, so gates sharing one NAT address do not throttle each other', async () => {
     const { event, scannerKey } = await seedEvent(h, 1);
-    const second = (await h.admin(request(h.app).post(`/api/events/${event.id}/scanners`)).send({ label: 'Door 2' }).expect(201)).body.key;
+    const addDevice = async (label: string) => (await h.admin(request(h.app).post(`/api/events/${event.id}/scanners`)).send({ label }).expect(201)).body.key as string;
+    const [second, third] = [await addDevice('Door 2'), await addDevice('Door 3')];
     const statuses: number[] = [];
     for (let i = 0; i < 245; i += 1) statuses.push((await scan(h, scannerKey, 'garbage')).status);
     expect(statuses.slice(0, 240).every((status) => status === 200)).toBe(true);
     expect(statuses.slice(240)).toEqual([429, 429, 429, 429, 429]);
-    // Same client IP, different device: still allowed.
-    expect((await scan(h, second, 'garbage')).status).toBe(200);
+    // Same client IP, other devices: 380 more scans (625 total from one address) all succeed.
+    for (let i = 0; i < 240; i += 1) expect((await scan(h, second, 'garbage')).status).toBe(200);
+    for (let i = 0; i < 140; i += 1) expect((await scan(h, third, 'garbage')).status).toBe(200);
   });
 
-  it('throttles repeated failed authentication per IP without blocking valid credentials elsewhere', async () => {
+  it('throttles failed authentication per IP without locking out valid credentials from that IP', async () => {
+    const { scannerKey } = await seedEvent(h, 1);
     const statuses: number[] = [];
     for (let i = 0; i < 62; i += 1) statuses.push((await request(h.app).get('/api/events').set('Authorization', 'Bearer wrong')).status);
     expect(statuses.slice(0, 60).every((status) => status === 401)).toBe(true);
     expect(statuses.slice(60)).toEqual([429, 429]);
+    expect((await scan(h, 'gps_' + 'x'.repeat(43), 'garbage')).status).toBe(429);
+    // Same address, valid credentials: unaffected.
+    await h.admin(request(h.app).get('/api/events')).expect(200);
+    expect((await scan(h, scannerKey, 'garbage')).status).toBe(200);
   });
 
   it('ignores spoofed X-Forwarded-For when no proxy is trusted', async () => {

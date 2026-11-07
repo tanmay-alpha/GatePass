@@ -125,7 +125,7 @@ export class AccessControl {
     return this.getPolicy(policyId);
   }
 
-  /** Policy as seen by the admission evaluator, or null for the default policy. Hot path: primary-key lookups only. */
+  /** Policy as seen by the admission evaluator, or null for the default policy. Hot path: indexed lookups only, no aggregates. */
   admissionPolicy(policyId: string | null): (NonNullable<AdmissionInput['policy']> & { id: string }) | null {
     if (!policyId) return null;
     const row = this.db

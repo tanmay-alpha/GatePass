@@ -51,20 +51,36 @@ export function rateLimit(maxPerMinute: number, key?: (req: Request, res: Respon
 }
 
 /**
- * Counts only 401 responses per IP (credential guessing). Valid credentials
- * are never slowed down by a neighbour's failures beyond this IP bucket.
+ * Counts failed authentications per client IP in a fixed window. Only
+ * requests with invalid credentials are refused once the limit is reached, so
+ * someone guessing tokens on a shared venue network cannot lock out scanners
+ * or admins that present valid credentials from the same address.
  */
-export function authFailureLimit(maxPerFiveMinutes: number): Middleware {
-  const limiter = expressRateLimit({
-    windowMs: 5 * 60_000,
-    limit: maxPerFiveMinutes,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    skipSuccessfulRequests: true,
-    requestWasSuccessful: (_req, res) => res.statusCode !== 401,
-    message: { error: 'Too many failed authentication attempts' }
-  });
-  return (req, res, next) => void limiter(req as Request, res, next);
+export class FailureThrottle {
+  private readonly failures = new Map<string, { count: number; resetAt: number }>();
+  private nextSweep = 0;
+
+  constructor(
+    private readonly limit: number,
+    private readonly windowMs: number,
+    private readonly clock: () => number = Date.now
+  ) {}
+
+  /** Records a failure; returns seconds to wait if this client is now over the limit, else 0. */
+  fail(key: string): number {
+    const now = this.clock();
+    if (now >= this.nextSweep) {
+      for (const [k, entry] of this.failures) if (entry.resetAt <= now) this.failures.delete(k);
+      this.nextSweep = now + this.windowMs;
+    }
+    const entry = this.failures.get(key);
+    if (!entry || entry.resetAt <= now) {
+      this.failures.set(key, { count: 1, resetAt: now + this.windowMs });
+      return 0;
+    }
+    entry.count += 1;
+    return entry.count > this.limit ? Math.ceil((entry.resetAt - now) / 1000) : 0;
+  }
 }
 
 export function bearerToken(header: string | undefined): string | null {
