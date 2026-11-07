@@ -2,7 +2,9 @@
 
 GatePass issues QR entry passes for events and checks them at the door. Each pass can be redeemed once, only through authenticated scanner devices, and only where and when its admission policy allows.
 
-Engineering docs: [architecture](docs/architecture.md) · [threat model](docs/threat-model.md) · [design decisions](docs/decisions/README.md) · [testing and benchmarks](docs/testing.md) · [deployment](docs/deployment.md) · [optional Vercel front](docs/deployment-vercel.md) · [upstream audit](docs/audit.md)
+**New here? Read the [user guide](docs/USER_GUIDE.md).** Live demo: https://gatepass-sandy.vercel.app (demo data is erased whenever the free server restarts).
+
+Engineering docs: [technical walkthrough](docs/technical-walkthrough.md) · [architecture](docs/architecture.md) · [threat model](docs/threat-model.md) · [design decisions](docs/decisions/README.md) · [testing and benchmarks](docs/testing.md) · [deployment](docs/deployment.md) · [optional Vercel front](docs/deployment-vercel.md) · [live deployment](docs/deployment-live.md) · [upstream audit](docs/audit.md)
 
 ## The problem
 
@@ -14,7 +16,9 @@ GatePass gives each attendee their own QR code. The code contains a random, ungu
 
 Only features that exist in this repository are listed.
 
+- **Guided setup**: a "Set up this event" checklist above the event tabs walks a first-time organiser through create event → gates (optional) → admission (optional) → issue passes → set up a scanner → begin entry. Each step's done state comes from the event's counts; its button opens and focuses the right form. Forms validate inline in plain language.
 - **Events**: create, edit, archive and reopen events (name, venue, start/end time, pass design). Each event shows counts of passes issued, named attendees, checked in and revoked. Archiving an event stops issuance, and its scanners get `event_closed` for every pass.
+- **Slow or missing connections**: requests time out instead of hanging (sign-in 70 s for a sleeping free server, scanner checks 12 s). The scanner shows a neutral "Checking… slow connection" state, an offline banner that disables Check, and "Not verified — do not admit" on any failure; it never shows Admit without a server answer. Deployments without durable storage set `DEMO_MODE=true`, and the admin UI shows a demo warning.
 - **Pass issuance**: issue up to 500 passes per request. Passes can be named (name and optional email per attendee) or unnamed (a count). An optional expiry can be set; by default a pass expires when the event ends.
 - **One-time token display**: the server stores only a hash of each token, so the admin UI shows new passes once. From there you can copy each link, download each QR code as PNG, or download a CSV of all pass links (`pass_id, attendee_name, attendee_email, expires_at, pass_url`).
 - **Revoke**: a revoked pass is rejected at the door. A pass that has already been redeemed cannot be revoked.

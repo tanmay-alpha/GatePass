@@ -83,6 +83,7 @@ Render Web Service (https://gatepass-api-mvle.onrender.com)
   - `NODE_ENV=production`
   - `TRUST_PROXY=2`
   - `CLIENT_IP_HEADER=x-vercel-forwarded-for`
+  - `DEMO_MODE=true` (makes `/api/health` report `demo: true`; the admin UI then shows a "data is erased whenever the server restarts" banner)
 
 ---
 
@@ -91,7 +92,7 @@ Render Web Service (https://gatepass-api-mvle.onrender.com)
 - **Zero Secrets in Git:** Secrets are never written to any repository files or commit history.
 - **Storage Locations:** Secrets exist solely on the operator's local machine (outside git) and inside the secure dashboard environment settings of Vercel and Render.
 - **Rotation Procedures:**
-  - `ADMIN_TOKEN`: Update the environment variable in the Render service dashboard and redeploy the service.
+  - `ADMIN_TOKEN`: Update the environment variable in the Render service dashboard (or `PUT /v1/services/<id>/env-vars/ADMIN_TOKEN` with the Render API) and redeploy the service. **Then verify the rotation**: the deploy must reach `live`, and `GET /api/admin/session` must return 200 with the new token. If a Render deploy fails (on 2026-11-07 one failed with "Port scan timeout reached"), the previous instance keeps running with the **old** token, so retry the deploy until it is live. Last rotated 2026-11-07 after the token appeared in a chat transcript.
   - `ORIGIN_SECRET`: Must be rotated simultaneously in both the Render dashboard (`ORIGIN_SECRET`) and the Vercel dashboard (`ORIGIN_SECRET`), followed by redeploying both services.
 
 ---
