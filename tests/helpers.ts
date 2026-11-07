@@ -12,7 +12,8 @@ export const PUBLIC_URL = 'https://gate.example';
 
 /** Mutable clock so tests can move time forward deterministically. */
 export class TestClock {
-  constructor(public current = new Date('2030-06-01T10:00:00.000Z')) {}
+  /** Default: 30 minutes into EVENT_INPUT's window (18:00–23:00 UTC). */
+  constructor(public current = new Date('2030-06-01T18:30:00.000Z')) {}
   now = (): Date => new Date(this.current);
   advance(ms: number): void {
     this.current = new Date(this.current.getTime() + ms);

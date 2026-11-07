@@ -1,5 +1,7 @@
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createApp } from '../src/server/app';
+import { loadConfig } from '../src/server/config';
 import { ADMIN_TOKEN, createHarness, scan, seedEvent, type Harness } from './helpers';
 
 let h: Harness;
@@ -25,7 +27,15 @@ const adminRoutes: Array<[method: 'get' | 'post' | 'patch', path: string]> = [
   ['post', '/api/events/x/scanners'],
   ['post', '/api/scanners/x/revoke'],
   ['get', '/api/events/x/scans'],
-  ['get', '/api/events/x/audit']
+  ['get', '/api/events/x/audit'],
+  ['get', '/api/events/x/operations'],
+  ['get', '/api/events/x/gates'],
+  ['post', '/api/events/x/gates'],
+  ['get', '/api/events/x/policies'],
+  ['post', '/api/events/x/policies'],
+  ['patch', '/api/policies/x'],
+  ['patch', '/api/passes/x'],
+  ['post', '/api/qr/custom']
 ];
 
 describe('authentication', () => {
@@ -110,30 +120,71 @@ describe('information exposure', () => {
     expect(huge.status).toBe(413);
   });
 
-  it('rate-limits scan attempts per client', async () => {
-    const { scannerKey } = await seedEvent(h, 1);
+  it('rate-limits scans per device, so gates sharing one NAT address do not throttle each other', async () => {
+    const { event, scannerKey } = await seedEvent(h, 1);
+    const second = (await h.admin(request(h.app).post(`/api/events/${event.id}/scanners`)).send({ label: 'Door 2' }).expect(201)).body.key;
     const statuses: number[] = [];
     for (let i = 0; i < 245; i += 1) statuses.push((await scan(h, scannerKey, 'garbage')).status);
     expect(statuses.slice(0, 240).every((status) => status === 200)).toBe(true);
     expect(statuses.slice(240)).toEqual([429, 429, 429, 429, 429]);
+    // Same client IP, different device: still allowed.
+    expect((await scan(h, second, 'garbage')).status).toBe(200);
+  });
+
+  it('throttles repeated failed authentication per IP without blocking valid credentials elsewhere', async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 62; i += 1) statuses.push((await request(h.app).get('/api/events').set('Authorization', 'Bearer wrong')).status);
+    expect(statuses.slice(0, 60).every((status) => status === 401)).toBe(true);
+    expect(statuses.slice(60)).toEqual([429, 429]);
+  });
+
+  it('ignores spoofed X-Forwarded-For when no proxy is trusted', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {}); // express-rate-limit warns about the unexpected header, as intended
+    const statuses: number[] = [];
+    for (let i = 0; i < 62; i += 1) {
+      statuses.push((await request(h.app).get('/api/events').set('X-Forwarded-For', `203.0.113.${i}`).set('Authorization', 'Bearer wrong')).status);
+    }
+    expect(statuses.at(-1)).toBe(429);
+  });
+});
+
+describe('deployment boundaries', () => {
+  it('refuses requests without the origin secret when a CDN fronts the API', async () => {
+    const app = createApp({ service: h.service, adminToken: ADMIN_TOKEN, originSecret: 's'.repeat(40) });
+    await request(app).get('/api/health').expect(200);
+    await request(app).get('/api/events').set('Authorization', `Bearer ${ADMIN_TOKEN}`).expect(403);
+    await request(app).get('/api/events').set('Authorization', `Bearer ${ADMIN_TOKEN}`).set('X-Origin-Secret', 'wrong').expect(403);
+    await request(app).get('/api/events').set('Authorization', `Bearer ${ADMIN_TOKEN}`).set('X-Origin-Secret', 's'.repeat(40)).expect(200);
+  });
+
+  it('rejects configuration that would trust spoofed forwarding headers', () => {
+    expect(() => loadConfig({ ADMIN_TOKEN, TRUST_PROXY: 'true' })).toThrow(/TRUST_PROXY=true/);
+    expect(() => loadConfig({ ADMIN_TOKEN, ORIGIN_SECRET: 'short' })).toThrow(/ORIGIN_SECRET/);
+    expect(loadConfig({ ADMIN_TOKEN, TRUST_PROXY: '2' }).TRUST_PROXY).toBe('2');
   });
 });
 
 describe('retained QR render endpoint', () => {
+  it('requires the admin token (CPU-heavy rendering is not public)', async () => {
+    await request(h.app).post('/api/qr/custom').send({ data: 'https://example.com' }).expect(401);
+    await request(h.app).get('/api/qr/custom').query({ data: 'https://example.com' }).expect(401);
+  });
+
   it('renders SVG and PNG', async () => {
-    const svg = await request(h.app).post('/api/qr/custom').send({ data: 'https://example.com', file: 'svg', size: 300 }).expect(200);
+    const svg = await h.admin(request(h.app).post('/api/qr/custom')).send({ data: 'https://example.com', file: 'svg', size: 300 }).expect(200);
     expect(svg.headers['content-type']).toContain('image/svg+xml');
     expect(svg.body.toString()).toContain('<svg');
-    const png = await request(h.app).get('/api/qr/custom').query({ data: 'https://example.com', file: 'png' }).expect(200);
+    const png = await h.admin(request(h.app).get('/api/qr/custom').query({ data: 'https://example.com', file: 'png' })).expect(200);
     expect(png.headers['content-type']).toContain('image/png');
   });
 
   it('answers invalid input with 400 instead of 500', async () => {
-    expect((await request(h.app).post('/api/qr/custom').send({ data: 'x', config: { bodyColor: 'red' } })).status).toBe(400);
-    expect((await request(h.app).get('/api/qr/custom').query({ data: 'x', config: '{bad' })).status).toBe(400);
-    expect((await request(h.app).post('/api/qr/custom').send({ data: 'x'.repeat(1025) })).status).toBe(400);
+    const post = (body: object) => h.admin(request(h.app).post('/api/qr/custom')).send(body);
+    expect((await post({ data: 'x', config: { bodyColor: 'red' } })).status).toBe(400);
+    expect((await h.admin(request(h.app).get('/api/qr/custom').query({ data: 'x', config: '{bad' }))).status).toBe(400);
+    expect((await post({ data: 'x'.repeat(1025) })).status).toBe(400);
     for (const file of ['pdf', 'eps']) {
-      const response = await request(h.app).post('/api/qr/custom').send({ data: 'x', file });
+      const response = await post({ data: 'x', file });
       expect(response.status).toBe(400);
       expect(response.body.error).toMatch(/not supported/i);
     }

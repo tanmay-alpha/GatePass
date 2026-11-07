@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { renderQr } from '../qr/renderer';
 import type { DesignConfig } from '../shared/types';
 import type { AuthenticatedScanner, GatePass } from './gatepass';
-import { bearerToken, errorHandler, httpError, type Middleware, rateLimit } from './http';
+import { authFailureLimit, bearerToken, errorHandler, httpError, type Middleware, rateLimit } from './http';
 import { renderPassPage } from './pass-page';
 import { safeEqual } from './tokens';
 
@@ -16,9 +16,18 @@ export interface AppOptions {
   trustProxy?: number | string | boolean;
   /** Built SPA directory; served only when it contains index.html. */
   clientDir?: string;
+  /**
+   * When set, every request except /api/health must carry `X-Origin-Secret`
+   * with this value. Used when a CDN (e.g. Vercel rewrites) fronts the API, so
+   * clients cannot bypass it and spoof forwarding headers.
+   */
+  originSecret?: string;
+  /** Disable rate limiting (benchmarks only). */
+  rateLimits?: boolean;
 }
 
 const isoDateTime = z.string().refine((value) => !Number.isNaN(Date.parse(value)), 'must be an ISO 8601 date-time');
+const id = z.string().min(1).max(64);
 const designInput = z.record(z.string(), z.unknown());
 const optionalEmail = z.union([z.email().max(254), z.literal('')]).nullish();
 
@@ -42,18 +51,31 @@ const issueSchema = z
   .strictObject({
     attendees: z.array(z.strictObject({ name: z.string().trim().max(200).nullish(), email: optionalEmail })).min(1).max(500).optional(),
     count: z.number().int().min(1).max(500).optional(),
-    expiresAt: isoDateTime.optional()
+    expiresAt: isoDateTime.optional(),
+    policyId: id.optional()
   })
   .refine((value) => !(value.attendees && value.count), 'Provide attendees or count, not both');
 const passFilterSchema = z.object({
   status: z.enum(['active', 'redeemed', 'revoked', 'expired']).optional(),
-  q: z.string().trim().max(200).optional()
+  q: z.string().trim().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(5000).optional()
 });
+const passPatchSchema = z.strictObject({ policyId: id.nullable() });
 const scansQuerySchema = z.object({
   after: z.coerce.number().int().min(0).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional()
 });
-const scannerSchema = z.strictObject({ label: z.string().trim().min(1).max(100) });
+const scannerSchema = z.strictObject({ label: z.string().trim().min(1).max(100), gateId: id.nullish() });
+const gateSchema = z.strictObject({ name: z.string().trim().min(1).max(100) });
+const policyFields = {
+  name: z.string().trim().min(1).max(100),
+  opensAt: isoDateTime.nullish(),
+  closesAt: isoDateTime.nullish(),
+  capacity: z.number().int().min(1).max(1_000_000).nullish(),
+  gateIds: z.array(id).max(50).optional()
+};
+const createPolicySchema = z.strictObject(policyFields);
+const updatePolicySchema = z.strictObject({ ...policyFields, name: policyFields.name.optional() });
 const redeemSchema = z.strictObject({ code: z.string().min(1).max(2048) });
 const qrSchema = z.object({
   data: z.string().min(1).max(1024),
@@ -64,11 +86,20 @@ const qrSchema = z.object({
 });
 
 const ADMIN = 'admin';
+const passThrough: Middleware = (_req, _res, next) => next();
 
-export function createApp({ service, adminToken, trustProxy = false, clientDir }: AppOptions): express.Express {
+export function createApp({ service, adminToken, trustProxy = false, clientDir, originSecret, rateLimits = true }: AppOptions): express.Express {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', trustProxy);
+  const limit = (perMinute: number, key?: Parameters<typeof rateLimit>[1]) => (rateLimits ? rateLimit(perMinute, key) : passThrough);
+
+  if (originSecret) {
+    app.use((req, res, next) => {
+      if (req.path === '/api/health' || safeEqual(req.header('x-origin-secret') ?? '', originSecret)) return next();
+      res.status(403).json({ error: 'Forbidden' });
+    });
+  }
 
   app.use(
     helmet({
@@ -101,7 +132,8 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir }
     res.setHeader('Cache-Control', 'no-store');
     next();
   });
-  app.use('/api', rateLimit(600));
+  app.use('/api', limit(600));
+  if (rateLimits) app.use('/api', authFailureLimit(60));
   app.use(express.json({ limit: '100kb' }));
 
   const requireAdmin: Middleware = (req, res, next) => {
@@ -121,6 +153,8 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir }
     next();
   };
 
+  const scannerOf = (res: express.Response): AuthenticatedScanner => res.locals.scanner as AuthenticatedScanner;
+
   // ------------------------------------------------------------ public
 
   app.get('/api/health', (_req, res) => {
@@ -133,24 +167,8 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir }
     }
   });
 
-  const qrLimiter = rateLimit(120);
-  app.get('/api/qr/custom', qrLimiter, async (req, res) => {
-    let config: unknown = {};
-    if (typeof req.query.config === 'string') {
-      try {
-        config = JSON.parse(req.query.config);
-      } catch {
-        throw httpError(400, 'config must be valid JSON');
-      }
-    }
-    await sendQr(res, qrSchema.parse({ ...req.query, config }));
-  });
-  app.post('/api/qr/custom', qrLimiter, async (req, res) => {
-    await sendQr(res, qrSchema.parse(req.body));
-  });
-
   // Attendee-facing pass page. Read-only: opening or previewing the link never redeems.
-  app.get('/p/:token', rateLimit(60), async (req, res) => {
+  app.get('/p/:token', limit(60), async (req, res) => {
     const found = service.viewPass(req.params.token);
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
@@ -163,6 +181,23 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir }
   });
 
   // ------------------------------------------------------------ admin
+
+  // QR rendering is CPU-bound; only the admin UI needs it, so it is not public.
+  const qrLimiter = limit(120);
+  app.get('/api/qr/custom', requireAdmin, qrLimiter, async (req, res) => {
+    let config: unknown = {};
+    if (typeof req.query.config === 'string') {
+      try {
+        config = JSON.parse(req.query.config);
+      } catch {
+        throw httpError(400, 'config must be valid JSON');
+      }
+    }
+    await sendQr(res, qrSchema.parse({ ...req.query, config }));
+  });
+  app.post('/api/qr/custom', requireAdmin, qrLimiter, async (req, res) => {
+    await sendQr(res, qrSchema.parse(req.body));
+  });
 
   app.get('/api/admin/session', requireAdmin, (_req, res) => {
     res.json({ role: ADMIN });
@@ -186,12 +221,46 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir }
     res.json(service.updateEvent(req.params.eventId, { ...patch, design: patch.design as Partial<DesignConfig> | undefined }, ADMIN));
   });
 
+  app.get('/api/events/:eventId/operations', requireAdmin, (req, res) => {
+    res.json(service.operations(req.params.eventId));
+  });
+
+  app.get('/api/events/:eventId/gates', requireAdmin, (req, res) => {
+    service.getEvent(req.params.eventId);
+    res.json(service.access.listGates(req.params.eventId));
+  });
+
+  app.post('/api/events/:eventId/gates', requireAdmin, (req, res) => {
+    const { name } = gateSchema.parse(req.body);
+    service.getEvent(req.params.eventId);
+    res.status(201).json(service.access.createGate(req.params.eventId, name, ADMIN));
+  });
+
+  app.get('/api/events/:eventId/policies', requireAdmin, (req, res) => {
+    service.getEvent(req.params.eventId);
+    res.json(service.access.listPolicies(req.params.eventId));
+  });
+
+  app.post('/api/events/:eventId/policies', requireAdmin, (req, res) => {
+    const input = createPolicySchema.parse(req.body);
+    service.getEvent(req.params.eventId);
+    res.status(201).json(service.access.createPolicy(req.params.eventId, input, ADMIN));
+  });
+
+  app.patch('/api/policies/:policyId', requireAdmin, (req, res) => {
+    res.json(service.access.updatePolicy(req.params.policyId, updatePolicySchema.parse(req.body), ADMIN));
+  });
+
   app.get('/api/events/:eventId/passes', requireAdmin, (req, res) => {
     res.json(service.listPasses(req.params.eventId, passFilterSchema.parse(req.query)));
   });
 
   app.post('/api/events/:eventId/passes', requireAdmin, (req, res) => {
     res.status(201).json(service.issuePasses(req.params.eventId, issueSchema.parse(req.body), ADMIN));
+  });
+
+  app.patch('/api/passes/:passId', requireAdmin, (req, res) => {
+    res.json(service.setPassPolicy(req.params.passId, passPatchSchema.parse(req.body).policyId, ADMIN));
   });
 
   app.post('/api/passes/:passId/revoke', requireAdmin, (req, res) => {
@@ -207,7 +276,8 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir }
   });
 
   app.post('/api/events/:eventId/scanners', requireAdmin, (req, res) => {
-    res.status(201).json(service.createScanner(req.params.eventId, scannerSchema.parse(req.body).label, ADMIN));
+    const input = scannerSchema.parse(req.body);
+    res.status(201).json(service.createScanner(req.params.eventId, input.label, input.gateId ?? null, ADMIN));
   });
 
   app.post('/api/scanners/:scannerId/revoke', requireAdmin, (req, res) => {
@@ -225,11 +295,12 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir }
   // ------------------------------------------------------------ scanner
 
   app.get('/api/scanner/session', requireScanner, (_req, res) => {
-    res.json(service.scannerSession(res.locals.scanner as AuthenticatedScanner));
+    res.json(service.scannerSession(scannerOf(res)));
   });
 
-  app.post('/api/scanner/redeem', rateLimit(240), requireScanner, (req, res) => {
-    res.json(service.redeem(res.locals.scanner as AuthenticatedScanner, redeemSchema.parse(req.body).code));
+  // Limited per device, not per IP: every gate at a venue often shares one NAT address.
+  app.post('/api/scanner/redeem', requireScanner, limit(240, (_req, res) => `scanner:${scannerOf(res).id}`), (req, res) => {
+    res.json(service.redeem(scannerOf(res), redeemSchema.parse(req.body).code));
   });
 
   app.use('/api', (_req, _res, next) => next(httpError(404, 'Not found')));

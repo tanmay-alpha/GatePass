@@ -34,17 +34,35 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
 };
 
 /**
- * Per-IP fixed-window limiter backed by express-rate-limit's in-memory store.
- * Correct for the single-process deployment GatePass targets; put a proxy
- * limit in front for anything larger.
+ * Fixed-window limiter backed by express-rate-limit's in-memory store. Keyed by
+ * client IP unless `key` is given. Correct for the single-process deployment
+ * GatePass targets; put a proxy limit in front for anything larger.
  */
-export function rateLimit(maxPerMinute: number): Middleware {
+export function rateLimit(maxPerMinute: number, key?: (req: Request, res: Response) => string): Middleware {
   const limiter = expressRateLimit({
     windowMs: 60_000,
     limit: maxPerMinute,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
-    message: { error: 'Too many requests' }
+    message: { error: 'Too many requests' },
+    ...(key ? { keyGenerator: key } : {})
+  });
+  return (req, res, next) => void limiter(req as Request, res, next);
+}
+
+/**
+ * Counts only 401 responses per IP (credential guessing). Valid credentials
+ * are never slowed down by a neighbour's failures beyond this IP bucket.
+ */
+export function authFailureLimit(maxPerFiveMinutes: number): Middleware {
+  const limiter = expressRateLimit({
+    windowMs: 5 * 60_000,
+    limit: maxPerFiveMinutes,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    skipSuccessfulRequests: true,
+    requestWasSuccessful: (_req, res) => res.statusCode !== 401,
+    message: { error: 'Too many failed authentication attempts' }
   });
   return (req, res, next) => void limiter(req as Request, res, next);
 }

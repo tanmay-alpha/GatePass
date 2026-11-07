@@ -11,8 +11,18 @@ const envSchema = z.object({
   DATABASE_FILE: z.string().min(1).default('.local/data/gatepass.db'),
   HOST: z.string().default('127.0.0.1'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  /** Express `trust proxy` value: hop count, or "loopback"/subnet list. Unset = trust nothing. */
-  TRUST_PROXY: z.string().optional(),
+  /**
+   * Express `trust proxy`: number of proxy hops (e.g. 1 behind Caddy, 2 behind
+   * Vercel + Caddy) or an address/subnet list. Unset = trust nothing. `true`
+   * is refused: it trusts any client-supplied X-Forwarded-For, which lets
+   * clients choose their own rate-limit bucket.
+   */
+  TRUST_PROXY: z
+    .string()
+    .refine((value) => value !== 'true', 'TRUST_PROXY=true trusts spoofed X-Forwarded-For; set the hop count (e.g. 1) instead')
+    .optional(),
+  /** Shared secret a fronting CDN adds as X-Origin-Secret; requests without it are refused. */
+  ORIGIN_SECRET: z.string().min(32, 'ORIGIN_SECRET must be at least 32 characters').optional(),
   CLIENT_DIR: z.string().default('dist/client'),
   HTTPS_CERT_FILE: z.string().optional(),
   HTTPS_KEY_FILE: z.string().optional()
@@ -30,10 +40,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return parsed.data;
 }
 
-/** Express accepts numbers, booleans or address lists for `trust proxy`. */
+/** Express accepts numbers or address lists for `trust proxy`. */
 export function trustProxySetting(value: string | undefined): number | string | boolean {
-  if (value === undefined) return false;
+  if (value === undefined || value === 'false') return false;
   if (/^\d+$/.test(value)) return Number(value);
-  if (value === 'true' || value === 'false') return value === 'true';
   return value;
 }

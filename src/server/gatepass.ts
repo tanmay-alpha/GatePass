@@ -6,6 +6,7 @@ import type {
   EventStatus,
   EventSummary,
   IssuedPass,
+  OperationsSummary,
   Pass,
   PassStatus,
   ScanOutcome,
@@ -15,9 +16,14 @@ import type {
   ScannerSession,
   StoredScanOutcome
 } from '../shared/types';
+import { evaluateAdmission } from './admission';
+import { listAudit, recordAudit } from './audit';
 import { transaction, type Database } from './db';
 import { httpError } from './http';
+import { operationsSummary } from './operations';
+import { AccessControl } from './policies';
 import { extractPassToken, generateToken, hashToken, isWellFormedToken } from './tokens';
+import { isoDate } from './values';
 
 export interface GatePassOptions {
   /** Base URL encoded into pass QR codes, without trailing slash. */
@@ -43,21 +49,25 @@ export interface IssueInput {
   attendees?: Array<{ name?: string | null; email?: string | null }>;
   count?: number;
   expiresAt?: string;
+  policyId?: string;
 }
 
 export interface AuthenticatedScanner {
   id: string;
   eventId: string;
+  gateId: string | null;
   label: string;
 }
 
 type Row = Record<string, unknown>;
 
 const PASS_COLUMNS = `
-  p.id, p.event_id, p.attendee_name, p.attendee_email, p.expires_at, p.created_at, p.revoked_at,
+  p.id, p.event_id, p.policy_id, p.attendee_name, p.attendee_email, p.expires_at, p.created_at, p.revoked_at,
   r.redeemed_at, r.scanner_id AS redeemed_by`;
+const PASS_FROM = 'FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id';
 
 export class GatePass {
+  readonly access: AccessControl;
   private readonly now: () => Date;
   private readonly newToken: () => string;
   private readonly publicUrl: string;
@@ -66,6 +76,7 @@ export class GatePass {
     this.now = options.now ?? (() => new Date());
     this.newToken = options.generateToken ?? generateToken;
     this.publicUrl = options.publicUrl.replace(/\/+$/, '');
+    this.access = new AccessControl(db, () => this.timestamp());
   }
 
   passUrl(token: string): string {
@@ -118,20 +129,21 @@ export class GatePass {
 
   // ---------------------------------------------------------------- passes
 
-  listPasses(eventId: string, filter: { status?: PassStatus; q?: string } = {}): Pass[] {
+  listPasses(eventId: string, filter: { status?: PassStatus; q?: string; limit?: number } = {}): Pass[] {
     this.getEvent(eventId);
     const now = this.timestamp();
     const query = filter.q ? `%${filter.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
     const rows = this.db
       .prepare(
-        `SELECT ${PASS_COLUMNS} FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id
+        `SELECT ${PASS_COLUMNS} ${PASS_FROM}
          WHERE p.event_id = :eventId
            AND (:q IS NULL OR p.attendee_name LIKE :q ESCAPE '\\' OR p.attendee_email LIKE :q ESCAPE '\\' OR p.id LIKE :q ESCAPE '\\')
          ORDER BY p.created_at DESC, p.rowid DESC`
       )
       .all({ eventId, q: query }) as Row[];
     const passes = rows.map((row) => toPass(row, now));
-    return filter.status ? passes.filter((pass) => pass.status === filter.status) : passes;
+    const filtered = filter.status ? passes.filter((pass) => pass.status === filter.status) : passes;
+    return filtered.slice(0, filter.limit ?? 1000);
   }
 
   issuePasses(eventId: string, input: IssueInput, actor: string): IssuedPass[] {
@@ -142,27 +154,39 @@ export class GatePass {
       if (event.status !== 'active') throw httpError(409, 'Passes cannot be issued for an archived event');
       const expiresAt = input.expiresAt ? isoDate(input.expiresAt) : event.endsAt;
       if (expiresAt <= now) throw httpError(400, 'expiresAt must be in the future');
+      if (expiresAt <= event.startsAt) throw httpError(400, 'expiresAt must be after the event starts, or the pass can never be used');
+      if (input.policyId) this.access.assertPolicy(eventId, input.policyId);
       const insert = this.db.prepare(
-        'INSERT INTO passes (id, event_id, token_hash, attendee_name, attendee_email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO passes (id, event_id, policy_id, token_hash, attendee_name, attendee_email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       );
       const result = attendees.map((attendee) => {
         const id = randomUUID();
         const token = this.newToken();
-        insert.run(id, eventId, hashToken(token), attendee.name || null, attendee.email || null, expiresAt, now);
+        insert.run(id, eventId, input.policyId ?? null, hashToken(token), attendee.name || null, attendee.email || null, expiresAt, now);
         return { id, token };
       });
-      this.audit(eventId, actor, 'passes.issued', null, { count: result.length, passIds: result.map((pass) => pass.id) });
+      this.audit(eventId, actor, 'passes.issued', null, { count: result.length, policyId: input.policyId ?? null, passIds: result.map((pass) => pass.id) });
       return result;
     });
     return issued.map(({ id, token }) => ({ ...this.getPass(id), token, passUrl: this.passUrl(token) }));
   }
 
   getPass(id: string): Pass {
-    const row = this.db
-      .prepare(`SELECT ${PASS_COLUMNS} FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id WHERE p.id = ?`)
-      .get(id) as Row | undefined;
+    const row = this.db.prepare(`SELECT ${PASS_COLUMNS} ${PASS_FROM} WHERE p.id = ?`).get(id) as Row | undefined;
     if (!row) throw httpError(404, 'Pass not found');
     return toPass(row, this.timestamp());
+  }
+
+  /** Moves an unused pass to another admission policy (or the default with `null`). */
+  setPassPolicy(id: string, policyId: string | null, actor: string): Pass {
+    transaction(this.db, () => {
+      const pass = this.getPass(id);
+      if (pass.status === 'redeemed' || pass.status === 'revoked') throw httpError(409, `A ${pass.status} pass cannot change policy`);
+      if (policyId) this.access.assertPolicy(pass.eventId, policyId);
+      this.db.prepare('UPDATE passes SET policy_id = ? WHERE id = ?').run(policyId, id);
+      this.audit(pass.eventId, actor, 'pass.policy_changed', id, { from: pass.policyId, to: policyId });
+    });
+    return this.getPass(id);
   }
 
   revokePass(id: string, actor: string): Pass {
@@ -191,9 +215,7 @@ export class GatePass {
   /** Read-only lookup for the attendee-facing pass page. Never redeems. */
   viewPass(token: string): { pass: Pass; event: EventSummary } | null {
     if (!isWellFormedToken(token)) return null;
-    const row = this.db
-      .prepare(`SELECT ${PASS_COLUMNS} FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id WHERE p.token_hash = ?`)
-      .get(hashToken(token)) as Row | undefined;
+    const row = this.db.prepare(`SELECT ${PASS_COLUMNS} ${PASS_FROM} WHERE p.token_hash = ?`).get(hashToken(token)) as Row | undefined;
     if (!row) return null;
     const pass = toPass(row, this.timestamp());
     return { pass, event: this.getEvent(pass.eventId) };
@@ -203,18 +225,19 @@ export class GatePass {
 
   listScanners(eventId: string): Scanner[] {
     this.getEvent(eventId);
-    return (this.db.prepare('SELECT * FROM scanners WHERE event_id = ? ORDER BY created_at DESC').all(eventId) as Row[]).map(toScanner);
+    return (this.db.prepare(`${SCANNER_SELECT} WHERE s.event_id = ? ORDER BY s.created_at DESC`).all(eventId) as Row[]).map(toScanner);
   }
 
-  createScanner(eventId: string, label: string, actor: string): { scanner: Scanner; key: string } {
+  createScanner(eventId: string, label: string, gateId: string | null, actor: string): { scanner: Scanner; key: string } {
     const id = randomUUID();
     const key = `gps_${this.newToken()}`;
     transaction(this.db, () => {
       this.getEvent(eventId);
+      if (gateId) this.access.assertGate(eventId, gateId);
       this.db
-        .prepare('INSERT INTO scanners (id, event_id, label, key_hash, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(id, eventId, label, hashToken(key), this.timestamp());
-      this.audit(eventId, actor, 'scanner.created', id, { label });
+        .prepare('INSERT INTO scanners (id, event_id, gate_id, label, key_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, eventId, gateId, label, hashToken(key), this.timestamp());
+      this.audit(eventId, actor, 'scanner.created', id, { label, gateId });
     });
     return { scanner: this.getScanner(id), key };
   }
@@ -229,19 +252,21 @@ export class GatePass {
     return this.getScanner(id);
   }
 
+  /** Read-only: resolves a scanner key without recording use (use is recorded on redeem). */
   authenticateScanner(key: string): AuthenticatedScanner | null {
     const row = this.db
-      .prepare('SELECT id, event_id, label FROM scanners WHERE key_hash = ? AND revoked_at IS NULL')
+      .prepare('SELECT id, event_id, gate_id, label FROM scanners WHERE key_hash = ? AND revoked_at IS NULL')
       .get(hashToken(key)) as Row | undefined;
     if (!row) return null;
-    this.db.prepare('UPDATE scanners SET last_used_at = ? WHERE id = ?').run(this.timestamp(), row.id as string);
-    return { id: row.id as string, eventId: row.event_id as string, label: row.label as string };
+    return { id: row.id as string, eventId: row.event_id as string, gateId: (row.gate_id as string | null) ?? null, label: row.label as string };
   }
 
   scannerSession(scanner: AuthenticatedScanner): ScannerSession {
     const event = this.getEvent(scanner.eventId);
+    const gate = scanner.gateId ? this.access.assertGate(scanner.eventId, scanner.gateId) : null;
     return {
       scanner: { id: scanner.id, label: scanner.label },
+      gate,
       event: { id: event.id, name: event.name, venue: event.venue, startsAt: event.startsAt, endsAt: event.endsAt, status: event.status }
     };
   }
@@ -249,54 +274,57 @@ export class GatePass {
   // ---------------------------------------------------------------- redemption
 
   /**
-   * Verifies and redeems a scanned code. The whole check-and-insert runs in
-   * one IMMEDIATE transaction, and `redemptions.pass_id` is a primary key, so
-   * concurrent scans of the same pass — from this process or another
-   * connection — produce exactly one `admitted`.
+   * Verifies and redeems a scanned code. The whole check-and-write runs in one
+   * IMMEDIATE transaction. Two database guarantees back the application rules:
+   * `redemptions.pass_id` is a primary key (one redemption per pass) and
+   * `admission_policies` has `CHECK (admitted_count <= capacity)`.
    */
   redeem(scanner: AuthenticatedScanner, code: string): ScanResult {
     const checkedAt = this.timestamp();
     return transaction(this.db, () => {
       const token = extractPassToken(code);
-      const row = token
-        ? (this.db
-            .prepare(`SELECT ${PASS_COLUMNS} FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id WHERE p.token_hash = ?`)
-            .get(hashToken(token)) as Row | undefined)
-        : undefined;
+      const row = token ? (this.db.prepare(`SELECT ${PASS_COLUMNS} ${PASS_FROM} WHERE p.token_hash = ?`).get(hashToken(token)) as Row | undefined) : undefined;
       let pass = row ? toPass(row, checkedAt) : null;
-      let outcome: StoredScanOutcome;
+      const sameEvent = pass?.eventId === scanner.eventId;
+      // Only the columns the rules need: getEvent() also computes per-event
+      // counts, which costs O(passes) and must not run on every scan.
+      const event = this.db.prepare('SELECT starts_at AS startsAt, ends_at AS endsAt, status FROM events WHERE id = ?').get(scanner.eventId) as {
+        startsAt: string;
+        endsAt: string;
+        status: EventStatus;
+      };
+      const policy = sameEvent && pass ? this.access.admissionPolicy(pass.policyId) : null;
 
-      if (!pass) {
-        outcome = 'invalid';
-      } else if (pass.eventId !== scanner.eventId) {
-        outcome = 'wrong_event';
-        pass = null; // Never link or reveal a pass from another event.
-      } else if (this.getEvent(scanner.eventId).status !== 'active') {
-        outcome = 'event_closed';
-      } else if (pass.status === 'redeemed') {
-        outcome = 'already_redeemed';
-      } else if (pass.status === 'revoked') {
-        outcome = 'revoked';
-      } else if (pass.status === 'expired') {
-        outcome = 'expired';
+      const decision = evaluateAdmission({ now: checkedAt, scanner, event, pass, policy });
+      let outcome: StoredScanOutcome;
+      let detail = decision.admit ? undefined : decision.detail;
+      if (!decision.admit) {
+        outcome = decision.outcome;
+      } else if (policy && !this.access.claimCapacity(policy.id)) {
+        outcome = 'capacity_full';
+        detail = { policyName: policy.name, capacity: policy.capacity ?? undefined };
       } else {
         const inserted = this.db
-          .prepare('INSERT INTO redemptions (pass_id, scanner_id, redeemed_at) VALUES (?, ?, ?) ON CONFLICT (pass_id) DO NOTHING')
-          .run(pass.id, scanner.id, checkedAt);
-        outcome = inserted.changes === 1 ? 'admitted' : 'already_redeemed';
-        pass = this.getPass(pass.id);
+          .prepare('INSERT INTO redemptions (pass_id, scanner_id, gate_id, policy_id, redeemed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (pass_id) DO NOTHING')
+          .run(pass!.id, scanner.id, scanner.gateId, policy?.id ?? null, checkedAt);
+        if (inserted.changes !== 1) throw new Error('Redemption conflict inside the write lock'); // unreachable: status was checked under the lock
+        outcome = 'admitted';
+        pass = this.getPass(pass!.id);
       }
+      if (outcome === 'wrong_event') pass = null; // Never link or reveal a pass from another event.
 
       const scan = this.db
-        .prepare('INSERT INTO scans (event_id, scanner_id, pass_id, outcome, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(scanner.eventId, scanner.id, pass?.id ?? null, outcome, checkedAt);
+        .prepare('INSERT INTO scans (event_id, scanner_id, gate_id, pass_id, outcome, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(scanner.eventId, scanner.id, scanner.gateId, pass?.id ?? null, outcome, checkedAt);
+      this.db.prepare('UPDATE scanners SET last_used_at = ? WHERE id = ?').run(checkedAt, scanner.id);
 
       const reported: ScanOutcome = outcome === 'wrong_event' ? 'invalid' : outcome;
       return {
         outcome: reported,
         scanId: Number(scan.lastInsertRowid),
         checkedAt,
-        ...(pass && reported !== 'invalid' ? { pass: { id: pass.id, attendeeName: pass.attendeeName, redeemedAt: pass.redeemedAt } } : {})
+        ...(pass && reported !== 'invalid' ? { pass: { id: pass.id, attendeeName: pass.attendeeName, redeemedAt: pass.redeemedAt } } : {}),
+        ...(detail && reported !== 'invalid' ? { detail } : {})
       };
     });
   }
@@ -305,8 +333,8 @@ export class GatePass {
     this.getEvent(eventId);
     const rows = this.db
       .prepare(
-        `SELECT s.id, s.event_id, s.scanner_id, sc.label AS scanner_label, s.pass_id, p.attendee_name, s.outcome, s.created_at
-         FROM scans s JOIN scanners sc ON sc.id = s.scanner_id LEFT JOIN passes p ON p.id = s.pass_id
+        `SELECT s.id, s.event_id, s.scanner_id, sc.label AS scanner_label, s.gate_id, g.name AS gate_name, s.pass_id, p.attendee_name, s.outcome, s.created_at
+         FROM scans s JOIN scanners sc ON sc.id = s.scanner_id LEFT JOIN gates g ON g.id = s.gate_id LEFT JOIN passes p ON p.id = s.pass_id
          WHERE s.event_id = ? AND s.id > ? ORDER BY s.id DESC LIMIT ?`
       )
       .all(eventId, options.after ?? 0, options.limit ?? 50) as Row[];
@@ -315,6 +343,8 @@ export class GatePass {
       eventId: row.event_id as string,
       scannerId: row.scanner_id as string,
       scannerLabel: row.scanner_label as string,
+      gateId: (row.gate_id as string | null) ?? null,
+      gateName: (row.gate_name as string | null) ?? null,
       passId: (row.pass_id as string | null) ?? null,
       attendeeName: (row.attendee_name as string | null) ?? null,
       outcome: row.outcome as StoredScanOutcome,
@@ -322,18 +352,13 @@ export class GatePass {
     }));
   }
 
+  operations(eventId: string): OperationsSummary {
+    return operationsSummary(this.db, this.access, this.getEvent(eventId), this.now());
+  }
+
   listAudit(eventId: string, limit = 100): AuditEntry[] {
     this.getEvent(eventId);
-    const rows = this.db.prepare('SELECT * FROM audit_log WHERE event_id = ? ORDER BY id DESC LIMIT ?').all(eventId, limit) as Row[];
-    return rows.map((row) => ({
-      id: Number(row.id),
-      eventId: (row.event_id as string | null) ?? null,
-      actor: row.actor as string,
-      action: row.action as string,
-      entityId: (row.entity_id as string | null) ?? null,
-      details: JSON.parse(row.details_json as string) as Record<string, unknown>,
-      createdAt: row.created_at as string
-    }));
+    return listAudit(this.db, eventId, limit);
   }
 
   /** Cheap liveness probe used by /api/health. */
@@ -344,15 +369,13 @@ export class GatePass {
   // ---------------------------------------------------------------- internals
 
   private getScanner(id: string): Scanner {
-    const row = this.db.prepare('SELECT * FROM scanners WHERE id = ?').get(id) as Row | undefined;
+    const row = this.db.prepare(`${SCANNER_SELECT} WHERE s.id = ?`).get(id) as Row | undefined;
     if (!row) throw httpError(404, 'Scanner not found');
     return toScanner(row);
   }
 
   private audit(eventId: string | null, actor: string, action: string, entityId: string | null, details: Record<string, unknown>): void {
-    this.db
-      .prepare('INSERT INTO audit_log (event_id, actor, action, entity_id, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(eventId, actor, action, entityId, JSON.stringify(details), this.timestamp());
+    recordAudit(this.db, { eventId, actor, action, entityId, details, at: this.timestamp() });
   }
 
   private timestamp(): string {
@@ -367,6 +390,8 @@ const EVENT_SELECT = `
     (SELECT COUNT(*) FROM redemptions r JOIN passes p ON p.id = r.pass_id WHERE p.event_id = e.id) AS redeemed_count,
     (SELECT COUNT(*) FROM passes p WHERE p.event_id = e.id AND p.revoked_at IS NOT NULL) AS revoked_count
   FROM events e`;
+
+const SCANNER_SELECT = 'SELECT s.*, g.name AS gate_name FROM scanners s LEFT JOIN gates g ON g.id = s.gate_id';
 
 function toEvent(row: Row): EventSummary {
   return {
@@ -394,6 +419,7 @@ function toPass(row: Row, now: string): Pass {
   return {
     id: row.id as string,
     eventId: row.event_id as string,
+    policyId: (row.policy_id as string | null) ?? null,
     attendeeName: (row.attendee_name as string | null) ?? null,
     attendeeEmail: (row.attendee_email as string | null) ?? null,
     expiresAt,
@@ -410,17 +436,12 @@ function toScanner(row: Row): Scanner {
     id: row.id as string,
     eventId: row.event_id as string,
     label: row.label as string,
+    gateId: (row.gate_id as string | null) ?? null,
+    gateName: (row.gate_name as string | null) ?? null,
     createdAt: row.created_at as string,
     revokedAt: (row.revoked_at as string | null) ?? null,
     lastUsedAt: (row.last_used_at as string | null) ?? null
   };
-}
-
-/** All timestamps are stored as UTC ISO-8601 so string comparison orders them correctly. */
-function isoDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) throw httpError(400, `Invalid date: ${value}`);
-  return date.toISOString();
 }
 
 function assertWindow(startsAt: string, endsAt: string): void {

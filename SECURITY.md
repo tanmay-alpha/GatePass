@@ -26,7 +26,7 @@ Known gaps, by design:
 - Rate limits are kept in process memory. They reset on restart and are not shared across processes. Add proxy-level limits for anything larger.
 - Anyone with a pass link can see the event and the attendee name on `/p/<token>`.
 - A scanner key stays valid on its device until it is revoked.
-- `/api/qr/custom` is a public, rate-limited render endpoint.
+- `/api/qr/custom` requires the admin token (it was public in earlier versions) and is rate-limited.
 - The application does not enforce HTTPS. Terminate TLS at a reverse proxy, or set `HTTPS_CERT_FILE`/`HTTPS_KEY_FILE`.
 
 ## Operator responsibilities
