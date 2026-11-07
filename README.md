@@ -312,7 +312,7 @@ The only client unit tests cover the CSV export. The Playwright suite (`e2e/`) d
 
 **Recommended: one host.** [docs/deployment.md](docs/deployment.md) runs the Docker image (amd64 or arm64) with Caddy for automatic HTTPS, for example on an Oracle Cloud Always Free Ampere A1 VM. **Optional:** [docs/deployment-vercel.md](docs/deployment-vercel.md) serves the static UI from Vercel and proxies `/api/*` and `/p/*` to that server ([`vercel.mjs`](vercel.mjs)). Vercel cannot host the API itself: SQLite needs a persistent local disk, which Vercel Functions do not have. The reasoning, including Render's costs, is in [ADR 0007](docs/decisions/0007-hosting.md).
 
-Status: the production image was exercised end to end over public HTTPS (temporary tunnel, persistence across restart, backup/restore drill) — see [testing.md](docs/testing.md#deployment-verification-2026-11-07-temporary-public-https). A permanent deployment on an Oracle VM or a Vercel account has **not** been performed: it needs the owner's VM access and Vercel login.
+Status: live demo at https://gatepass-sandy.vercel.app (Vercel free) with backend on Render free — demo only, database resets on restart/idle; details in [docs/deployment-live.md](docs/deployment-live.md); persistent production requires a paid Render disk or an Oracle VM.
 
 Production requirements that come from the code:
 

@@ -38,7 +38,7 @@ Caddy Reverse Proxy (HTTPS termination, proxy hop 1)
          ▼
 GatePass Node.js Server (binds 127.0.0.1:3000, proxy hop 2)
          │ Validates x-origin-secret (refuses requests without it)
-         │ Reads client IP from X-Forwarded-For with TRUST_PROXY=2
+         │ Resolves client IP via CLIENT_IP_HEADER=x-vercel-forwarded-for
          ▼
 SQLite Database (persistent volume / disk)
 ```
@@ -53,7 +53,7 @@ Configure the server's `.env` with the following variables:
 
 - `APP_PUBLIC_URL`: Set this to the **Vercel public origin** (for example, `https://gate.example.com` or `https://<project>.vercel.app`), *not* the backend API hostname. Pass QR codes and redemption links encode `${APP_PUBLIC_URL}/p/<token>`. Users and scanners must open these links on the public Vercel frontend, which proxies `/p/*` requests back to the backend.
 - `ORIGIN_SECRET`: Generate a random secret of at least 32 characters (e.g. `openssl rand -hex 32`). The server middleware in `src/server/app.ts` rejects any request lacking this header with HTTP 403 (with the sole exception of `/api/health`), preventing clients from bypassing Vercel to forge headers or flood the origin directly.
-- `TRUST_PROXY=2`: Informs Express that requests pass through two reverse proxies: the Vercel edge and the backend Caddy instance. Per [Vercel Rewrites documentation](https://vercel.com/docs/routing/rewrites), Vercel appends the visitor's IP address to `x-forwarded-for`. Setting `TRUST_PROXY=2` allows Express rate limiters to resolve the genuine client IP rather than throttling Vercel or Caddy IP addresses.
+- `CLIENT_IP_HEADER=x-vercel-forwarded-for`: Set this together with `ORIGIN_SECRET`. Relying on hop counting (`TRUST_PROXY=2`) is fragile because hosting platforms (e.g. Render, or cloud load balancers/reverse proxies) add their own proxy hops, causing Express to pick an intermediate proxy or edge IP rather than the true client IP. Per Vercel edge documentation, Vercel overwrites `x-vercel-forwarded-for` with the genuine visitor IP. Setting `CLIENT_IP_HEADER=x-vercel-forwarded-for` instructs GatePass to extract the client IP directly from this header for rate limiting. Note that `CLIENT_IP_HEADER` strictly requires `ORIGIN_SECRET`; without origin validation, an untrusted client reaching the backend directly could spoof this header to select its own rate-limit bucket.
 
 ### 2. Create the Vercel Project
 
