@@ -2,9 +2,10 @@ import { CalendarPlus, LogOut, ScanLine } from 'lucide-react';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { EventSummary } from '../../shared/types';
 import { api, ApiError, formatDateTime } from '../api';
-import { ErrorNote, errorMessage } from '../ui';
-import { EventDetail } from './EventDetail';
+import { EmptyState, ErrorNote, ToneBadge, errorMessage } from '../ui';
+import { EVENT_TABS, EventDetail, type EventTab } from './EventDetail';
 import { EventForm } from './EventForm';
+import { ToastProvider } from './toast';
 
 const TOKEN_KEY = 'gatepass.adminToken';
 
@@ -25,7 +26,11 @@ export function AdminApp() {
       />
     );
   }
-  return <Dashboard token={token} onSignOut={signOut} />;
+  return (
+    <ToastProvider>
+      <Dashboard token={token} onSignOut={signOut} />
+    </ToastProvider>
+  );
 }
 
 function AdminLogin({ onSignIn }: { onSignIn: (token: string) => void }) {
@@ -51,7 +56,9 @@ function AdminLogin({ onSignIn }: { onSignIn: (token: string) => void }) {
     <main className="login">
       <form className="card login-card" onSubmit={submit}>
         <h1>GatePass admin</h1>
-        <p className="muted">Sign in with the server's <code>ADMIN_TOKEN</code>. It is kept for this browser tab only.</p>
+        <p className="muted">
+          Sign in with the server's <code>ADMIN_TOKEN</code>. It is kept for this browser tab only.
+        </p>
         <label>
           Admin token
           <input type="password" autoComplete="current-password" value={value} onChange={(e) => setValue(e.target.value)} required />
@@ -68,14 +75,21 @@ function AdminLogin({ onSignIn }: { onSignIn: (token: string) => void }) {
   );
 }
 
-function selectedFromHash(): string | null {
-  const match = /^#\/events\/([\w-]+)$/.exec(window.location.hash);
-  return match ? match[1] : null;
+interface Route {
+  eventId: string | null;
+  tab: EventTab;
+}
+
+/** `#/events/<id>` or `#/events/<id>/<tab>`; unknown tabs fall back to Operations. */
+function routeFromHash(): Route {
+  const match = /^#\/events\/([\w-]+)(?:\/([\w-]+))?$/.exec(window.location.hash);
+  const tab = EVENT_TABS.find((item) => item.id === match?.[2])?.id ?? 'operations';
+  return { eventId: match ? match[1] : null, tab };
 }
 
 function Dashboard({ token, onSignOut }: { token: string; onSignOut: () => void }) {
-  const [events, setEvents] = useState<EventSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(selectedFromHash);
+  const [events, setEvents] = useState<EventSummary[] | null>(null);
+  const [route, setRoute] = useState<Route>(routeFromHash);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
 
@@ -94,23 +108,23 @@ function Dashboard({ token, onSignOut }: { token: string; onSignOut: () => void 
   }, [loadEvents]);
 
   useEffect(() => {
-    const onHash = () => setSelectedId(selectedFromHash());
+    const onHash = () => setRoute(routeFromHash());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  function select(id: string) {
+  function navigate(eventId: string, tab: EventTab = 'operations') {
     setCreating(false);
-    window.location.hash = `/events/${id}`;
+    window.location.hash = tab === 'operations' ? `/events/${eventId}` : `/events/${eventId}/${tab}`;
   }
 
-  const selected = events.find((event) => event.id === selectedId) ?? null;
+  const selected = events?.find((event) => event.id === route.eventId) ?? null;
 
   return (
     <div className="shell">
       <header className="topbar">
         <span className="brand">GatePass</span>
-        <nav className="topbar-actions">
+        <nav className="topbar-actions" aria-label="Account">
           <a className="btn btn-ghost" href="/scan">
             <ScanLine size={16} aria-hidden /> Scanner
           </a>
@@ -120,50 +134,59 @@ function Dashboard({ token, onSignOut }: { token: string; onSignOut: () => void 
         </nav>
       </header>
       <div className="layout">
-        <aside className="sidebar">
+        <aside className="sidebar" aria-label="Events">
           <div className="sidebar-head">
             <h2>Events</h2>
             <button className="btn btn-primary btn-small" onClick={() => setCreating(true)}>
-              <CalendarPlus size={16} aria-hidden /> New
+              <CalendarPlus size={16} aria-hidden /> New event
             </button>
           </div>
           <ErrorNote message={error} />
-          {events.length === 0 && !error ? <p className="muted">No events yet. Create one to start issuing passes.</p> : null}
+          {events === null && !error ? <p className="muted small" role="status">Loading events…</p> : null}
+          {events?.length === 0 ? <p className="muted small">No events yet.</p> : null}
           <ul className="event-list">
-            {events.map((event) => (
-              <li key={event.id}>
-                <button className={`event-item${event.id === selectedId && !creating ? ' selected' : ''}`} onClick={() => select(event.id)}>
-                  <span className="event-item-name">
-                    {event.name}
-                    {event.status === 'archived' ? <span className="badge badge-muted">Archived</span> : null}
-                  </span>
-                  <span className="muted small">{formatDateTime(event.startsAt)}</span>
-                  <span className="event-item-counts small">
-                    {event.passCount} passes · {event.attendeeCount} attendees · {event.redeemedCount} checked in
-                  </span>
-                </button>
-              </li>
-            ))}
+            {events?.map((event) => {
+              const current = event.id === route.eventId && !creating;
+              return (
+                <li key={event.id}>
+                  <button className={`event-item${current ? ' selected' : ''}`} aria-current={current ? 'page' : undefined} onClick={() => navigate(event.id)}>
+                    <span className="event-item-name">
+                      {event.name}
+                      {event.status === 'archived' ? <ToneBadge tone="muted">Archived</ToneBadge> : null}
+                    </span>
+                    <span className="muted small">{formatDateTime(event.startsAt)}</span>
+                    <span className="muted small num">
+                      {event.passCount} passes · {event.redeemedCount} checked in
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </aside>
         <main className="content">
           {creating ? (
-            <section className="card">
-              <h2>New event</h2>
+            <section className="card" aria-labelledby="new-event-title">
+              <h2 id="new-event-title">New event</h2>
               <EventForm
                 token={token}
                 onCancel={() => setCreating(false)}
                 onSaved={async (event) => {
                   await loadEvents();
-                  select(event.id);
+                  navigate(event.id, 'passes');
                 }}
               />
             </section>
           ) : selected ? (
-            <EventDetail key={selected.id} token={token} event={selected} onChanged={loadEvents} />
-          ) : (
-            <section className="card empty">
-              <p className="muted">Select an event, or create a new one.</p>
+            <EventDetail key={selected.id} token={token} event={selected} tab={route.tab} onTab={(tab) => navigate(selected.id, tab)} onChanged={loadEvents} />
+          ) : events === null ? null : (
+            <section className="card">
+              <EmptyState title={route.eventId ? 'Event not found' : events.length ? 'Select an event' : 'Create your first event'}>
+                <p>{events.length ? 'Choose an event from the list to manage passes, gates and check-ins.' : 'An event holds its passes, gates, admission policies and door devices.'}</p>
+                <button className="btn btn-primary" onClick={() => setCreating(true)}>
+                  <CalendarPlus size={16} aria-hidden /> New event
+                </button>
+              </EmptyState>
             </section>
           )}
         </main>

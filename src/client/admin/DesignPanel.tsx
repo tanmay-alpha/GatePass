@@ -3,7 +3,8 @@ import { defaultDesignConfig, logoGallery, templates } from '../../qr/design';
 import type { DesignConfig, EventSummary } from '../../shared/types';
 import { api, renderQrObjectUrl } from '../api';
 import { createQrDetector } from '../qr-detector';
-import { ErrorNote, errorMessage } from '../ui';
+import { ErrorNote, SectionHead, errorMessage } from '../ui';
+import { useToast } from './toast';
 
 // Same length and character set as a real pass URL, so the scan check is representative.
 const SAMPLE_URL = `${window.location.origin}/p/${'x'.repeat(43)}`;
@@ -20,7 +21,9 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
   const [preview, setPreview] = useState('');
   const [check, setCheck] = useState<ScanCheck>('checking');
   const [error, setError] = useState('');
-  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const notify = useToast();
 
   useEffect(() => {
     let live = true;
@@ -28,7 +31,7 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
     setCheck('checking');
     (async () => {
       try {
-        url = await renderQrObjectUrl(SAMPLE_URL, design);
+        url = await renderQrObjectUrl(token, SAMPLE_URL, design);
         if (!live) return URL.revokeObjectURL(url);
         setPreview(url);
         const image = new Image();
@@ -48,10 +51,10 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
       live = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [design]);
+  }, [token, design]);
 
   function update(patch: Partial<DesignConfig>) {
-    setSaved(false);
+    setDirty(true);
     setError('');
     setDesign((current) => ({ ...current, ...patch }));
   }
@@ -61,69 +64,81 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
   }
 
   async function save() {
+    setSaving(true);
+    setError('');
     try {
       await api(`/api/events/${event.id}`, token, { method: 'PATCH', body: { design } });
       await onChanged();
-      setSaved(true);
+      setDirty(false);
+      notify('Design saved. New and reissued passes use it.');
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      setSaving(false);
     }
   }
 
   return (
-    <div className="design">
-      <div className="design-preview">
-        {preview ? <img src={preview} alt="Pass QR preview" /> : <div className="qr-placeholder" />}
-        <p className={`scan-check scan-check-${check}`} role="status">
-          {check === 'checking' ? 'Checking readability…' : check === 'ok' ? 'Scan check passed' : 'Scan check failed: increase contrast or remove the logo'}
-        </p>
-      </div>
-      <div className="form-grid">
-        <label className="span-2">
-          Template
-          <select
-            value=""
-            onChange={(e) => {
-              const template = templates.find((item) => item.name === e.target.value);
-              if (template) update({ ...template.config });
-            }}
-          >
-            <option value="">Apply a template…</option>
-            {templates.map((template) => (
-              <option key={template.name}>{template.name}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Code colour
-          <input type="color" value={design.bodyColor} onChange={(e) => setInk(e.target.value)} />
-        </label>
-        <label>
-          Background
-          <input type="color" value={design.bgColor} onChange={(e) => update({ bgColor: e.target.value })} />
-        </label>
-        <label className="span-2">
-          Centre logo
-          <select value={design.logo ?? ''} onChange={(e) => update({ logo: e.target.value || null, logoMode: 'clean' })}>
-            <option value="">None</option>
-            {logoGallery.map((name) => (
-              <option key={name} value={`#${name}`}>
-                {name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <ErrorNote message={error} />
-        <div className="actions span-2">
-          <button className="btn btn-primary" onClick={() => void save()} disabled={check === 'fail'}>
-            Save design
-          </button>
-          <button className="btn btn-secondary" onClick={() => update({ ...defaultDesignConfig })}>
-            Reset
-          </button>
-          {saved ? <span className="muted small">Saved. New and reissued passes use this design.</span> : null}
+    <section className="card" aria-labelledby="design-title">
+      <SectionHead
+        id="design-title"
+        title="Pass design"
+        description="Applies to passes issued or reissued after saving. Every preview is checked with the same decoder the door scanner uses."
+      />
+      <div className="design">
+        <div className="design-preview">
+          {preview ? <img src={preview} alt="Pass QR preview" /> : <div className="qr-placeholder" />}
+          <p className={`scan-check scan-check-${check}`} role="status">
+            {check === 'checking' ? 'Checking readability…' : check === 'ok' ? 'Scan check passed' : 'Scan check failed: increase contrast or remove the logo'}
+          </p>
+        </div>
+        <div className="form-grid">
+          <label className="span-2">
+            Template
+            <select
+              value=""
+              onChange={(e) => {
+                const template = templates.find((item) => item.name === e.target.value);
+                if (template) update({ ...template.config });
+              }}
+            >
+              <option value="">Apply a template…</option>
+              {templates.map((template) => (
+                <option key={template.name}>{template.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Code colour
+            <input type="color" value={design.bodyColor} onChange={(e) => setInk(e.target.value)} />
+          </label>
+          <label>
+            Background
+            <input type="color" value={design.bgColor} onChange={(e) => update({ bgColor: e.target.value })} />
+          </label>
+          <label className="span-2">
+            Centre logo
+            <select value={design.logo ?? ''} onChange={(e) => update({ logo: e.target.value || null, logoMode: 'clean' })}>
+              <option value="">None</option>
+              {logoGallery.map((name) => (
+                <option key={name} value={`#${name}`}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <ErrorNote message={error} />
+          <div className="actions span-2">
+            <button className="btn btn-primary" onClick={() => void save()} disabled={saving || !dirty || check !== 'ok'}>
+              {saving ? 'Saving…' : 'Save design'}
+            </button>
+            <button className="btn btn-secondary" onClick={() => update({ ...defaultDesignConfig })}>
+              Reset
+            </button>
+            {dirty ? <span className="muted small">Unsaved changes</span> : null}
+          </div>
         </div>
       </div>
-    </div>
+    </section>
   );
 }

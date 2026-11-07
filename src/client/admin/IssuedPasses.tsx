@@ -2,24 +2,38 @@ import { Copy, Download, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { EventSummary, IssuedPass } from '../../shared/types';
 import { renderQrObjectUrl } from '../api';
+import { toCsv } from '../csv';
+import { errorMessage } from '../ui';
+
+const MAX_CARDS = 60;
+
+interface Props {
+  token: string;
+  event: EventSummary;
+  passes: IssuedPass[];
+  policyNames: Map<string, string>;
+  onClose: () => void;
+}
 
 /**
  * Shown once after issuance or reissue. Tokens are stored only as hashes, so
  * this is the last chance to download codes or copy links.
  */
-export function IssuedPasses({ event, passes, onClose }: { event: EventSummary; passes: IssuedPass[]; onClose: () => void }) {
+export function IssuedPasses({ token, event, passes, policyNames, onClose }: Props) {
   function downloadCsv() {
-    const escape = (value: string | null) => `"${(value ?? '').replace(/"/g, '""')}"`;
-    const rows = [['pass_id', 'attendee_name', 'attendee_email', 'expires_at', 'pass_url'].join(',')];
-    for (const pass of passes) rows.push([pass.id, pass.attendeeName, pass.attendeeEmail, pass.expiresAt, pass.passUrl].map(escape).join(','));
-    download(`${slug(event.name)}-passes.csv`, URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' })));
+    const csv = toCsv([
+      ['pass_id', 'attendee_name', 'attendee_email', 'policy', 'expires_at', 'pass_url'],
+      ...passes.map((pass) => [pass.id, pass.attendeeName, pass.attendeeEmail, pass.policyId ? (policyNames.get(pass.policyId) ?? pass.policyId) : null, pass.expiresAt, pass.passUrl])
+    ]);
+    // The BOM makes Excel read non-ASCII attendee names as UTF-8.
+    download(`${slug(event.name)}-passes.csv`, URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' })));
   }
 
   return (
-    <div className="issued" role="region" aria-label="Newly issued passes">
+    <section className="issued" aria-labelledby="issued-title">
       <div className="issued-head">
         <div>
-          <h3>
+          <h3 id="issued-title">
             {passes.length} pass{passes.length === 1 ? '' : 'es'} ready
           </h3>
           <p className="warning-text">Download or send these now. Codes cannot be shown again; use Reissue if one is lost.</p>
@@ -28,38 +42,46 @@ export function IssuedPasses({ event, passes, onClose }: { event: EventSummary; 
           <button className="btn btn-secondary btn-small" onClick={downloadCsv}>
             <Download size={14} aria-hidden /> CSV of links
           </button>
-          <button className="btn btn-ghost btn-small" onClick={onClose} aria-label="Close">
+          <button className="btn btn-ghost btn-small" onClick={onClose} aria-label="Close issued passes">
             <X size={16} aria-hidden />
           </button>
         </div>
       </div>
       <ul className="issued-grid">
-        {passes.slice(0, 60).map((pass) => (
-          <IssuedCard key={pass.id} event={event} pass={pass} />
+        {passes.slice(0, MAX_CARDS).map((pass) => (
+          <IssuedCard key={pass.id} token={token} event={event} pass={pass} />
         ))}
       </ul>
-      {passes.length > 60 ? <p className="muted small">Showing the first 60 codes. All {passes.length} links are in the CSV.</p> : null}
-    </div>
+      {passes.length > MAX_CARDS ? (
+        <p className="muted small">
+          Showing the first {MAX_CARDS} codes. All {passes.length} links are in the CSV.
+        </p>
+      ) : null}
+    </section>
   );
 }
 
-function IssuedCard({ event, pass }: { event: EventSummary; pass: IssuedPass }) {
+function IssuedCard({ token, event, pass }: { token: string; event: EventSummary; pass: IssuedPass }) {
   const [src, setSrc] = useState('');
+  const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const name = pass.attendeeName ?? 'unnamed attendee';
 
   useEffect(() => {
     let url = '';
     let live = true;
-    void renderQrObjectUrl(pass.passUrl, event.design).then((value) => {
-      url = value;
-      if (live) setSrc(value);
-      else URL.revokeObjectURL(value);
-    });
+    renderQrObjectUrl(token, pass.passUrl, event.design)
+      .then((value) => {
+        url = value;
+        if (live) setSrc(value);
+        else URL.revokeObjectURL(value);
+      })
+      .catch((err) => live && setError(errorMessage(err)));
     return () => {
       live = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [pass.passUrl, event.design]);
+  }, [token, pass.passUrl, event.design]);
 
   async function copy() {
     await navigator.clipboard.writeText(pass.passUrl);
@@ -68,19 +90,23 @@ function IssuedCard({ event, pass }: { event: EventSummary; pass: IssuedPass }) 
   }
 
   async function downloadPng() {
-    const url = await renderQrObjectUrl(pass.passUrl, event.design, 'png');
-    download(`${slug(pass.attendeeName ?? pass.id.slice(0, 8))}.png`, url);
+    try {
+      const url = await renderQrObjectUrl(token, pass.passUrl, event.design, 'png');
+      download(`${slug(pass.attendeeName ?? pass.id.slice(0, 8))}.png`, url);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
   }
 
   return (
     <li className="issued-card">
-      {src ? <img src={src} alt={`QR pass for ${pass.attendeeName ?? 'unnamed attendee'}`} /> : <div className="qr-placeholder" />}
+      {src ? <img src={src} alt={`QR pass for ${name}`} /> : <div className="qr-placeholder">{error ? <span className="small">{error}</span> : null}</div>}
       <div className="issued-name">{pass.attendeeName || <span className="muted">Unnamed</span>}</div>
       <div className="actions">
-        <button className="btn btn-ghost btn-small" onClick={() => void copy()}>
+        <button className="btn btn-ghost btn-small" onClick={() => void copy()} aria-label={`Copy link for ${name}`}>
           <Copy size={14} aria-hidden /> {copied ? 'Copied' : 'Link'}
         </button>
-        <button className="btn btn-ghost btn-small" onClick={() => void downloadPng()}>
+        <button className="btn btn-ghost btn-small" onClick={() => void downloadPng()} aria-label={`Download PNG for ${name}`}>
           <Download size={14} aria-hidden /> PNG
         </button>
       </div>
