@@ -1,0 +1,25 @@
+# Example Caddy configuration for GatePass (used by the `proxy` compose profile).
+#
+# GATEPASS_DOMAIN must be the host name from APP_PUBLIC_URL, e.g. gate.example.com,
+# with a DNS A/AAAA record pointing at this server and ports 80 and 443 reachable.
+# Caddy obtains and renews the TLS certificate automatically and redirects HTTP
+# to HTTPS. Certificates are stored in the caddy-data volume.
+#
+# Access logging is deliberately not enabled: pass URLs (/p/<token>) are bearer
+# credentials and must not be written to logs.
+
+{$GATEPASS_DOMAIN} {
+	encode zstd gzip
+
+	# Caddy sets X-Forwarded-For/-Proto/-Host to the real client values and does
+	# not trust client-supplied ones. The app runs with TRUST_PROXY=1 to match.
+	reverse_proxy gatepass:3000
+
+	# The app already sends CSP, HSTS, X-Frame-Options, X-Content-Type-Options,
+	# Referrer-Policy and Permissions-Policy. Only adjust what the app cannot:
+	# `>` replaces the upstream HSTS header instead of adding a second copy.
+	header {
+		>Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}

@@ -1,0 +1,30 @@
+# Dependencies and build output are produced inside the image.
+**/node_modules
+dist
+coverage
+.vite
+
+# Local data, secrets and private key material.
+.local
+.env
+.env.*
+*.key
+*.pem
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# Not needed to build or run the image.
+.git
+.github
+tests
+docs
+deploy
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+.vscode
+.DS_Store
+Thumbs.db

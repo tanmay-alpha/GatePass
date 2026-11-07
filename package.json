@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "description": "QR-based event entry: issue passes, verify them at the door with authenticated scanners.",
   "scripts": {
-    "dev": "tsx watch --env-file-if-exists=.env src/server/index.ts",
+    "dev": "tsx watch --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "start": "node --env-file-if-exists=.env --import tsx src/server/index.ts",
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --import tsx src/server/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke:qr": "tsx scripts/qr-smoke.ts"
@@ -23,7 +23,7 @@
     "helmet": "^8.3.0",
     "qrcode": "^1.5.4",
     "tsx": "^4.21.0",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

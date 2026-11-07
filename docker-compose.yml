@@ -1,0 +1,49 @@
+# GatePass on a single host.
+#   docker compose up -d --build                  # app only, on 127.0.0.1:3000
+#   docker compose --profile proxy up -d --build  # app + Caddy with automatic HTTPS
+# Requires a .env file next to this file (copy .env.example). See docs/deployment.md.
+name: gatepass
+
+services:
+  gatepass:
+    build:
+      context: .
+    image: gatepass:local
+    env_file: .env
+    environment:
+      # Fixed container-side values; these override anything set in .env.
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATABASE_FILE: /data/gatepass.db
+      # One proxy hop (Caddy, or a reverse proxy on the host) sets X-Forwarded-For.
+      TRUST_PROXY: "1"
+    volumes:
+      - gatepass-data:/data
+    ports:
+      # Loopback only: reach the app through the proxy, never directly from the internet.
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    profiles: [proxy]
+    depends_on:
+      gatepass:
+        condition: service_healthy
+    environment:
+      # Read from .env by compose variable interpolation; only the domain is passed to Caddy.
+      GATEPASS_DOMAIN: ${GATEPASS_DOMAIN:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    restart: unless-stopped
+
+volumes:
+  gatepass-data:
+  caddy-data:
+  caddy-config:

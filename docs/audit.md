@@ -13,6 +13,8 @@ Audit of upstream `CompleteTech-LLC/qr-code-toolkit` at `b72b6ce` before any Gat
 
 No history exists for the authentication or persistence design; both arrived fully formed in `28ba628`.
 
+Hashes above refer to the upstream repository. In this repository the upstream commits keep their authors, dates and file contents, but co-author trailers were removed from the messages of the PR #1 and PR #4 commits, so those commits and every later commit have different hashes from upstream.
+
 ## Architecture
 
 ```mermaid
