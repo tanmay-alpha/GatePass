@@ -1,0 +1,25 @@
+GatePass
+Copyright (c) 2026 Tanmay Mangal
+
+GatePass is distributed under the MIT License; see the LICENSE file.
+
+This product is derived from QR Code Toolkit
+(https://github.com/CompleteTech-LLC/qr-code-toolkit),
+Copyright (c) 2026 CompleteTech LLC, licensed under the MIT License.
+The upstream copyright and permission notice is retained in the LICENSE file.
+Retained upstream components include the QR renderer (src/qr/renderer.ts),
+design presets and templates (src/qr/design.ts) and logo icons
+(src/qr/logo-icons.ts). The upstream git history is preserved in this repository.
+
+Third-party components bundled into the client build:
+- barcode-detector (MIT License)
+- zxing-wasm (MIT License), which includes a WebAssembly build of
+  ZXing-C++ (Apache License 2.0, https://github.com/zxing-cpp/zxing-cpp)
+- react, react-dom (MIT License)
+- lucide-react (ISC License)
+
+Runtime server dependencies: express, helmet, express-rate-limit, qrcode,
+zod, tsx (all MIT License).
+
+Product names and logos in the built-in logo presets belong to their
+respective owners and do not imply endorsement.
