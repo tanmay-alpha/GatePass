@@ -328,7 +328,7 @@ The server and database behaviour above is covered by automated tests. The clien
 
 ## Attribution
 
-GatePass is built on [CompleteTech-LLC/qr-code-toolkit](https://github.com/CompleteTech-LLC/qr-code-toolkit) (MIT License, Copyright (c) 2026 CompleteTech LLC). The upstream commit history is kept in this repository. The following upstream parts are retained:
+GatePass is built on [CompleteTech-LLC/qr-code-toolkit](https://github.com/CompleteTech-LLC/qr-code-toolkit) (MIT License, Copyright (c) 2026 CompleteTech LLC). The upstream commits are retained in this repository with their original authors, dates and content. The messages of two upstream commits (the PR #1 and PR #4 commits) were edited to remove co-author trailers, so those commits, and every commit after them, have different hashes from upstream. The following upstream parts are retained:
 
 - the QR renderer: `src/qr/renderer.ts`, `src/qr/design.ts`, `src/qr/logo-icons.ts`
 - the design presets and templates
@@ -348,7 +348,8 @@ Product names and logos in the built-in logo presets belong to their owners and 
 | [express-rate-limit](https://github.com/express-rate-limit/express-rate-limit) | MIT | Rate limiting |
 | [zod](https://github.com/colinhacks/zod) | MIT | Input validation |
 | [qrcode](https://github.com/soldair/node-qrcode) | MIT | QR matrix and PNG output |
-| [tsx](https://github.com/privatenumber/tsx) | MIT | Runs the TypeScript server |
+| [tsx](https://github.com/privatenumber/tsx) | MIT | Runs the TypeScript server in development (`npm run dev`) |
+| [@playwright/test](https://github.com/microsoft/playwright) | Apache-2.0 | End-to-end tests (development only) |
 | [react](https://github.com/facebook/react), react-dom | MIT | Admin and scanner UI (bundled) |
 | [lucide-react](https://github.com/lucide-icons/lucide) | ISC | UI icons (bundled) |
 | [barcode-detector](https://github.com/Sec-ant/barcode-detector) | MIT | `BarcodeDetector` ponyfill (bundled) |
@@ -359,4 +360,4 @@ Each dependency keeps its own license; see `node_modules/<package>/LICENSE`.
 
 ## License
 
-GatePass is released under the [MIT License](LICENSE). The upstream copyright notice in `LICENSE` is kept unchanged. The GatePass copyright and the upstream attribution are in [NOTICE](NOTICE).
+GatePass is released under the [MIT License](LICENSE). `LICENSE` keeps the upstream MIT text and the upstream copyright line `Copyright (c) 2026 CompleteTech LLC`, with an added copyright line for the GatePass modifications. The GatePass copyright and the upstream attribution are in [NOTICE](NOTICE).
