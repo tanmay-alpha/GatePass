@@ -31,7 +31,7 @@ describe('events', () => {
   it.each([
     [{ ...EVENT_INPUT, name: '' }, /name/],
     [{ ...EVENT_INPUT, startsAt: 'tomorrow' }, /startsAt/],
-    [{ ...EVENT_INPUT, endsAt: EVENT_INPUT.startsAt }, /endsAt must be after startsAt/],
+    [{ ...EVENT_INPUT, endsAt: EVENT_INPUT.startsAt }, /must end after it starts/],
     [{ ...EVENT_INPUT, design: { bodyColor: 'red' } }, /six-digit hex/],
     [{ ...EVENT_INPUT, extra: true }, /extra|Unrecognized/i]
   ])('rejects invalid event input %#', async (body, message) => {
@@ -42,7 +42,7 @@ describe('events', () => {
   it('rejects an update that would invert the event window', async () => {
     const { event } = await seedEvent(h);
     const response = await h.admin(request(h.app).patch(`/api/events/${event.id}`)).send({ endsAt: '2030-06-01T17:00:00.000Z' }).expect(400);
-    expect(response.body.error).toMatch(/endsAt/);
+    expect(response.body.error).toMatch(/must end after it starts/);
   });
 
   it('returns 404 for unknown events', async () => {

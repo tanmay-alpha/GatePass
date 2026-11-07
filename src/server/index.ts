@@ -43,7 +43,8 @@ const app = createApp({
   trustProxy: trustProxySetting(config.TRUST_PROXY),
   clientDir: config.CLIENT_DIR,
   originSecret: config.ORIGIN_SECRET,
-  clientIpHeader: config.CLIENT_IP_HEADER
+  clientIpHeader: config.CLIENT_IP_HEADER,
+  demoMode: config.DEMO_MODE
 });
 
 const tls = config.HTTPS_CERT_FILE && config.HTTPS_KEY_FILE

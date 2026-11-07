@@ -206,5 +206,5 @@ function toGate(row: Row): Gate {
 }
 
 function assertWindow(opensAt: string | null, closesAt: string | null): void {
-  if (opensAt && closesAt && closesAt <= opensAt) throw httpError(400, 'closesAt must be after opensAt');
+  if (opensAt && closesAt && closesAt <= opensAt) throw httpError(400, 'Entry must close after it opens.');
 }

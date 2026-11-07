@@ -153,8 +153,8 @@ export class GatePass {
       const event = this.getEvent(eventId);
       if (event.status !== 'active') throw httpError(409, 'Passes cannot be issued for an archived event');
       const expiresAt = input.expiresAt ? isoDate(input.expiresAt) : event.endsAt;
-      if (expiresAt <= now) throw httpError(400, 'expiresAt must be in the future');
-      if (expiresAt <= event.startsAt) throw httpError(400, 'expiresAt must be after the event starts, or the pass can never be used');
+      if (expiresAt <= now) throw httpError(400, 'The pass expiry must be in the future.');
+      if (expiresAt <= event.startsAt) throw httpError(400, 'The pass expiry must be after the event starts, or the pass could never be used.');
       if (input.policyId) this.access.assertPolicy(eventId, input.policyId);
       const insert = this.db.prepare(
         'INSERT INTO passes (id, event_id, policy_id, token_hash, attendee_name, attendee_email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -388,7 +388,11 @@ const EVENT_SELECT = `
     (SELECT COUNT(*) FROM passes p WHERE p.event_id = e.id) AS pass_count,
     (SELECT COUNT(*) FROM passes p WHERE p.event_id = e.id AND (p.attendee_name IS NOT NULL OR p.attendee_email IS NOT NULL)) AS attendee_count,
     (SELECT COUNT(*) FROM redemptions r JOIN passes p ON p.id = r.pass_id WHERE p.event_id = e.id) AS redeemed_count,
-    (SELECT COUNT(*) FROM passes p WHERE p.event_id = e.id AND p.revoked_at IS NOT NULL) AS revoked_count
+    (SELECT COUNT(*) FROM passes p WHERE p.event_id = e.id AND p.revoked_at IS NOT NULL) AS revoked_count,
+    (SELECT COUNT(*) FROM gates g WHERE g.event_id = e.id) AS gate_count,
+    (SELECT COUNT(*) FROM admission_policies ap WHERE ap.event_id = e.id) AS policy_count,
+    (SELECT COUNT(*) FROM scanners s WHERE s.event_id = e.id AND s.revoked_at IS NULL) AS scanner_count,
+    (SELECT COUNT(*) FROM scans sc WHERE sc.event_id = e.id) AS scan_count
   FROM events e`;
 
 const SCANNER_SELECT = 'SELECT s.*, g.name AS gate_name FROM scanners s LEFT JOIN gates g ON g.id = s.gate_id';
@@ -407,7 +411,11 @@ function toEvent(row: Row): EventSummary {
     passCount: Number(row.pass_count),
     attendeeCount: Number(row.attendee_count),
     redeemedCount: Number(row.redeemed_count),
-    revokedCount: Number(row.revoked_count)
+    revokedCount: Number(row.revoked_count),
+    gateCount: Number(row.gate_count),
+    policyCount: Number(row.policy_count),
+    scannerCount: Number(row.scanner_count),
+    scanCount: Number(row.scan_count)
   };
 }
 
@@ -445,5 +453,5 @@ function toScanner(row: Row): Scanner {
 }
 
 function assertWindow(startsAt: string, endsAt: string): void {
-  if (endsAt <= startsAt) throw httpError(400, 'endsAt must be after startsAt');
+  if (endsAt <= startsAt) throw httpError(400, 'The event must end after it starts.');
 }

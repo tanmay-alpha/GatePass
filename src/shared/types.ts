@@ -42,6 +42,12 @@ export interface EventSummary {
   attendeeCount: number;
   redeemedCount: number;
   revokedCount: number;
+  /** Setup progress, for the guided checklist. */
+  gateCount: number;
+  policyCount: number;
+  /** Scanner devices that are not revoked. */
+  scannerCount: number;
+  scanCount: number;
 }
 
 /** Derived at read time: a pass is never stored as "expired". */

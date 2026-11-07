@@ -29,6 +29,8 @@ export interface AppOptions {
   clientIpHeader?: string;
   /** Disable rate limiting (benchmarks only). */
   rateLimits?: boolean;
+  /** Deployment has no durable storage; reported by /api/health so the UI can warn. */
+  demoMode?: boolean;
 }
 
 const isoDateTime = z.string().refine((value) => !Number.isNaN(Date.parse(value)), 'must be an ISO 8601 date-time');
@@ -93,7 +95,7 @@ const qrSchema = z.object({
 const ADMIN = 'admin';
 const passThrough: Middleware = (_req, _res, next) => next();
 
-export function createApp({ service, adminToken, trustProxy = false, clientDir, originSecret, clientIpHeader, rateLimits = true }: AppOptions): express.Express {
+export function createApp({ service, adminToken, trustProxy = false, clientDir, originSecret, clientIpHeader, rateLimits = true, demoMode = false }: AppOptions): express.Express {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', trustProxy);
@@ -183,7 +185,7 @@ export function createApp({ service, adminToken, trustProxy = false, clientDir, 
   app.get('/api/health', (_req, res) => {
     try {
       service.ping();
-      res.json({ ok: true, service: 'gatepass' });
+      res.json({ ok: true, service: 'gatepass', ...(demoMode ? { demo: true } : {}) });
     } catch (error) {
       console.error(error);
       res.status(503).json({ ok: false });

@@ -36,7 +36,9 @@ const envSchema = z.object({
     .optional(),
   CLIENT_DIR: z.string().default('dist/client'),
   HTTPS_CERT_FILE: z.string().optional(),
-  HTTPS_KEY_FILE: z.string().optional()
+  HTTPS_KEY_FILE: z.string().optional(),
+  /** `true` on deployments without durable storage; the UI then warns that data resets. */
+  DEMO_MODE: z.enum(['true', 'false']).default('false').transform((value) => value === 'true')
 }).refine((env) => !env.CLIENT_IP_HEADER || env.ORIGIN_SECRET, {
   message: 'CLIENT_IP_HEADER requires ORIGIN_SECRET; without it any client could set the header and pick its own rate-limit bucket'
 });
