@@ -38,23 +38,23 @@ flowchart LR
 | `admin/SettingsPanel.tsx` | Edit or archive the event. |
 | `admin/AuditPanel.tsx` | Read-only list of admin actions from `audit_log`. |
 | `scanner/ScannerApp.tsx` | Gets the scanner key, loads `/api/scanner/session`, then shows the station. |
-| `scanner/ScannerStation.tsx` | Camera loop: detect every 150 ms, ignore the same code for 4 s, 12 s request timeout, manual entry fallback. |
+| `scanner/ScannerStation.tsx` | Camera loop: detect every 150 ms, ignore the same code for 12 s, 12 s request timeout, manual entry (pass link, bare token or 8-character reference), clock in the event's time zone. |
 | `scanner/ResultOverlay.tsx` | Full-screen verdict (Admit / Already used / Denied / error) with colour, icon and headline; held for 2.5 s. |
-| `api.ts` | `fetch` wrapper: bearer token, deadline, `ApiError` with `http` / `timeout` / `network`, "waking up the server" hint after 3 s. |
-| `qr-detector.ts` | Native `BarcodeDetector` when it supports QR, otherwise the ZXing WebAssembly decoder served from our own origin. |
+| `api.ts` | `fetch` wrapper: session cookie (`credentials: 'same-origin'`) plus `X-GatePass-CSRF: 1` on writes for admin pages, bearer key for scanners, deadline, `ApiError` with `http` / `timeout` / `network`, "waking up the server" hint after 3 s. |
+| `qr-detector.ts` | Native `BarcodeDetector` when it supports QR, otherwise (or if the native detector fails) the ZXing WebAssembly decoder served from our own origin. |
 | `csv.ts` | CSV export with every cell quoted and formula injection neutralised. |
 
 **Client-side auth.**
 
-- *Admin*: the admin types `ADMIN_TOKEN` once. It is kept in `sessionStorage`, so it is gone when the tab closes, and sent as `Authorization: Bearer …` on every request.
+- *Admin*: organisers sign in with email and password (`/api/auth/login`, or `/api/auth/register` when `ALLOW_SIGNUP=true`, or by accepting an invitation). The server sets an HttpOnly `__Host-gatepass_session` cookie (7-day absolute, 24-hour idle limit); the client never sees the session id. `ADMIN_TOKEN` is not a UI login: it is an operator break-glass bearer credential for the API only. See [security-and-threat-model.md](security-and-threat-model.md).
 - *Scanner*: the setup link carries the key in the URL fragment (`/scan#key=gps_…`). Browsers never send fragments to servers or proxies. `ScannerApp` reads it once, stores it in `localStorage` (a door phone should survive a reload), and removes it from the address bar and history with `history.replaceState`. A 401 clears the stored key.
 
 ## 3. Backend modules (`src/server/`)
 
 | Module | Responsibility |
 | --- | --- |
-| `index.ts` | Entry point: load config, open the database, create the app, listen over HTTP or HTTPS, shut down cleanly on `SIGTERM`/`SIGINT`. `index.js backup <file>` writes a verified backup instead. |
-| `config.ts` | Validates environment variables with zod. Refuses a short `ADMIN_TOKEN` (< 24) or `ORIGIN_SECRET` (< 32), `TRUST_PROXY=true`, and `CLIENT_IP_HEADER` without `ORIGIN_SECRET`. |
+| `index.ts` | Entry point: load config, open the database, create the app, listen over HTTP or HTTPS, shut down cleanly on `SIGTERM`/`SIGINT`. CLI commands `backup <file>`, `verify [file]` and `restore <backup>` run instead of the server ([deployment-runbook.md](deployment-runbook.md)). |
+| `config.ts` | Validates environment variables with zod. Refuses a short `ADMIN_TOKEN` (< 24) or `ORIGIN_SECRET` (< 32), `TRUST_PROXY=true`, and `CLIENT_IP_HEADER` without `ORIGIN_SECRET`. Reads `ALLOW_SIGNUP` (default `false`). |
 | `app.ts` | Express app: origin-secret gate, client-IP header, helmet/CSP, rate limits, zod schemas, admin and scanner auth, all routes, SPA fallback. |
 | `http.ts` | `httpError`, the error handler (zod → 400, 4xx passed through, everything else a generic 500), `rateLimit`, `FailureThrottle`, bearer-token parsing. |
 | `gatepass.ts` | Domain service `GatePass`: events, passes, scanners, `redeem`, scan feed. Every write runs in `transaction()`. |
@@ -75,7 +75,10 @@ flowchart LR
 | GET | `/api/health` | public | Liveness (`SELECT 1`); adds `demo: true` in demo mode. Exempt from the origin secret. |
 | GET | `/p/:token` | public (60/min per IP) | Attendee pass page with QR. Read-only: opening it never redeems. |
 | GET, POST | `/api/qr/custom` | admin (120/min) | Render a QR (svg/png/pdf/eps) for design previews and setup links. |
-| GET | `/api/admin/session` | admin | Check the admin token. |
+| POST | `/api/auth/register`, `/api/auth/login`, `/api/auth/logout`, `/api/auth/password`, `/api/auth/reset` | public / account | Accounts and cookie sessions. Register is refused with 403 unless `ALLOW_SIGNUP=true`. |
+| GET | `/api/auth/session` | account | Current user and session expiry. |
+| POST | `/api/invitations/preview`, `/api/invitations/accept` | public | Inspect or accept an invitation token (sent in the body). |
+| GET, POST | `/api/platform/users…`, `/api/platform/invitations` | platform admin | Manage accounts and platform invitations. |
 | GET, POST | `/api/events` | admin | List or create events. |
 | GET, PATCH | `/api/events/:eventId` | admin | Read or update an event (including archive). |
 | GET | `/api/events/:eventId/operations` | admin | Operations dashboard summary. |
@@ -97,7 +100,7 @@ All other `/api/*` paths return 404 JSON. All `/api/*` routes except `/api/scann
 
 ## 5. Database
 
-One SQLite file, schema in `db.ts` as an append-only migration list tracked by `PRAGMA user_version`. Every table is `STRICT` (column types are enforced), foreign keys are on and use `ON DELETE RESTRICT`. Pragmas: `journal_mode = WAL` (readers do not block the writer), `busy_timeout = 5000` (a second connection waits up to 5 s for the write lock instead of failing at once), `synchronous = NORMAL`.
+One SQLite file, schema in `db.ts` as an append-only migration list tracked by `PRAGMA user_version` (currently version 3, which added `users`, `sessions`, `event_members`, `invitations`, `password_resets` and the event columns `status` (`draft`/`active`/`ended`/`archived`), `time_zone` and `capacity`). Every table is `STRICT` (column types are enforced), foreign keys are on and use `ON DELETE RESTRICT`. Pragmas: `journal_mode = WAL` (readers do not block the writer), `busy_timeout = 5000` (a second connection waits up to 5 s for the write lock instead of failing at once), `synchronous = FULL` (a committed redemption survives power loss).
 
 ```mermaid
 erDiagram
@@ -221,7 +224,7 @@ Persistent options ([ADR 0007](decisions/0007-hosting.md)):
 
 ## 9. Questions an interviewer may ask
 
-**Why SQLite and not Postgres?** One organiser, one event at a time, one small VM. SQLite gives transactions, constraints and a single-writer lock with no second service to run, secure and back up. `node:sqlite` is built into Node, so no native addon. The single writer is exactly what makes redemption atomic. Measured 2,300–2,500 redemptions/s end to end on the benchmark machine ([ADR 0001](decisions/0001-sqlite-single-process.md)).
+**Why SQLite and not Postgres?** One organiser, one event at a time, one small VM. SQLite gives transactions, constraints and a single-writer lock with no second service to run, secure and back up. `node:sqlite` is built into Node, so no native addon. The single writer is exactly what makes redemption atomic. Measured throughput is in [performance.md](performance.md) ([ADR 0001](decisions/0001-sqlite-single-process.md)).
 
 **Why not JWT for passes?** A signature proves the server issued a token, not that it has not been used or revoked. Single use needs shared state checked at scan time, so the scanner must ask the server anyway; then a random 256-bit lookup key does the same job, keeps the QR short, carries no personal data, and revocation/reissue take effect immediately ([ADR 0002](decisions/0002-hashed-bearer-tokens.md)).
 
@@ -233,4 +236,4 @@ Persistent options ([ADR 0007](decisions/0007-hosting.md)):
 
 **How would you add offline scanning?** *(Not implemented; the scanner tells staff not to admit while offline.)* Sync the event's pass hashes and policies to each device, decide locally, queue redemptions and upload them when back online; the server's primary key resolves conflicts and flags late duplicates. The trade-off: while offline, two gates can each admit the same screenshot, and capacity can only be enforced with per-device quotas. That is why the current design stays online-only ([threat-model.md](threat-model.md)).
 
-**What would you change for multi-tenant?** Replace the single `ADMIN_TOKEN` (actor is always `admin`) with organisations and user accounts (sessions or OIDC), add `org_id` to events and scope every query and trigger by it, record the real user in `audit_log`, and apply per-tenant rate limits. With SQLite, one database file per tenant is a simple way to keep data isolated.
+**What would you change for multi-tenant?** Accounts, cookie sessions and per-event membership (owner/manager) already exist, and the audit log records the real user. Remaining steps: add organisations with `org_id` on events, scope every query and trigger by it, and apply per-tenant rate limits. With SQLite, one database file per tenant is a simple way to keep data isolated.

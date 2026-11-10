@@ -21,7 +21,8 @@ The schema enforces the same rules independently: `redemptions.pass_id` is the p
 ## Consequences
 
 - Double admission and capacity overrun are prevented by the database even if the application rules were wrong.
-- All redemptions are serialised through one writer. Under load, latency is queueing time, not work time (see [testing.md](../testing.md#benchmark)).
+- All redemptions are serialised through one writer. Under load, latency is queueing time, not work time (see [performance.md](../performance.md)).
+- Since migration 3 the redeem transaction also re-checks the scanner's revocation, replays a repeated `requestId`, and claims the event-wide capacity next to the policy capacity. History-based concurrency tests are in `tests/concurrency.test.ts` ([test matrix](../test-matrix.md)).
 - A denied scan (`capacity_full`, `too_early`, …) changes nothing except the `scans` log, so the pass can be scanned again later.
 - Tests: `tests/redemption.test.ts` "admits exactly one of 25 concurrent HTTP scans of the same pass"; `tests/database.test.ts` "admits a pass once when a second connection redeems it too", "admits exactly one of 8 simultaneous redemptions of one pass" and "never exceeds slot capacity when 12 different passes race for 5 places" (worker threads, one connection each, released together by `tests/threads.ts`); "allows at most one redemption row per pass" and "makes over-admitting a capacity-limited policy impossible even with direct SQL"; `tests/policies-api.test.ts` "stops at capacity under 30 concurrent HTTP scans of different passes".
 

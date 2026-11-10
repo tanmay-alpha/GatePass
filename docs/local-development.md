@@ -14,7 +14,7 @@ npm ci
 cp .env.example .env
 ```
 
-Edit `.env` and set `ADMIN_TOKEN` to a random value of at least 24 characters:
+Edit `.env`: set `ADMIN_TOKEN` (the operator break-glass API credential, not a UI login) to a random value of at least 24 characters, and set `ALLOW_SIGNUP=true` so you can create a local account in the UI:
 
 ```sh
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
@@ -31,7 +31,7 @@ npm run dev       # tsx watch src/server/index.ts -> http://127.0.0.1:3000
 npm run dev:web   # vite on http://localhost:5173 (port from WEB_PORT), proxies /api to 127.0.0.1:3000
 ```
 
-- **Admin UI**: http://localhost:5173. Sign in with `ADMIN_TOKEN`.
+- **Admin UI**: http://localhost:5173. Create an account with **Sign up** (needs `ALLOW_SIGNUP=true`), then sign in with email and password.
 - **Scanner UI**: http://localhost:5173/scan. Open a scanner setup link from an event's **Scanners** tab, or paste a key.
 - **Pass pages**: issued pass links use `APP_PUBLIC_URL` (default `http://localhost:3000`), so they open `/p/<token>` on the API server.
 
@@ -48,7 +48,8 @@ npm start       # node --import tsx src/server/index.ts; serves dist/client and 
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ADMIN_TOKEN` | required | At least 24 characters. |
+| `ADMIN_TOKEN` | required | At least 24 characters. Operator bearer credential for the API only. |
+| `ALLOW_SIGNUP` | `false` | `true` allows self-registration of organizer accounts. Otherwise accounts come from invitations. |
 | `APP_PUBLIC_URL` | `http://localhost:3000` | Origin encoded in pass QR codes. A trailing slash is removed. |
 | `DATABASE_FILE` | `.local/data/gatepass.db` | The parent directory is created if missing. |
 | `HOST` | `127.0.0.1` | Set `0.0.0.0` to accept connections from other devices. |

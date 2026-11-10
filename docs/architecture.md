@@ -4,7 +4,7 @@ GatePass runs as one Node.js process. It serves a JSON API, a server-rendered at
 
 ```mermaid
 flowchart LR
-  Admin["Admin SPA (/)"] -- "Bearer ADMIN_TOKEN" --> API
+  Admin["Admin SPA (/)"] -- "session cookie (operator: Bearer ADMIN_TOKEN)" --> API
   Scanner["Scanner SPA (/scan)"] -- "Bearer scanner key" --> API
   Phone["Attendee phone"] -- "GET /p/:token" --> API
   subgraph Process["Node.js process"]
@@ -24,8 +24,8 @@ flowchart LR
 
 | Module (`src/server/`) | Responsibility |
 | --- | --- |
-| `index.ts` | Entry point: loads config, opens the database, starts HTTP or HTTPS, shuts down on `SIGTERM`/`SIGINT` (forced exit after 10 s). `node dist/server/index.js backup <file>` writes a verified online backup instead. |
-| `config.ts` | Validates environment variables with zod. Refuses `TRUST_PROXY=true`, an `ADMIN_TOKEN` under 24 characters and an `ORIGIN_SECRET` under 32. |
+| `index.ts` | Entry point: loads config, opens the database, starts HTTP or HTTPS, shuts down on `SIGTERM`/`SIGINT` (forced exit after 10 s). CLI commands instead of serving: `backup <file>` writes a verified online backup, `verify [file]` checks integrity and admission invariants, `restore <backup>` verifies and swaps in a backup (old files kept as `.replaced-<ts>`). See [deployment-runbook.md](deployment-runbook.md). |
+| `config.ts` | Validates environment variables with zod. Refuses `TRUST_PROXY=true`, an `ADMIN_TOKEN` (operator break-glass API credential) under 24 characters and an `ORIGIN_SECRET` under 32. `ALLOW_SIGNUP=true` opens self-registration (default `false`: accounts come from invitations). |
 | `app.ts` | Express app: optional `X-Origin-Secret` gate, helmet/CSP, `Permissions-Policy`, `no-store`, rate limits, zod request schemas, admin and scanner authentication, routes, static SPA. |
 | `http.ts` | Error handler (zod → 400, 4xx pass-through, generic 500), `rateLimit` wrapper around `express-rate-limit`, `FailureThrottle` (in-memory per-IP count of failed authentications), bearer-token parsing. |
 | `gatepass.ts` | Domain service: events, passes, scanners, redemption, scan feed. Every write runs in `transaction()`. |
@@ -48,8 +48,8 @@ In order, for every request:
 2. helmet sets security headers; `Permissions-Policy` allows the camera for this origin only; `/api` and `/p` responses are `Cache-Control: no-store`.
 3. `/api/*` except `/api/scanner/*`: 600 requests per minute per client IP.
 4. JSON bodies are capped at 100 kB; handlers parse bodies and queries with strict zod schemas.
-5. Admin routes compare the bearer token with `ADMIN_TOKEN` in constant time. Scanner routes look up `sha256(key)` among unrevoked scanners and attach the scanner (event, optional gate) to the request. A failed check is counted per IP by `FailureThrottle` (`http.ts`): the response is 401, or 429 with `Retry-After` once that IP has more than 60 failures in 5 minutes. Valid credentials are never refused by the throttle.
-6. Per-route limits: scanner session 60 per minute and redeem 240 per minute, both **per scanner device** (keyed after authentication, so gates behind one NAT address do not share a bucket); `/api/qr/custom` 120 per minute per IP (admin only); `/p/:token` 60 per minute per IP.
+5. Account routes accept the `__Host-gatepass_session` cookie (HttpOnly, Secure, SameSite=Strict on https) created by `/api/auth/login` or `/api/auth/register`; cookie writes need the `X-GatePass-CSRF: 1` header. Event access is checked per membership (owner or manager); non-members get 404. `ADMIN_TOKEN` is an operator break-glass bearer credential for the API only (no UI login), compared in constant time and audited as `operator`. Scanner routes look up `sha256(key)` among unrevoked scanners and attach the scanner (event, optional gate) to the request. A failed check is counted per IP by `FailureThrottle` (`http.ts`): the response is 401, or 429 with `Retry-After` once that IP has more than 60 failures in 5 minutes. Valid credentials are never refused by the throttle. See [security-and-threat-model.md](security-and-threat-model.md).
+6. Per-route limits: scanner session 60 per minute and redeem 240 per minute, both **per scanner device** (keyed after authentication, so gates behind one NAT address do not share a bucket); `/api/qr/custom` 120 per minute per IP (signed-in accounts only); `/p/:token` 60 per minute per IP.
 7. Service methods are synchronous (`node:sqlite` is synchronous). Errors with a 4xx `status` are returned as is; anything else becomes a generic 500.
 
 Client IPs come from `req.ip`, which honours `X-Forwarded-For` only for the number of hops set in `TRUST_PROXY`.
@@ -113,7 +113,7 @@ The QR code encodes `${APP_PUBLIC_URL}/p/<token>`. The scanner accepts that URL 
 
 ## Scanner setup
 
-The admin creates a scanner (optionally bound to a gate) and receives a `gps_…` key once. The UI shows `${origin}/scan#key=<key>` as a link and QR code. The scanner page reads the fragment, stores the key in `localStorage` and removes the fragment with `history.replaceState`; browsers do not send fragments to servers. A 401 from any scanner request clears the stored key. The camera loop (`src/client/scanner/ScannerStation.tsx`) runs detection every 150 ms, ignores the same code for 4 s and holds each result for 2.5 s. Without a secure context or camera permission the page offers manual entry.
+The admin creates a scanner (optionally bound to a gate) and receives a `gps_…` key once. The UI shows `${origin}/scan#key=<key>` as a link and QR code. The scanner page reads the fragment, stores the key in `localStorage` and removes the fragment with `history.replaceState`; browsers do not send fragments to servers. A 401 from any scanner request clears the stored key. The camera loop (`src/client/scanner/ScannerStation.tsx`) runs detection every 150 ms using the native `BarcodeDetector` with a fallback to the ZXing WebAssembly decoder, ignores the same code for 12 s and holds an admit result for 2.5 s. Times are shown in the event's time zone. Without a secure context or camera permission the page offers manual entry, which accepts the pass link, the bare token or the 8-character reference printed on the pass.
 
 ## Operations dashboard and audit
 
@@ -126,11 +126,11 @@ The admin client polls this endpoint and `GET /api/events/:id/scans?after=<last 
 
 ## Pass design
 
-Each event stores a normalised `DesignConfig` in `events.design_json`. The admin client renders previews through `POST /api/qr/custom` (admin token required). The pass page renders SVG on the server with the event's design. The design tab decodes the preview with the scanner's detector and will not save a design that fails to decode.
+Each event stores a normalised `DesignConfig` in `events.design_json`. The admin client renders previews through `POST /api/qr/custom` (signed-in account required). The pass page renders SVG on the server with the event's design. The design tab decodes the preview with the scanner's detector and will not save a design that fails to decode.
 
 ## Persistence
 
-Schema: [README.md#database-design](../README.md#database-design). Migrations are an append-only array in `db.ts`, tracked by `PRAGMA user_version`; each runs in its own transaction with the version bump. Before migrating an existing file the server writes `<file>.pre-v<N>.bak` (`VACUUM INTO`, then `PRAGMA integrity_check` on the copy). A database with a newer schema version than the build, or a corrupt file, stops startup; neither is ever replaced. One process per database file.
+Schema: [README.md#database-design](decisions/0009-durable-storage.md). Migrations are an append-only array in `db.ts`, tracked by `PRAGMA user_version`; each runs in its own transaction with the version bump. Before migrating an existing file the server writes `<file>.pre-v<N>.bak` (`VACUUM INTO`, then `PRAGMA integrity_check` on the copy). A database with a newer schema version than the build, or a corrupt file, stops startup; neither is ever replaced. One process per database file.
 
 ## Deployment topologies
 
