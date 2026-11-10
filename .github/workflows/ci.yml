@@ -6,10 +6,15 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node: [22, 24]
+        include:
+          - os: windows-latest
+            node: 24
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -17,6 +22,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - run: node --check vercel.mjs
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
@@ -25,6 +31,19 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: chromium
+            browser: chromium
+          - project: firefox
+            browser: firefox
+          - project: webkit
+            browser: webkit
+          - project: mobile-chrome
+            browser: chromium
+    name: e2e (${{ matrix.project }})
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -32,9 +51,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: npm run build
-      - run: npm run test:e2e
+      - run: npx playwright test --project=${{ matrix.project }}
 
   docker:
     runs-on: ubuntu-latest
@@ -50,3 +69,82 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Runs the real image: restart persistence on a named volume, the `verify`
+  # maintenance command, and a graceful SIGTERM stop.
+  docker-run:
+    runs-on: ubuntu-latest
+    env:
+      CONTAINER: gatepass-ci
+      VOLUME: gatepass-ci-data
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build linux/amd64 image
+        run: docker build -t gatepass:ci .
+      - name: Restart persistence, verify and graceful stop
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=http://127.0.0.1:3000
+          TOKEN=ci-operator-token-0123456789abcdef
+
+          wait_healthy() {
+            for _ in $(seq 1 45); do
+              status=$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER")
+              if [ "$status" = healthy ] && curl -fsS "$BASE/api/health" >/dev/null 2>&1; then
+                echo "container healthy"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "container did not become healthy (last status: $status)" >&2
+            docker logs "$CONTAINER" >&2
+            return 1
+          }
+          api() { # api METHOD PATH [JSON]
+            curl -fsS -X "$1" "$BASE$2" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' ${3:+--data "$3"}
+          }
+          redeem() { # redeem CODE REQUEST_ID
+            curl -fsS -X POST "$BASE/api/scanner/redeem" -H "Authorization: Bearer $SCANNER_KEY" \
+              -H 'Content-Type: application/json' --data "$(jq -nc --arg code "$1" --arg id "$2" '{code: $code, requestId: $id}')"
+          }
+          iso() { date -u -d "@$(( $(date +%s) + $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
+
+          docker volume create "$VOLUME" >/dev/null
+          docker run -d --name "$CONTAINER" -p 127.0.0.1:3000:3000 -v "$VOLUME:/data" \
+            -e ADMIN_TOKEN="$TOKEN" -e APP_PUBLIC_URL=http://localhost:3000 gatepass:ci >/dev/null
+          wait_healthy
+
+          EVENT_ID=$(api POST /api/events "$(jq -nc --arg s "$(iso -3600)" --arg e "$(iso 86400)" \
+            '{name: "CI restart check", startsAt: $s, endsAt: $e, status: "active"}')" | jq -er .id)
+          SCANNER_KEY=$(api POST "/api/events/$EVENT_ID/scanners" '{"label":"CI door"}' | jq -er .key)
+          PASS=$(api POST "/api/events/$EVENT_ID/passes" '{"count":1}' | jq -ec '.[0]')
+          PASS_ID=$(jq -er .id <<<"$PASS")
+          PASS_TOKEN=$(jq -er .token <<<"$PASS")
+          FIRST=$(redeem "$PASS_TOKEN" ci-first-scan-0001 | jq -er .outcome)
+          echo "first scan: $FIRST"
+          [ "$FIRST" = admitted ]
+
+          docker restart -t 15 "$CONTAINER" >/dev/null
+          wait_healthy
+
+          STATUS=$(api GET "/api/events/$EVENT_ID/passes" | jq -er --arg id "$PASS_ID" '.[] | select(.id == $id) | .status')
+          echo "pass status after restart: $STATUS"
+          [ "$STATUS" = redeemed ]
+          SECOND=$(redeem "$PASS_TOKEN" ci-second-scan-0002 | jq -er .outcome)
+          echo "re-scan after restart: $SECOND"
+          [ "$SECOND" = already_redeemed ]
+
+          docker exec "$CONTAINER" node dist/server/index.js verify | tee verify.json
+          jq -e '.ok == true' verify.json >/dev/null
+
+          docker stop -t 15 "$CONTAINER" >/dev/null
+          EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER")
+          echo "exit code after docker stop: $EXIT_CODE"
+          [ "$EXIT_CODE" = 0 ]
+          docker logs "$CONTAINER" 2>&1 | tail -n 5
+      - name: Remove container and volume
+        if: always()
+        run: |
+          docker rm -f "$CONTAINER" || true
+          docker volume rm "$VOLUME" || true

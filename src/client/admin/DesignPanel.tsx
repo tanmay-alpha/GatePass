@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { defaultDesignConfig, logoGallery, templates } from '../../qr/design';
 import type { DesignConfig, EventSummary } from '../../shared/types';
-import { api, renderQrObjectUrl } from '../api';
 import { createQrDetector } from '../qr-detector';
 import { ErrorNote, SectionHead, errorMessage } from '../ui';
+import { adminApi, adminQrUrl } from './http';
+import { ARCHIVED_NOTE, can } from './model';
 import { useToast } from './toast';
 
 // Same length and character set as a real pass URL, so the scan check is representative.
@@ -16,7 +17,8 @@ type ScanCheck = 'checking' | 'ok' | 'fail';
  * decoded with the same detector the door scanner uses, so a design that
  * hurts readability is flagged before passes go out.
  */
-export function DesignPanel({ token, event, onChanged }: { token: string; event: EventSummary; onChanged: () => Promise<void> }) {
+export function DesignPanel({ event, onChanged }: { event: EventSummary; onChanged: () => Promise<void> }) {
+  const editable = can(event, 'edit') && event.status !== 'archived';
   const [design, setDesign] = useState<DesignConfig>(event.design);
   const [preview, setPreview] = useState('');
   const [check, setCheck] = useState<ScanCheck>('checking');
@@ -31,7 +33,7 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
     setCheck('checking');
     (async () => {
       try {
-        url = await renderQrObjectUrl(token, SAMPLE_URL, design);
+        url = await adminQrUrl(SAMPLE_URL, design);
         if (!live) return URL.revokeObjectURL(url);
         setPreview(url);
         const image = new Image();
@@ -39,7 +41,7 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
         await image.decode();
         const detector = await createQrDetector();
         const found = await detector.detect(image);
-        if (live) setCheck(found.some((code) => code.rawValue === SAMPLE_URL) ? 'ok' : 'fail');
+        if (live) setCheck(found === SAMPLE_URL ? 'ok' : 'fail');
       } catch (err) {
         if (live) {
           setCheck('fail');
@@ -51,7 +53,7 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
       live = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [token, design]);
+  }, [design]);
 
   function update(patch: Partial<DesignConfig>) {
     setDirty(true);
@@ -67,7 +69,7 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
     setSaving(true);
     setError('');
     try {
-      await api(`/api/events/${event.id}`, token, { method: 'PATCH', body: { design } });
+      await adminApi(`/api/events/${event.id}`, { method: 'PATCH', body: { design } });
       await onChanged();
       setDirty(false);
       notify('Design saved. New and reissued passes use it.');
@@ -83,7 +85,13 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
       <SectionHead
         id="design-title"
         title="Pass design"
-        description="Applies to passes issued or reissued after saving. Every preview is checked with the same decoder the door scanner uses."
+        description={
+          editable
+            ? 'Applies to passes issued or reissued after saving. Every preview is checked with the same decoder the door scanner uses.'
+            : event.status === 'archived'
+              ? ARCHIVED_NOTE
+              : 'You can preview the design but not change it.'
+        }
       />
       <div className="design">
         <div className="design-preview">
@@ -92,7 +100,7 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
             {check === 'checking' ? 'Checking readability…' : check === 'ok' ? 'Scan check passed' : 'Scan check failed: increase contrast or remove the logo'}
           </p>
         </div>
-        <div className="form-grid">
+        <fieldset className="form-grid" disabled={!editable}>
           <label className="span-2">
             Template
             <select
@@ -128,16 +136,18 @@ export function DesignPanel({ token, event, onChanged }: { token: string; event:
             </select>
           </label>
           <ErrorNote message={error} />
-          <div className="actions span-2">
-            <button className="btn btn-primary" onClick={() => void save()} disabled={saving || !dirty || check !== 'ok'}>
-              {saving ? 'Saving…' : 'Save design'}
-            </button>
-            <button className="btn btn-secondary" onClick={() => update({ ...defaultDesignConfig })}>
-              Reset
-            </button>
-            {dirty ? <span className="muted small">Unsaved changes</span> : null}
-          </div>
-        </div>
+          {editable ? (
+            <div className="actions span-2">
+              <button className="btn btn-primary" onClick={() => void save()} disabled={saving || !dirty || check !== 'ok'}>
+                {saving ? 'Saving…' : 'Save design'}
+              </button>
+              <button className="btn btn-secondary" onClick={() => update({ ...defaultDesignConfig })}>
+                Reset
+              </button>
+              {dirty ? <span className="muted small">Unsaved changes</span> : null}
+            </div>
+          ) : null}
+        </fieldset>
       </div>
     </section>
   );

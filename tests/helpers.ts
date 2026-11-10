@@ -38,7 +38,7 @@ export function createHarness(options: Partial<GatePassOptions> = {}): Harness {
   const db = openDatabase(dbFile);
   const clock = new TestClock();
   const service = new GatePass(db, { publicUrl: PUBLIC_URL, now: clock.now, ...options });
-  const app = createApp({ service, adminToken: ADMIN_TOKEN });
+  const app = createApp({ service, adminToken: ADMIN_TOKEN, publicUrl: PUBLIC_URL, allowSignup: true });
   return {
     dir,
     dbFile,

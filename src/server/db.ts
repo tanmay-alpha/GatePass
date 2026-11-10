@@ -153,6 +153,127 @@ const migrations: string[] = [
   CREATE TRIGGER policy_gates_event_insert BEFORE INSERT ON policy_gates
     WHEN (SELECT event_id FROM gates WHERE id = NEW.gate_id) IS NOT (SELECT event_id FROM admission_policies WHERE id = NEW.policy_id)
     BEGIN SELECT RAISE(ABORT, 'gate belongs to another event'); END;
+  `,
+  // 3 — accounts, event membership, event lifecycle, idempotent scans
+  // (docs/decisions/0008-accounts-and-event-roles.md)
+  `
+  CREATE TABLE users (
+    id                  TEXT PRIMARY KEY,
+    email               TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK (length(email) BETWEEN 3 AND 254),
+    name                TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 100),
+    password_hash       TEXT NOT NULL,
+    platform_role       TEXT NOT NULL DEFAULT 'organizer' CHECK (platform_role IN ('organizer', 'platform_admin')),
+    created_at          TEXT NOT NULL,
+    password_changed_at TEXT NOT NULL,
+    disabled_at         TEXT
+  ) STRICT;
+
+  -- Only the SHA-256 of the session cookie is stored.
+  CREATE TABLE sessions (
+    id_hash      TEXT PRIMARY KEY CHECK (length(id_hash) = 64),
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    revoked_at   TEXT
+  ) STRICT;
+  CREATE INDEX sessions_user_idx ON sessions(user_id);
+
+  CREATE TABLE event_members (
+    event_id   TEXT NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    role       TEXT NOT NULL CHECK (role IN ('owner', 'manager')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (event_id, user_id)
+  ) STRICT, WITHOUT ROWID;
+  CREATE UNIQUE INDEX event_members_one_owner ON event_members(event_id) WHERE role = 'owner';
+  CREATE INDEX event_members_user_idx ON event_members(user_id);
+
+  -- One-time invitation links: 'organizer' / 'platform_admin' create an account,
+  -- 'manager' adds an account to one event.
+  CREATE TABLE invitations (
+    id          TEXT PRIMARY KEY,
+    token_hash  TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+    role        TEXT NOT NULL CHECK (role IN ('organizer', 'platform_admin', 'manager')),
+    email       TEXT NOT NULL COLLATE NOCASE CHECK (length(email) BETWEEN 3 AND 254),
+    event_id    TEXT REFERENCES events(id) ON DELETE RESTRICT,
+    created_by  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    accepted_at TEXT,
+    accepted_by TEXT REFERENCES users(id) ON DELETE RESTRICT,
+    revoked_at  TEXT,
+    CHECK ((role = 'manager') = (event_id IS NOT NULL)),
+    CHECK ((accepted_at IS NULL) = (accepted_by IS NULL))
+  ) STRICT;
+  CREATE INDEX invitations_event_idx ON invitations(event_id);
+
+  CREATE TABLE password_resets (
+    token_hash TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at    TEXT
+  ) STRICT;
+  CREATE INDEX password_resets_user_idx ON password_resets(user_id);
+
+  -- events: new lifecycle states and an event-wide capacity need new CHECKs,
+  -- so the table is rebuilt (foreign keys are off during migrations and
+  -- re-checked before commit). admitted_count is backfilled from redemptions.
+  CREATE TABLE events_v3 (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
+    venue          TEXT CHECK (venue IS NULL OR length(venue) <= 200),
+    time_zone      TEXT NOT NULL DEFAULT 'UTC' CHECK (length(time_zone) BETWEEN 1 AND 64),
+    starts_at      TEXT NOT NULL,
+    ends_at        TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'ended', 'archived')),
+    capacity       INTEGER CHECK (capacity IS NULL OR capacity >= 1),
+    admitted_count INTEGER NOT NULL DEFAULT 0 CHECK (admitted_count >= 0 AND (capacity IS NULL OR admitted_count <= capacity)),
+    design_json    TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    CHECK (ends_at > starts_at)
+  ) STRICT;
+  INSERT INTO events_v3 (id, name, venue, starts_at, ends_at, status, admitted_count, design_json, created_at, updated_at)
+    SELECT e.id, e.name, e.venue, e.starts_at, e.ends_at, e.status,
+           (SELECT COUNT(*) FROM redemptions r JOIN passes p ON p.id = r.pass_id WHERE p.event_id = e.id),
+           e.design_json, e.created_at, e.updated_at
+    FROM events e;
+  DROP TABLE events;
+  ALTER TABLE events_v3 RENAME TO events;
+
+  -- Scanner-generated request id: a retried redeem returns the original result
+  -- instead of being judged again (and reported as already used).
+  ALTER TABLE scans ADD COLUMN request_id TEXT CHECK (request_id IS NULL OR length(request_id) BETWEEN 8 AND 64);
+  CREATE UNIQUE INDEX scans_request_idx ON scans(scanner_id, request_id) WHERE request_id IS NOT NULL;
+
+  CREATE INDEX audit_action_idx ON audit_log(action, id);
+  CREATE INDEX audit_platform_idx ON audit_log(id) WHERE event_id IS NULL;
+  CREATE INDEX scans_alerts_idx ON scans(event_id, outcome, created_at);
+  CREATE INDEX scans_scanner_idx ON scans(scanner_id, created_at);
+
+  -- Scanner heartbeat (session fetch), distinct from last_used_at (last scan),
+  -- and who issued the current key (keys a removed manager issued are revoked).
+  ALTER TABLE scanners ADD COLUMN last_seen_at TEXT;
+  ALTER TABLE scanners ADD COLUMN key_issued_by TEXT;
+
+  -- Close the remaining cross-event gaps: policy_gates updates and
+  -- redemptions whose scanner, gate or policy belong to another event.
+  CREATE TRIGGER policy_gates_event_update BEFORE UPDATE ON policy_gates
+    WHEN (SELECT event_id FROM gates WHERE id = NEW.gate_id) IS NOT (SELECT event_id FROM admission_policies WHERE id = NEW.policy_id)
+    BEGIN SELECT RAISE(ABORT, 'gate belongs to another event'); END;
+  CREATE TRIGGER redemptions_event_insert BEFORE INSERT ON redemptions
+    WHEN (SELECT event_id FROM scanners WHERE id = NEW.scanner_id) IS NOT (SELECT event_id FROM passes WHERE id = NEW.pass_id)
+      OR (NEW.gate_id IS NOT NULL AND (SELECT event_id FROM gates WHERE id = NEW.gate_id) IS NOT (SELECT event_id FROM passes WHERE id = NEW.pass_id))
+      OR (NEW.policy_id IS NOT NULL AND (SELECT event_id FROM admission_policies WHERE id = NEW.policy_id) IS NOT (SELECT event_id FROM passes WHERE id = NEW.pass_id))
+    BEGIN SELECT RAISE(ABORT, 'redemption references another event'); END;
+  -- Admissions are permanent: a redemption row is never changed or removed.
+  CREATE TRIGGER redemptions_immutable_update BEFORE UPDATE ON redemptions
+    BEGIN SELECT RAISE(ABORT, 'redemptions are immutable'); END;
+  CREATE TRIGGER redemptions_immutable_delete BEFORE DELETE ON redemptions
+    BEGIN SELECT RAISE(ABORT, 'redemptions are immutable'); END;
   `
 ];
 
@@ -171,14 +292,19 @@ export function openDatabase(file: string, options: OpenOptions = {}): Database 
   const db = new DatabaseSync(file);
   try {
     // WAL lets readers proceed during a write; busy_timeout makes a second
-    // connection wait for the write lock instead of failing immediately.
-    db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;');
+    // connection wait for the write lock instead of failing immediately, and
+    // comes first because the journal_mode pragma itself can meet that lock.
+    // synchronous=FULL fsyncs the WAL on every commit: an admission that was
+    // reported to the door survives power loss, not only a process crash.
+    db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;');
     const current = schemaVersion(db);
     if (current > migrations.length) {
       throw new Error(`Database schema version ${current} is newer than this build supports (${migrations.length}). Upgrade GatePass or restore a matching backup.`);
     }
     if (file !== ':memory:' && current > 0 && current < migrations.length && options.backupBeforeMigrate !== false) {
-      backupDatabase(db, `${file}.pre-v${migrations.length}.bak`);
+      // A previous failed attempt may have left a backup for this version: keep it and write another.
+      const backup = `${file}.pre-v${migrations.length}.bak`;
+      backupDatabase(db, existsSync(backup) ? `${file}.pre-v${migrations.length}.${Date.now()}.bak` : backup);
     }
     migrate(db);
   } catch (error) {
@@ -195,17 +321,27 @@ export function schemaVersion(db: Database): number {
 /**
  * Applies pending migrations, each in its own transaction together with the
  * version bump, so a failing migration leaves the previous schema and data
- * untouched. `list` is injectable for tests.
+ * untouched. Foreign keys are switched off while migrations run (SQLite's
+ * documented procedure for rebuilding a referenced table) and every migration
+ * must pass `PRAGMA foreign_key_check` before it commits. `list` is
+ * injectable for tests.
  */
 export function migrate(db: Database, list: readonly string[] = migrations): void {
-  for (let version = schemaVersion(db); version < list.length; version += 1) {
-    transaction(db, () => {
-      db.exec(list[version]);
-      db.exec(`PRAGMA user_version = ${version + 1}`);
-    });
+  if (schemaVersion(db) >= list.length) return;
+  const foreignKeys = (db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number }).foreign_keys;
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    for (let version = schemaVersion(db); version < list.length; version += 1) {
+      transaction(db, () => {
+        db.exec(list[version]);
+        const violations = db.prepare('PRAGMA foreign_key_check').all();
+        if (violations.length) throw new Error(`Migration ${version + 1} leaves foreign key violations: ${JSON.stringify(violations.slice(0, 5))}`);
+        db.exec(`PRAGMA user_version = ${version + 1}`);
+      });
+    }
+  } finally {
+    db.exec(`PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'}`);
   }
-  const violations = db.prepare('PRAGMA foreign_key_check').all();
-  if (violations.length) throw new Error(`Foreign key violations after migration: ${JSON.stringify(violations.slice(0, 5))}`);
 }
 
 /**

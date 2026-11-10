@@ -1,38 +1,22 @@
 import { expect, test, type Page } from '@playwright/test';
-
-const ADMIN_TOKEN = process.env.E2E_ADMIN_TOKEN ?? 'e2e-admin-token-0123456789abcdef';
-
-/** `datetime-local` value (local time, minute precision) `minutes` from now. */
-function localInput(minutes: number): string {
-  const date = new Date(Date.now() + minutes * 60_000);
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-}
-
-async function signIn(page: Page) {
-  await page.goto('/');
-  await page.getByLabel('Admin token').fill(ADMIN_TOKEN);
-  await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByRole('heading', { name: 'Events' })).toBeVisible();
-}
+import { CSRF, createEvent, signUp } from './support';
 
 async function scan(page: Page, code: string) {
   await page.getByPlaceholder('Pass link or code').fill(code);
   await page.getByRole('button', { name: 'Check' }).click();
 }
 
-/** The full-screen verdict overlay (a button: tapping it dismisses the result). */
-const verdict = (page: Page) => page.getByRole('button', { name: /Tap to dismiss/ });
+/** The full-screen verdict overlay; its accessible name is the headline (Admit, Already used, Denied, Not verified). */
+const verdict = (page: Page) => page.getByRole('alertdialog');
+
+async function dismiss(page: Page) {
+  await page.keyboard.press('Escape');
+  await expect(verdict(page)).toHaveCount(0);
+}
 
 test('organiser configures gates and a capped policy; door staff see admit, duplicate, wrong gate and full', async ({ page, browser }) => {
-  await signIn(page);
-
-  // Event whose window contains "now".
-  await page.getByRole('complementary', { name: 'Events' }).getByRole('button', { name: 'New event' }).click();
-  await page.getByLabel('Name').fill('E2E Launch');
-  await page.getByLabel('Starts').fill(localInput(-60));
-  await page.getByLabel('Ends').fill(localInput(300));
-  await page.getByRole('button', { name: 'Create event' }).click();
-  await expect(page.getByRole('heading', { name: 'E2E Launch', level: 1 })).toBeVisible();
+  await signUp(page);
+  await createEvent(page, 'E2E Launch', { active: true });
 
   // Gates, a policy limited to North with capacity 1, and two scanner devices.
   await page.getByRole('tab', { name: 'Access' }).click();
@@ -41,19 +25,22 @@ test('organiser configures gates and a capped policy; door staff see admit, dupl
     await page.getByRole('button', { name: 'Add gate' }).click();
     await expect(page.getByText(gate, { exact: true }).first()).toBeVisible();
   }
-  await page.getByRole('button', { name: /New policy|Add policy/ }).click();
+  await page.getByRole('button', { name: 'New policy' }).click();
   const policyForm = page.locator('form').filter({ has: page.getByPlaceholder('e.g. VIP, Early entry') });
   await policyForm.getByLabel('Name').fill('VIP');
   await policyForm.getByLabel('Capacity').fill('1');
   await policyForm.getByLabel('North').check();
-  await policyForm.getByRole('button', { name: /Create|Save/ }).click();
+  await policyForm.getByRole('button', { name: 'Create policy' }).click();
   await expect(page.getByText('VIP', { exact: true }).first()).toBeVisible();
 
   const setupLinks: Record<string, string> = {};
-  for (const [label, gate] of [['North phone', 'North'], ['South phone', 'South']] as const) {
+  for (const [label, gate] of [
+    ['North phone', 'North'],
+    ['South phone', 'South']
+  ] as const) {
     await page.getByLabel('Device label').fill(label);
     await page.getByRole('combobox', { name: 'Gate' }).selectOption({ label: gate });
-    await page.getByRole('button', { name: /Add scanner|Add device/ }).click();
+    await page.getByRole('button', { name: 'Add device' }).click();
     const setup = page.getByRole('region', { name: `Setup for ${label}` });
     setupLinks[label] = await setup.getByLabel('Setup link').inputValue();
     await setup.getByRole('button', { name: 'Done' }).click();
@@ -88,39 +75,43 @@ test('organiser configures gates and a capped policy; door staff see admit, dupl
   await north.goto(setupLinks['North phone']);
   await expect(north.getByText('North phone')).toBeVisible();
   await scan(north, passes[0].passUrl);
-  await expect(verdict(north)).toHaveAccessibleName('Admit. Tap to dismiss.');
+  await expect(verdict(north)).toHaveAccessibleName('Admit');
   await expect(verdict(north)).toContainText('Ada Lovelace');
 
-  await verdict(north).click();
+  await dismiss(north);
   await scan(north, passes[0].passUrl);
-  await expect(verdict(north)).toHaveAccessibleName('Already used. Tap to dismiss.');
+  await expect(verdict(north)).toHaveAccessibleName('Already used');
 
-  await verdict(north).click();
+  await dismiss(north);
   await scan(north, passes[1].passUrl);
-  await expect(verdict(north)).toHaveAccessibleName('Denied. Tap to dismiss.');
+  await expect(verdict(north)).toHaveAccessibleName('Denied');
   await expect(verdict(north)).toContainText('VIP is full (1)');
 
-  await verdict(north).click();
+  await dismiss(north);
   await scan(north, 'https://elsewhere.example/p/' + 'Z'.repeat(43));
   await expect(verdict(north)).toContainText('Not a valid pass for this event.');
   await phone.close();
 
   // Operations dashboard reflects the scans.
   await page.getByRole('tab', { name: 'Operations' }).click();
-  await expect(page.getByText('Possible shared screenshot', { exact: false }).or(page.getByText(/presented .* more times/))).toHaveCount(0);
-  await expect(page.locator('main')).toContainText('North');
-  await expect(page.locator('main')).toContainText('1 of 1');
+  const panel = page.getByRole('tabpanel');
+  await expect(panel).toContainText('North');
+  await expect(panel.getByRole('region', { name: 'Policy capacity' })).toContainText('1/1');
 });
 
-test('revoked passes and revoked scanner devices are refused at the door', async ({ page, request }) => {
-  const headers = { Authorization: `Bearer ${ADMIN_TOKEN}` };
+test('revoked passes and revoked scanner devices are refused at the door', async ({ page }) => {
+  await signUp(page);
+  const api = page.request;
   const now = Date.now();
   const event = await (
-    await request.post('/api/events', { headers, data: { name: 'E2E Revocation', startsAt: new Date(now - 3_600_000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString() } })
+    await api.post('/api/events', {
+      headers: CSRF,
+      data: { name: 'E2E Revocation', status: 'active', startsAt: new Date(now - 3_600_000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString() }
+    })
   ).json();
-  const [pass] = await (await request.post(`/api/events/${event.id}/passes`, { headers, data: { count: 1 } })).json();
-  const scanner = await (await request.post(`/api/events/${event.id}/scanners`, { headers, data: { label: 'Gate phone' } })).json();
-  await request.post(`/api/passes/${pass.id}/revoke`, { headers });
+  const [pass] = await (await api.post(`/api/events/${event.id}/passes`, { headers: CSRF, data: { count: 1 } })).json();
+  const scanner = await (await api.post(`/api/events/${event.id}/scanners`, { headers: CSRF, data: { label: 'Gate phone' } })).json();
+  expect((await api.post(`/api/passes/${pass.id}/revoke`, { headers: CSRF })).ok()).toBe(true);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/scan#key=${scanner.key}`);
@@ -128,8 +119,8 @@ test('revoked passes and revoked scanner devices are refused at the door', async
   await scan(page, pass.passUrl);
   await expect(verdict(page)).toContainText('This pass was revoked by the organiser.');
 
-  await request.post(`/api/scanners/${scanner.scanner.id}/revoke`, { headers });
-  await verdict(page).click();
+  expect((await api.post(`/api/scanners/${scanner.scanner.id}/revoke`, { headers: CSRF })).ok()).toBe(true);
+  await dismiss(page);
   await scan(page, pass.passUrl);
   await expect(page.getByLabel('Scanner key')).toBeVisible();
   await expect(page.getByText(/revoked/i).first()).toBeVisible();
@@ -137,15 +128,19 @@ test('revoked passes and revoked scanner devices are refused at the door', async
 
 test('expired passes are refused once their expiry passes, and the pass page says so', async ({ page, request }) => {
   test.setTimeout(150_000);
-  const headers = { Authorization: `Bearer ${ADMIN_TOKEN}` };
+  await signUp(page);
+  const api = page.request;
   const now = Date.now();
-  const created = await request.post('/api/events', { headers, data: { name: 'E2E Expiry', startsAt: new Date(now - 3_600_000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString() } });
+  const created = await api.post('/api/events', {
+    headers: CSRF,
+    data: { name: 'E2E Expiry', status: 'active', startsAt: new Date(now - 3_600_000).toISOString(), endsAt: new Date(now + 3_600_000).toISOString() }
+  });
   const event = await created.json();
   // The server decides expiry, so use its clock (Date header) rather than this machine's.
   const skew = new Date(created.headers()['date']).getTime() - Date.now();
   const expiresAt = Date.now() + skew + 20_000;
-  const [pass] = await (await request.post(`/api/events/${event.id}/passes`, { headers, data: { count: 1, expiresAt: new Date(expiresAt).toISOString() } })).json();
-  const scanner = await (await request.post(`/api/events/${event.id}/scanners`, { headers, data: { label: 'Expiry phone' } })).json();
+  const [pass] = await (await api.post(`/api/events/${event.id}/passes`, { headers: CSRF, data: { count: 1, expiresAt: new Date(expiresAt).toISOString() } })).json();
+  const scanner = await (await api.post(`/api/events/${event.id}/scanners`, { headers: CSRF, data: { label: 'Expiry phone' } })).json();
 
   await page.goto(pass.passUrl);
   await expect(page.getByRole('status')).toHaveText(/^Valid/);
@@ -153,6 +148,7 @@ test('expired passes are refused once their expiry passes, and the pass page say
   await page.reload();
   await expect(page.getByRole('status')).toHaveText(/expired/);
 
+  // A scanner device has no session cookie: use a cookie-less request context.
   const result = await request.post('/api/scanner/redeem', { headers: { Authorization: `Bearer ${scanner.key}` }, data: { code: pass.passUrl } });
   expect((await result.json()).outcome).toBe('expired');
 });

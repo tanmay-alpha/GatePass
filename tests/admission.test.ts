@@ -4,7 +4,7 @@ import { evaluateAdmission, type AdmissionInput } from '../src/server/admission'
 const base: AdmissionInput = {
   now: '2030-06-01T18:30:00.000Z',
   scanner: { eventId: 'e1', gateId: 'north' },
-  event: { startsAt: '2030-06-01T18:00:00.000Z', endsAt: '2030-06-01T23:00:00.000Z', status: 'active' },
+  event: { startsAt: '2030-06-01T18:00:00.000Z', endsAt: '2030-06-01T23:00:00.000Z', status: 'active', capacity: null, admittedCount: 0 },
   pass: { eventId: 'e1', status: 'active' },
   policy: null
 };
@@ -29,7 +29,9 @@ describe('evaluateAdmission', () => {
     const late = { now: '2030-06-02T00:00:00.000Z', policy: policy({ capacity: 1, admittedCount: 1 }) };
     expect(decide({ ...late, pass: null })).toMatchObject({ outcome: 'invalid' });
     expect(decide({ ...late, pass: { eventId: 'e2', status: 'active' } })).toMatchObject({ outcome: 'wrong_event' });
-    expect(decide({ ...late, event: { ...base.event, status: 'archived' } })).toMatchObject({ outcome: 'event_closed' });
+    for (const status of ['draft', 'ended', 'archived'] as const) {
+      expect(decide({ ...late, event: { ...base.event, status } })).toMatchObject({ outcome: 'event_closed' });
+    }
     expect(decide({ ...late, pass: { eventId: 'e1', status: 'redeemed' } })).toMatchObject({ outcome: 'already_redeemed' });
     expect(decide({ ...late, pass: { eventId: 'e1', status: 'revoked' } })).toMatchObject({ outcome: 'revoked' });
     expect(decide({ ...late, pass: { eventId: 'e1', status: 'expired' } })).toMatchObject({ outcome: 'expired' });
@@ -65,5 +67,13 @@ describe('evaluateAdmission', () => {
   it('reports a full policy with its capacity', () => {
     expect(decide({ policy: policy({ capacity: 2, admittedCount: 1 }) })).toEqual({ admit: true });
     expect(decide({ policy: policy({ capacity: 2, admittedCount: 2 }) })).toEqual({ admit: false, outcome: 'capacity_full', detail: { policyName: 'VIP', capacity: 2 } });
+  });
+
+  it('enforces the event-wide capacity at the equality boundary, after the policy limit', () => {
+    const event = { ...base.event, capacity: 3 };
+    expect(decide({ event: { ...event, admittedCount: 2 } })).toEqual({ admit: true });
+    expect(decide({ event: { ...event, admittedCount: 3 } })).toEqual({ admit: false, outcome: 'capacity_full', detail: { capacity: 3, eventCapacity: true } });
+    // A full policy is reported as the policy, not the event.
+    expect(decide({ event: { ...event, admittedCount: 3 }, policy: policy({ capacity: 1, admittedCount: 1 }) })).toMatchObject({ detail: { policyName: 'VIP' } });
   });
 });

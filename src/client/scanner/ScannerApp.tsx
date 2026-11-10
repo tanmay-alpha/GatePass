@@ -39,7 +39,7 @@ export function ScannerApp() {
     let live = true;
     setError('');
     setSlow(false);
-    api<ScannerSession>('/api/scanner/session', key, { timeoutMs: SESSION_TIMEOUT_MS, onSlow: () => live && setSlow(true) })
+    api<ScannerSession>('/api/scanner/session', { bearer: key, timeoutMs: SESSION_TIMEOUT_MS, onSlow: () => live && setSlow(true) })
       .then((value) => {
         if (live) setSession(value);
       })

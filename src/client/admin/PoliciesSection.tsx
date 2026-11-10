@@ -1,13 +1,14 @@
-import { Pencil, Plus } from 'lucide-react';
+import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, Gate } from '../../shared/types';
-import { api, formatDateTime, formatTime, fromLocalInput, toLocalInput } from '../api';
-import { Modal } from '../dialog';
+import { Modal, useConfirm } from '../dialog';
 import { CapacityLine, EmptyState, ErrorNote, FieldError, SectionHead, errorMessage, focusFirstInvalid } from '../ui';
+import { formatDateTimeInZone, formatShortInZone, fromZoneInput, toZoneInput, zoneLabel } from '../time';
+import { adminApi } from './http';
+import { can } from './model';
 import { useToast } from './toast';
 
 interface Props {
-  token: string;
   event: EventSummary;
   gates: Gate[];
   policies: AdmissionPolicy[] | null;
@@ -15,24 +16,53 @@ interface Props {
   onChanged: () => Promise<void>;
 }
 
-export function PoliciesSection({ token, event, gates, policies, error, onChanged }: Props) {
+export function PoliciesSection({ event, gates, policies, error: loadError, onChanged }: Props) {
   /** `null` = closed, `'new'` = create, otherwise the policy being edited. */
   const [editing, setEditing] = useState<AdmissionPolicy | 'new' | null>(null);
+  const [error, setError] = useState('');
+  const [confirm, dialog] = useConfirm();
+  const notify = useToast();
   const gateNames = new Map(gates.map((gate) => [gate.id, gate.name]));
+  const editable = can(event, 'access') && event.status !== 'archived';
+  const zone = event.timeZone;
+
+  async function remove(policy: AdmissionPolicy) {
+    const ok = await confirm({
+      title: `Delete policy “${policy.name}”?`,
+      body: 'Only a policy that no pass and no past check-in uses can be deleted. Move its passes to another policy first.',
+      confirmLabel: 'Delete policy',
+      danger: true
+    });
+    if (!ok) return;
+    setError('');
+    try {
+      await adminApi(`/api/policies/${policy.id}`, { method: 'DELETE' });
+      await onChanged();
+      notify(`Policy “${policy.name}” deleted`);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
 
   return (
     <section className="card" aria-labelledby="policies-title">
       <SectionHead
         id="policies-title"
         title="Admission policies"
-        description="Who may enter, where and when. Passes without a policy can enter at any gate while the event runs."
+        description={`Who may enter, where and when. Passes without a policy can enter at any gate while the event runs. Times in ${zoneLabel(zone, event.startsAt)}.`}
       >
-        <button id="new-policy-button" className="btn btn-secondary" onClick={() => setEditing('new')} disabled={event.status !== 'active'}>
-          <Plus size={16} aria-hidden /> New policy
-        </button>
+        {editable ? (
+          <button id="new-policy-button" className="btn btn-secondary" onClick={() => setEditing('new')}>
+            <Plus size={16} aria-hidden /> New policy
+          </button>
+        ) : null}
       </SectionHead>
-      <ErrorNote message={error} />
-      {policies === null && !error ? <p className="muted small" role="status">Loading policies…</p> : null}
+      <ErrorNote message={error || loadError} />
+      {policies === null && !loadError ? (
+        <p className="muted small" role="status">
+          Loading policies…
+        </p>
+      ) : null}
       {policies?.length === 0 ? (
         <EmptyState title="No admission policies yet">Create one to give a group of passes its own entry window, gates or capacity, for example “Early entry” or “VIP”.</EmptyState>
       ) : null}
@@ -48,9 +78,11 @@ export function PoliciesSection({ token, event, gates, policies, error, onChange
                 <th scope="col" className="num">
                   Passes
                 </th>
-                <th scope="col">
-                  <span className="sr-only">Actions</span>
-                </th>
+                {editable ? (
+                  <th scope="col">
+                    <span className="sr-only">Actions</span>
+                  </th>
+                ) : null}
               </tr>
             </thead>
             <tbody>
@@ -58,18 +90,23 @@ export function PoliciesSection({ token, event, gates, policies, error, onChange
                 <tr key={policy.id}>
                   <td className="strong">{policy.name}</td>
                   <td className="num nowrap">
-                    {policy.opensAt ? formatTime(policy.opensAt) : 'Event start'} – {policy.closesAt ? formatTime(policy.closesAt) : 'Event end'}
+                    {policy.opensAt ? formatShortInZone(policy.opensAt, zone) : 'Event start'} – {policy.closesAt ? formatShortInZone(policy.closesAt, zone) : 'Event end'}
                   </td>
                   <td className="capacity-cell">
                     <CapacityLine admitted={policy.admittedCount} capacity={policy.capacity} />
                   </td>
                   <td>{policy.gateIds.length ? policy.gateIds.map((id) => gateNames.get(id) ?? 'Unknown gate').join(', ') : <span className="muted">Any gate</span>}</td>
                   <td className="num">{policy.passCount}</td>
-                  <td className="row-actions">
-                    <button className="btn btn-ghost btn-small" onClick={() => setEditing(policy)} aria-label={`Edit policy ${policy.name}`}>
-                      <Pencil size={14} aria-hidden /> Edit
-                    </button>
-                  </td>
+                  {editable ? (
+                    <td className="row-actions">
+                      <button className="btn btn-ghost btn-small" onClick={() => setEditing(policy)} aria-label={`Edit policy ${policy.name}`}>
+                        <Pencil size={14} aria-hidden /> Edit
+                      </button>
+                      <button className="btn btn-ghost btn-icon danger" onClick={() => void remove(policy)} aria-label={`Delete policy ${policy.name}`} title="Delete">
+                        <Trash2 size={14} aria-hidden />
+                      </button>
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
@@ -78,7 +115,6 @@ export function PoliciesSection({ token, event, gates, policies, error, onChange
       ) : null}
       {editing ? (
         <PolicyDialog
-          token={token}
           event={event}
           gates={gates}
           policy={editing === 'new' ? null : editing}
@@ -89,12 +125,12 @@ export function PoliciesSection({ token, event, gates, policies, error, onChange
           }}
         />
       ) : null}
+      {dialog}
     </section>
   );
 }
 
 interface DialogProps {
-  token: string;
   event: EventSummary;
   gates: Gate[];
   policy: AdmissionPolicy | null;
@@ -104,14 +140,17 @@ interface DialogProps {
 
 interface PolicyErrors {
   name?: string;
+  opensAt?: string;
   closesAt?: string;
   capacity?: string;
 }
 
-function validatePolicy(name: string, opensAt: string, closesAt: string, capacity: string, admitted: number): PolicyErrors {
+function validatePolicy(name: string, opensAt: string, closesAt: string, opensIso: string | null, closesIso: string | null, capacity: string, admitted: number): PolicyErrors {
   const errors: PolicyErrors = {};
   if (!name.trim()) errors.name = 'Enter a name, for example VIP or Early entry.';
-  if (opensAt && closesAt && new Date(closesAt) <= new Date(opensAt)) errors.closesAt = 'Entry must close after it opens.';
+  if (opensAt && !opensIso) errors.opensAt = 'Enter a complete date and time, or leave it empty.';
+  if (closesAt && !closesIso) errors.closesAt = 'Enter a complete date and time, or leave it empty.';
+  else if (opensIso && closesIso && closesIso <= opensIso) errors.closesAt = 'Entry must close after it opens.';
   if (capacity.trim()) {
     const value = Number(capacity);
     if (!Number.isInteger(value) || value < 1) errors.capacity = 'Capacity must be a whole number of at least 1. Leave it empty for no limit.';
@@ -120,18 +159,23 @@ function validatePolicy(name: string, opensAt: string, closesAt: string, capacit
   return errors;
 }
 
-function PolicyDialog({ token, event, gates, policy, onClose, onSaved }: DialogProps) {
+function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
+  const zone = event.timeZone;
   const [name, setName] = useState(policy?.name ?? '');
-  const [opensAt, setOpensAt] = useState(policy?.opensAt ? toLocalInput(policy.opensAt) : '');
-  const [closesAt, setClosesAt] = useState(policy?.closesAt ? toLocalInput(policy.closesAt) : '');
+  const [opensAt, setOpensAt] = useState(policy?.opensAt ? toZoneInput(policy.opensAt, zone) : '');
+  const [closesAt, setClosesAt] = useState(policy?.closesAt ? toZoneInput(policy.closesAt, zone) : '');
   const [capacity, setCapacity] = useState(policy?.capacity ? String(policy.capacity) : '');
   const [gateIds, setGateIds] = useState<string[]>(policy?.gateIds ?? []);
   const [showErrors, setShowErrors] = useState(false);
   const [error, setError] = useState('');
-  const admitted = policy?.admittedCount ?? 0;
-  const errors = showErrors ? validatePolicy(name, opensAt, closesAt, capacity, admitted) : {};
   const [busy, setBusy] = useState(false);
   const notify = useToast();
+  const admitted = policy?.admittedCount ?? 0;
+  const opensIso = opensAt ? fromZoneInput(opensAt, zone) : null;
+  const closesIso = closesAt ? fromZoneInput(closesAt, zone) : null;
+  const check = () => validatePolicy(name, opensAt, closesAt, opensIso, closesIso, capacity, admitted);
+  const errors = showErrors ? check() : {};
+  const label = zoneLabel(zone, event.startsAt);
 
   function toggleGate(id: string, checked: boolean) {
     setGateIds((current) => (checked ? [...current, id] : current.filter((value) => value !== id)));
@@ -139,23 +183,17 @@ function PolicyDialog({ token, event, gates, policy, onClose, onSaved }: DialogP
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (Object.keys(validatePolicy(name, opensAt, closesAt, capacity, admitted)).length) {
+    if (Object.keys(check()).length) {
       setShowErrors(true);
       focusFirstInvalid(e.currentTarget);
       return;
     }
     setBusy(true);
     setError('');
-    const body = {
-      name: name.trim(),
-      opensAt: opensAt ? fromLocalInput(opensAt) : null,
-      closesAt: closesAt ? fromLocalInput(closesAt) : null,
-      capacity: capacity.trim() ? Number(capacity) : null,
-      gateIds
-    };
+    const body = { name: name.trim(), opensAt: opensIso, closesAt: closesIso, capacity: capacity.trim() ? Number(capacity) : null, gateIds };
     try {
-      if (policy) await api<AdmissionPolicy>(`/api/policies/${policy.id}`, token, { method: 'PATCH', body });
-      else await api<AdmissionPolicy>(`/api/events/${event.id}/policies`, token, { body });
+      if (policy) await adminApi<AdmissionPolicy>(`/api/policies/${policy.id}`, { method: 'PATCH', body });
+      else await adminApi<AdmissionPolicy>(`/api/events/${event.id}/policies`, { body });
       notify(policy ? `Policy “${body.name}” saved` : `Policy “${body.name}” created`);
       await onSaved();
     } catch (err) {
@@ -182,10 +220,17 @@ function PolicyDialog({ token, event, gates, policy, onClose, onSaved }: DialogP
         </label>
         <label>
           Entry opens
-          <input type="datetime-local" value={opensAt} onChange={(e) => setOpensAt(e.target.value)} aria-describedby="policy-opens-hint" />
+          <input
+            type="datetime-local"
+            value={opensAt}
+            onChange={(e) => setOpensAt(e.target.value)}
+            aria-invalid={errors.opensAt ? true : undefined}
+            aria-describedby="policy-opens-hint policy-opens-error"
+          />
           <span id="policy-opens-hint" className="field-hint">
-            Empty: event start ({formatDateTime(event.startsAt)})
+            {label}. Empty: event start ({formatDateTimeInZone(event.startsAt, zone, false)})
           </span>
+          <FieldError id="policy-opens-error" message={errors.opensAt} />
         </label>
         <label>
           Entry closes
@@ -197,7 +242,7 @@ function PolicyDialog({ token, event, gates, policy, onClose, onSaved }: DialogP
             aria-describedby="policy-closes-hint policy-closes-error"
           />
           <span id="policy-closes-hint" className="field-hint">
-            Empty: event end ({formatDateTime(event.endsAt)})
+            {label}. Empty: event end ({formatDateTimeInZone(event.endsAt, zone, false)})
           </span>
           <FieldError id="policy-closes-error" message={errors.closesAt} />
         </label>

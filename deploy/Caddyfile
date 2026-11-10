@@ -2,13 +2,15 @@
 #
 # GATEPASS_DOMAIN must be the host name from APP_PUBLIC_URL, e.g. gate.example.com,
 # with a DNS A/AAAA record pointing at this server and ports 80 and 443 reachable.
+# When it is unset the site falls back to `localhost` (certificate from Caddy's
+# local CA, not publicly trusted) instead of failing to start.
 # Caddy obtains and renews the TLS certificate automatically and redirects HTTP
 # to HTTPS. Certificates are stored in the caddy-data volume.
 #
 # Access logging is deliberately not enabled: pass URLs (/p/<token>) are bearer
 # credentials and must not be written to logs.
 
-{$GATEPASS_DOMAIN} {
+{$GATEPASS_DOMAIN:localhost} {
 	encode zstd gzip
 
 	# Caddy sets X-Forwarded-For/-Proto/-Host to the real client values and does

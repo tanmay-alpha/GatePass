@@ -16,6 +16,7 @@ export const SETUP_TARGETS = {
   policies: { tab: 'access', focus: '#new-policy-button' },
   passes: { tab: 'passes', focus: '#issue-passes :is(textarea, input)' },
   scanner: { tab: 'access', focus: '#device-label-input' },
+  open: { tab: 'settings', focus: '#status-to-active' },
   operations: { tab: 'operations', focus: '[role="tabpanel"]' }
 } satisfies Record<string, SetupTarget>;
 
@@ -53,7 +54,7 @@ function useSetupPrefs(eventId: string): [Prefs, (change: Partial<Prefs>) => voi
 }
 
 interface Step {
-  id: 'create' | Skippable | 'passes' | 'scanner' | 'entry';
+  id: 'create' | Skippable | 'passes' | 'scanner' | 'open' | 'entry';
   title: string;
   description: string;
   done: boolean;
@@ -108,6 +109,17 @@ function buildSteps(event: EventSummary, skipped: Skippable[]): Step[] {
       action: { label: 'Set up a scanner', target: SETUP_TARGETS.scanner }
     },
     {
+      id: 'open',
+      title: 'Open the event (set Active)',
+      description: event.permissions.includes('lifecycle')
+        ? 'Scanners refuse every pass while the event is a draft. Open it when the doors are ready.'
+        : 'Scanners refuse every pass while the event is a draft. Ask the event owner to open it.',
+      done: event.status === 'active',
+      optional: false,
+      skipped: false,
+      action: event.permissions.includes('lifecycle') ? { label: 'Open the event', target: SETUP_TARGETS.open } : undefined
+    },
+    {
       id: 'entry',
       title: 'Begin entry',
       description: 'Scan the first pass at the door. Watch progress on Operations.',
@@ -119,14 +131,14 @@ function buildSteps(event: EventSummary, skipped: Skippable[]): Step[] {
   ];
 }
 
-/** Passes and at least one scanner: the event can admit people. */
+/** Active, with passes and at least one scanner: the event can admit people. */
 export function isReadyForDoors(event: EventSummary): boolean {
-  return event.passCount > 0 && event.scannerCount > 0;
+  return event.status === 'active' && event.passCount > 0 && event.scannerCount > 0;
 }
 
-/** Shown for active, unfinished events until entry has begun. */
+/** Shown for draft and active events that have not ended, until entry has begun. */
 export function needsSetup(event: EventSummary): boolean {
-  if (event.status !== 'active' || new Date(event.endsAt).getTime() <= Date.now()) return false;
+  if ((event.status !== 'draft' && event.status !== 'active') || new Date(event.endsAt).getTime() <= Date.now()) return false;
   return !(isReadyForDoors(event) && event.scanCount > 0);
 }
 

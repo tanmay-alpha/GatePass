@@ -15,7 +15,7 @@ Use the split deployment only if your organization specifically requires hosting
 
 ## Why the Split Architecture is Necessary
 
-Vercel cannot run the GatePass API or host its SQLite database. As explained in the Vercel knowledge base article [Is SQLite supported in Vercel?](https://vercel.com/kb/guide/is-sqlite-supported-in-vercel), SQLite is not supported on Vercel because Serverless Functions provide ephemeral storage, and concurrent function invocations do not share a filesystem. GatePass relies on a single persistent SQLite database in WAL mode (see [ADR 0001](decisions/0001-sqlite-storage.md) and [ADR 0007](decisions/0007-hosting.md)).
+Vercel cannot run the GatePass API or host its SQLite database. As explained in the Vercel knowledge base article [Is SQLite supported in Vercel?](https://vercel.com/kb/guide/is-sqlite-supported-in-vercel), SQLite is not supported on Vercel because Serverless Functions provide ephemeral storage, and concurrent function invocations do not share a filesystem. GatePass relies on a single persistent SQLite database in WAL mode (see [ADR 0001](decisions/0001-sqlite-single-process.md) and [ADR 0007](decisions/0007-hosting.md)).
 
 In this split topology:
 - **Vercel** builds and serves only the static single-page application (`dist/client`).
@@ -68,12 +68,14 @@ Import the repository into Vercel using the Vercel CLI (`vercel link`) or throug
 
 ### 3. Set Vercel Environment Variables
 
-In the Vercel Project Settings (under **Settings** > **Environment Variables**), add two variables for the Production environment:
+In the Vercel Project Settings (under **Settings** > **Environment Variables**), add two variables for the **Production** environment only:
 
 | Variable | Description |
 | --- | --- |
 | `GATEPASS_BACKEND_ORIGIN` | The full HTTPS origin of your backend server, without a trailing slash (e.g. `https://api.gate.example.com`). `vercel.mjs` checks this during the build and fails if it is missing or not HTTPS. |
 | `ORIGIN_SECRET` | The identical secret string configured on the backend server in step 1. `vercel.mjs` injects this as the `x-origin-secret` header on all proxied `/api/*` and `/p/*` requests. |
+
+Do not give Preview deployments these values. Preview builds never use `GATEPASS_BACKEND_ORIGIN`: without a preview origin they are static-only, serving the SPA and answering `/api/*` and `/p/*` with 503. To give previews a backend, set `GATEPASS_PREVIEW_BACKEND_ORIGIN` (HTTPS origin of a separate, non-production server; the build refuses the production origin) and `PREVIEW_ORIGIN_SECRET` (that server's `ORIGIN_SECRET`) for the Preview environment. See the header of [`vercel.mjs`](../vercel.mjs).
 
 ### 4. Deploy and Configure CI Checks
 
@@ -91,12 +93,12 @@ Run these verification steps to ensure the split configuration is functioning:
    ```sh
    curl -i https://<vercel-domain>/api/health
    ```
-   Must return HTTP `200` with `{"ok":true,"service":"gatepass"}`.
+   Must return HTTP `200` with `{"ok":true,"service":"gatepass",...}` (the body also carries `signup`, and `demo` in demo mode).
 
 2. **Direct backend access blocked:**
    Attempt to access an API endpoint directly on the backend server without the secret header:
    ```sh
-   curl -i -H "Authorization: Bearer <ADMIN_TOKEN>" https://<api-host>/api/events
+   curl -i -H "Authorization: Bearer <ADMIN_TOKEN>" https://<api-host>/api/events   # operator token
    ```
    Must return HTTP `403` with `{"error":"Forbidden"}`.
 

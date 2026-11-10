@@ -18,7 +18,8 @@ All configuration is environment variables (see `.env.example`). The server refu
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ADMIN_TOKEN` | — (required) | At least 24 characters. Grants full admin access. |
+| `ADMIN_TOKEN` | — (required) | At least 24 characters. Operator break-glass bearer credential for the API only (not a UI login); requests are audited as `operator`. Used to bootstrap the first platform admin. |
+| `ALLOW_SIGNUP` | `false` | `true` lets anyone create an organizer account at `/`. Otherwise accounts come only from invitations. |
 | `APP_PUBLIC_URL` | `http://localhost:3000` | Public origin. Pass QR codes encode `${APP_PUBLIC_URL}/p/<token>`. Must be the public `https://` origin in production. |
 | `DATABASE_FILE` | `.local/data/gatepass.db` | The directory must be writable; SQLite creates `-wal` and `-shm` files next to the database. The container uses `/data/gatepass.db`. |
 | `HOST` | `127.0.0.1` | Bind address. The image sets `0.0.0.0` so published ports work. |
@@ -28,7 +29,7 @@ All configuration is environment variables (see `.env.example`). The server refu
 | `HTTPS_CERT_FILE`, `HTTPS_KEY_FILE` | unset | Optional TLS in Node. Normally TLS terminates at the proxy. |
 | `GATEPASS_DOMAIN` | unset | Read only by the compose `proxy` profile (Caddy site address). |
 
-Health check: `GET /api/health` returns `200 {"ok":true,"service":"gatepass"}`, or `503` when the database is unusable.
+Health check: `GET /api/health` returns `200 {"ok":true,"service":"gatepass","signup":false}` (`signup` mirrors `ALLOW_SIGNUP`), or `503` when the database is unusable.
 
 Camera scanning on `/scan` needs a secure context: HTTPS, or `http://localhost` on the same machine. Over plain HTTP from another device the browser blocks the camera.
 
@@ -160,7 +161,7 @@ curl -fsS https://gate.example.com/api/health      # from your own machine
 curl -sI https://gate.example.com/ | grep -i strict-transport-security
 ```
 
-Then open `https://gate.example.com/`, sign in with `ADMIN_TOKEN`, create an event, issue a test pass and redeem it on a phone via `/scan`.
+Then create the first account: with `ALLOW_SIGNUP=true`, sign up at `https://gate.example.com/`; otherwise create a platform-admin invitation with `ADMIN_TOKEN` (`POST /api/platform/invitations`, see [deployment-runbook.md](deployment-runbook.md)) and open the returned link. Sign in, create an event, issue a test pass and redeem it on a phone via `/scan`.
 
 If Caddy cannot obtain a certificate, check, in order: DNS resolves to this instance, the security list/NSG rules, `curl http://gate.example.com` from outside reaches Caddy (a redirect response), and `GATEPASS_DOMAIN` is set in `.env`.
 
@@ -231,6 +232,8 @@ docker compose start gatepass
 ### Restore
 
 Stop the app and replace the database. Always delete stale `-wal` and `-shm` files: SQLite would otherwise apply an old write-ahead log to the restored file.
+
+The server also has CLI commands for this: `node dist/server/index.js verify [file]` runs `integrity_check`, `foreign_key_check` and the admission invariant checks, and `node dist/server/index.js restore <backup>` verifies the backup, keeps the old files as `.replaced-<timestamp>`, then opens, migrates and verifies the restored file, rolling back on failure. Run them with the app stopped and `DATABASE_FILE` set. See [deployment-runbook.md](deployment-runbook.md). The manual steps below remain valid.
 
 From an online (`VACUUM INTO`) backup:
 
@@ -379,7 +382,7 @@ systemd-analyze security gatepass   # review the remaining exposure
 
 `ProtectSystem=strict` leaves only `/var/lib/gatepass` and the private `/tmp` writable. If you move `DATABASE_FILE`, add its directory to `ReadWritePaths=`.
 
-`npm run build` bundles the server into `dist/server/index.js`, so production runs plain JavaScript with no TypeScript transpiler at runtime. The QR render endpoint `/api/qr/custom` requires the admin token; it is no longer public.
+`npm run build` bundles the server into `dist/server/index.js`, so production runs plain JavaScript with no TypeScript transpiler at runtime. The QR render endpoint `/api/qr/custom` requires a signed-in account; it is not public.
 
 ### Reverse proxy on the host
 
@@ -417,10 +420,11 @@ sudo systemctl restart gatepass
 
 | Credential / route | Grants | Notes |
 | --- | --- | --- |
-| `ADMIN_TOKEN` (`Authorization: Bearer`) | Everything under `/api/events*`, `/api/passes*`, `/api/scanners*`, `/api/admin/session`: create and edit events, issue/revoke/reissue passes, create/revoke scanners, read attendee data, scan log and audit log. | One shared secret, compared in constant time. The admin UI keeps it in `sessionStorage` for the tab. To rotate: change `.env`, then `docker compose up -d` (or `systemctl restart gatepass`); all admin sessions must sign in again. |
+| Account session (`__Host-gatepass_session` cookie) | `/api/events*`, `/api/passes*`, `/api/scanners*` for events where the user is owner or manager (non-members get 404); `/api/platform/*` for platform admins. | Email and password (scrypt), HttpOnly cookie, 7-day absolute and 24-hour idle limit; writes need `X-GatePass-CSRF: 1`. Accounts come from sign-up (`ALLOW_SIGNUP=true`) or invitations. |
+| `ADMIN_TOKEN` (`Authorization: Bearer`) | Operator break-glass access to the whole API; not accepted by the UI. | One shared secret, compared in constant time, audited as `operator`. To rotate: change `.env`, then `docker compose up -d` (or `systemctl restart gatepass`). See [security-and-threat-model.md](security-and-threat-model.md). |
 | Scanner key (`gps_…`) | `/api/scanner/session` and `/api/scanner/redeem` for **one event only**. | Created by an admin, shown once as a `/scan#key=…` setup link (the fragment is never sent to the server), stored hashed. Kept in the device's `localStorage`. Revoke a lost or departed device in the admin UI. |
 | Pass link `/p/<token>` | Viewing that pass and its QR code. | A bearer credential: anyone with the link can show the QR. Viewing never redeems. Revoke or reissue from the admin UI. Pages are `no-store` and `noindex`. |
-| Public | `/api/health`, `/api/qr/custom` (QR rendering, rate-limited), the static UI. | No data access. |
+| Public | `/api/health`, `/api/auth/login`, `/api/auth/register` (when `ALLOW_SIGNUP=true`), `/api/invitations/preview` and `/accept`, the static UI. | No event data access. |
 
 - **Single instance.** Rate limits are kept in process memory and SQLite allows one writer. Do not run replicas, `docker compose up --scale`, or two containers on the same volume. Redemption is still atomic within one process (a database constraint guarantees at most one redemption per pass).
 - **Local disk only for the database.** WAL mode coordinates readers and the writer through the memory-mapped `-shm` file and POSIX file locks. Network filesystems (NFS, SMB, OCI File Storage) do not provide reliable locking or shared memory across hosts and can corrupt the database. Use the boot volume or an attached OCI block volume (a local block device) for `/data`.

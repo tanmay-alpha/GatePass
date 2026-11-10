@@ -13,29 +13,47 @@ afterEach(() => {
   h.close();
 });
 
-const adminRoutes: Array<[method: 'get' | 'post' | 'patch', path: string]> = [
-  ['get', '/api/admin/session'],
+const adminRoutes: Array<[method: 'get' | 'post' | 'patch' | 'delete', path: string]> = [
+  ['get', '/api/auth/session'],
   ['get', '/api/events'],
   ['post', '/api/events'],
   ['get', '/api/events/x'],
   ['patch', '/api/events/x'],
+  ['post', '/api/events/x/clone'],
+  ['get', '/api/events/x/members'],
+  ['delete', '/api/events/x/members/y'],
+  ['post', '/api/events/x/owner'],
+  ['get', '/api/events/x/invitations'],
+  ['post', '/api/events/x/invitations'],
   ['get', '/api/events/x/passes'],
   ['post', '/api/events/x/passes'],
+  ['post', '/api/events/x/passes/import'],
+  ['post', '/api/events/x/passes/revoke'],
   ['post', '/api/passes/x/revoke'],
   ['post', '/api/passes/x/reissue'],
   ['get', '/api/events/x/scanners'],
   ['post', '/api/events/x/scanners'],
   ['post', '/api/scanners/x/revoke'],
+  ['post', '/api/scanners/x/rotate'],
   ['get', '/api/events/x/scans'],
   ['get', '/api/events/x/audit'],
   ['get', '/api/events/x/operations'],
+  ['get', '/api/events/x/exports/attendance.csv'],
+  ['get', '/api/events/x/exports/scans.csv'],
+  ['get', '/api/events/x/exports/audit.csv'],
   ['get', '/api/events/x/gates'],
   ['post', '/api/events/x/gates'],
+  ['patch', '/api/gates/x'],
+  ['delete', '/api/gates/x'],
   ['get', '/api/events/x/policies'],
   ['post', '/api/events/x/policies'],
   ['patch', '/api/policies/x'],
+  ['delete', '/api/policies/x'],
   ['patch', '/api/passes/x'],
-  ['post', '/api/qr/custom']
+  ['post', '/api/qr/custom'],
+  ['get', '/api/platform/users'],
+  ['post', '/api/platform/invitations'],
+  ['post', '/api/platform/users/x/reset-link']
 ];
 
 describe('authentication', () => {
@@ -96,7 +114,7 @@ describe('information exposure', () => {
   });
 
   it('reports an unavailable database through the health check', async () => {
-    await request(h.app).get('/api/health').expect(200, { ok: true, service: 'gatepass' });
+    await request(h.app).get('/api/health').expect(200, { ok: true, service: 'gatepass', signup: true });
     vi.spyOn(console, 'error').mockImplementation(() => {});
     h.db.close();
     await request(h.app).get('/api/health').expect(503, { ok: false });
@@ -116,7 +134,7 @@ describe('information exposure', () => {
   it('maps malformed JSON and oversized bodies to 4xx', async () => {
     const malformed = await h.admin(request(h.app).post('/api/events')).set('Content-Type', 'application/json').send('{"name":');
     expect(malformed.status).toBe(400);
-    const huge = await h.admin(request(h.app).post('/api/events')).send({ name: 'x'.repeat(200_000) });
+    const huge = await h.admin(request(h.app).post('/api/events')).send({ name: 'x'.repeat(600_000) });
     expect(huge.status).toBe(413);
   });
 
@@ -131,7 +149,7 @@ describe('information exposure', () => {
     // Same client IP, other devices: 380 more scans (625 total from one address) all succeed.
     for (let i = 0; i < 240; i += 1) expect((await scan(h, second, 'garbage')).status).toBe(200);
     for (let i = 0; i < 140; i += 1) expect((await scan(h, third, 'garbage')).status).toBe(200);
-  });
+  }, 60_000); // 625 sequential scans, each an fsync'd transaction (synchronous=FULL)
 
   it('throttles failed authentication per IP without locking out valid credentials from that IP', async () => {
     const { scannerKey } = await seedEvent(h, 1);

@@ -69,4 +69,4 @@ Steps 6 and 7 both happen or neither does: an error rolls the whole transaction 
 - **Count redemptions at scan time** (`SELECT COUNT(*) FROM redemptions WHERE policy_id = ?`) instead of a counter. Correct under the write lock and avoids denormalisation, but costs O(admitted) per scan and leaves the cap enforced only by application code. The counter plus `CHECK` is O(1) and enforced by the database; a test checks the counter equals the count.
 - **Per-gate capacity.** Capacity belongs to an entry slot (a time window for a group), not a door; gates already restrict where. Can be added later as its own table if needed.
 - **Many gates per scanner.** A device stands at one door. One nullable `gate_id` is simpler to explain and audit.
-- **Redis/queue for counters.** Unnecessary: one process, one SQLite writer, and scans take well under a millisecond inside the transaction (see `docs/testing.md`).
+- **Redis/queue for counters.** Unnecessary: one process, one SQLite writer, and the transaction is short (measurements in [performance.md](../performance.md); with `synchronous = FULL` the per-commit flush dominates).

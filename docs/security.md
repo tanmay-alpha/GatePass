@@ -1,9 +1,10 @@
-# Security
+# Security (superseded)
 
-- Vulnerability reporting and threat-model summary: [SECURITY.md](../SECURITY.md)
-- Threat model (assets, actors, trust boundaries, STRIDE table, review findings): [threat-model.md](threat-model.md)
-- Security model as implemented (tokens, authentication, atomic redemption, headers, rate limits, what is not protected): [README.md#security-model](../README.md#security-model)
-- Design decisions behind the controls: [decisions/](decisions/README.md) (ADR 0002 tokens, 0003 redemption atomicity, 0004 admission policies)
-- Redemption internals: [architecture.md#redemption-flow](architecture.md#redemption-flow)
-- Test coverage and verification status: [testing.md](testing.md)
-- Production hardening: [deployment.md](deployment.md)
+This page indexed the documents of the earlier single-token model. The current security documentation is [security-and-threat-model.md](security-and-threat-model.md): assets, actors, trust boundaries, STRIDE table, role and permission matrix, sessions and CSRF, token inventory, ASVS 5.0 mapping, the security review of the accounts code and the outstanding risks.
+
+Related documents:
+
+- Vulnerability reporting: [SECURITY.md](../SECURITY.md)
+- Finding tracker with status and regression tests: [engineering-audit.md](engineering-audit.md)
+- Design decisions: [decisions/](decisions/README.md)
+- Record of the 2026-11-07 review of the single-token model: [threat-model.md](threat-model.md)

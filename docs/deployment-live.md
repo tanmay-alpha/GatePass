@@ -61,9 +61,10 @@ Render Web Service (https://gatepass-api-mvle.onrender.com)
   - Build Command: `npx vite build`
   - Output Directory: `dist/client`
   - Routing & Rewrites Configuration: [`vercel.mjs`](../vercel.mjs)
-- **Environment Variables (names only, configured for Production and Preview):**
+- **Environment Variables (names only, configured for Production only; confirmed 2026-11-10):**
   - `GATEPASS_BACKEND_ORIGIN`
   - `ORIGIN_SECRET`
+- **Preview deployments:** static-only. No preview backend is configured, so `/api/*` and `/p/*` answer 503 on previews unless `GATEPASS_PREVIEW_BACKEND_ORIGIN` and `PREVIEW_ORIGIN_SECRET` are set for the Preview environment (see the header of [`vercel.mjs`](../vercel.mjs)).
 
 ### Backend: Render
 
@@ -77,13 +78,14 @@ Render Web Service (https://gatepass-api-mvle.onrender.com)
 - **Health Check Path:** `/api/health`
 - **Origin URL:** `https://gatepass-api-mvle.onrender.com` (refuses all requests without the `X-Origin-Secret` header, returning HTTP 403, with the sole exception of `/api/health`)
 - **Environment Variables (names only):**
-  - `ADMIN_TOKEN`
+  - `ADMIN_TOKEN` (operator break-glass API credential; not a UI login)
   - `ORIGIN_SECRET`
   - `APP_PUBLIC_URL=https://gatepass-sandy.vercel.app`
   - `NODE_ENV=production`
   - `TRUST_PROXY=2`
   - `CLIENT_IP_HEADER=x-vercel-forwarded-for`
   - `DEMO_MODE=true` (makes `/api/health` report `demo: true`; the admin UI then shows a "data is erased whenever the server restarts" banner)
+  - `ALLOW_SIGNUP` is not in the variable list as inspected on 2026-11-10. The release steps in [deployment-runbook.md](deployment-runbook.md) add `ALLOW_SIGNUP=true` before the accounts release goes live.
 
 ---
 
@@ -92,7 +94,7 @@ Render Web Service (https://gatepass-api-mvle.onrender.com)
 - **Zero Secrets in Git:** Secrets are never written to any repository files or commit history.
 - **Storage Locations:** Secrets exist solely on the operator's local machine (outside git) and inside the secure dashboard environment settings of Vercel and Render.
 - **Rotation Procedures:**
-  - `ADMIN_TOKEN`: Update the environment variable in the Render service dashboard (or `PUT /v1/services/<id>/env-vars/ADMIN_TOKEN` with the Render API) and redeploy the service. **Then verify the rotation**: the deploy must reach `live`, and `GET /api/admin/session` must return 200 with the new token. If a Render deploy fails (on 2026-11-07 one failed with "Port scan timeout reached"), the previous instance keeps running with the **old** token, so retry the deploy until it is live. Last rotated 2026-11-07 after the token appeared in a chat transcript.
+  - `ADMIN_TOKEN`: Update the environment variable in the Render service dashboard (or `PUT /v1/services/<id>/env-vars/ADMIN_TOKEN` with the Render API) and redeploy the service. **Then verify the rotation**: the deploy must reach `live`, and an operator request such as `GET /api/events` with `Authorization: Bearer <new token>` must return 200. If a Render deploy fails (on 2026-11-07 one failed with "Port scan timeout reached"), the previous instance keeps running with the **old** token, so retry the deploy until it is live. Last rotated 2026-11-07 after the token appeared in a chat transcript.
   - `ORIGIN_SECRET`: Must be rotated simultaneously in both the Render dashboard (`ORIGIN_SECRET`) and the Vercel dashboard (`ORIGIN_SECRET`), followed by redeploying both services.
 
 ---
@@ -131,7 +133,7 @@ Configured `CLIENT_IP_HEADER=x-vercel-forwarded-for` on the Render backend:
 - GatePass inspects `CLIENT_IP_HEADER` to extract the true client IP directly.
 - The server strictly enforces that `CLIENT_IP_HEADER` is only permitted when `ORIGIN_SECRET` is configured and validated, ensuring untrusted external clients cannot bypass Vercel to forge the header directly against the backend.
 
-Result after fix (commit f4b4470, deployed to Render after CI passed): 62 requests with a wrong admin token through `https://gatepass-sandy.vercel.app`, each with a different spoofed `X-Forwarded-For` → the first 60 returned 401, then 429; a valid admin request from the same client right after → 200. The regression test is `rate-limits by the CDN-provided client IP, not by spoofable X-Forwarded-For` in `tests/security-api.test.ts`.
+Result after fix (commit f4b4470, deployed to Render after CI passed): 62 requests with a wrong `ADMIN_TOKEN` bearer (at that time the admin credential; now the operator token) through `https://gatepass-sandy.vercel.app`, each with a different spoofed `X-Forwarded-For` → the first 60 returned 401, then 429; a valid request from the same client right after → 200. The regression test is `rate-limits by the CDN-provided client IP, not by spoofable X-Forwarded-For` in `tests/security-api.test.ts`.
 
 ---
 
@@ -145,6 +147,7 @@ Production verification was executed against `https://gatepass-sandy.vercel.app`
      ```sh
      E2E_BASE_URL=https://gatepass-sandy.vercel.app E2E_ADMIN_TOKEN=<token> npx playwright test
      ```
+     This was the pre-accounts suite. The current E2E suite signs up its own organizer accounts instead of using `E2E_ADMIN_TOKEN`, so running it against a deployment needs `ALLOW_SIGNUP=true` on that server: `E2E_BASE_URL=<url> npx playwright test`.
    - Results: **3/3 test suites passed.**
      - **Organiser flow:** Event creation, gate creation, pass policy configuration, scanner provisioning, ticket redemption, duplicate/already-used pass rejection, wrong gate rejection, event capacity limit enforcement, and invalid QR token rejection.
      - **Revocation flow:** Immediate denial for revoked passes and revoked scanner devices.
@@ -159,7 +162,7 @@ Production verification was executed against `https://gatepass-sandy.vercel.app`
 3. **Cache Control:**
    - `/api/*` and `/p/*` responses verified to return `Cache-Control: no-store`.
 4. **Endpoint Authentication:**
-   - `POST /api/qr/custom` without an admin token returns HTTP 401.
+   - `POST /api/qr/custom` without credentials returns HTTP 401.
 5. **Origin Secret Protection:**
    - Direct requests to backend origin `https://gatepass-api-mvle.onrender.com` without `X-Origin-Secret` or with an invalid secret return HTTP 403 Forbidden.
    - Health check endpoint `/api/health` remains accessible directly without secret (returns HTTP 200 `{"ok":true,"service":"gatepass"}`).

@@ -1,33 +1,14 @@
 import { TriangleAlert, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 const DISMISSED_KEY = 'gatepass.demoNoticeDismissed';
 
-/** True when GET /api/health reports a deployment without durable storage. */
-async function isDemo(): Promise<boolean> {
-  try {
-    const response = await fetch('/api/health');
-    if (!response.ok) return false;
-    const data: unknown = await response.json();
-    return typeof data === 'object' && data !== null && 'demo' in data && data.demo === true;
-  } catch {
-    return false;
-  }
-}
-
-/** Slim warning on demo deployments, whose data is lost on every restart. Dismissed for this browser tab only. */
-export function DemoBanner() {
+/**
+ * Slim warning on demo deployments (`GET /api/health` reports `demo: true`),
+ * whose data is lost on every restart. Dismissed for this browser tab only.
+ */
+export function DemoBanner({ demo }: { demo: boolean }) {
   const [dismissed, setDismissed] = useState(() => sessionStorage.getItem(DISMISSED_KEY) === '1');
-  const [demo, setDemo] = useState(false);
-
-  useEffect(() => {
-    if (dismissed) return;
-    let live = true;
-    void isDemo().then((value) => live && setDemo(value));
-    return () => {
-      live = false;
-    };
-  }, [dismissed]);
 
   if (!demo || dismissed) return null;
   return (

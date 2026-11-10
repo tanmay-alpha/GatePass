@@ -520,6 +520,68 @@ table[aria-busy='true'] tbody { opacity: 0.6; }
 .scan-check-ok { color: var(--ok); }
 .scan-check-fail { color: var(--bad); }
 .scan-check-checking { color: var(--muted); }
+.design fieldset.form-grid:disabled { opacity: 0.75; }
+
+/* Account menu (top bar) */
+a.brand { text-decoration: none; }
+.account { position: relative; }
+.account-button { gap: var(--space-2); max-width: 220px; }
+.account-name { overflow: hidden; text-overflow: ellipsis; }
+.account-initial {
+  display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent-bg); color: var(--accent-text); font-size: var(--text-xs); font-weight: 600;
+}
+.account-panel {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 10; width: min(280px, calc(100vw - 2 * var(--space-3)));
+  display: grid; gap: 2px; padding: var(--space-2); background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-pop);
+}
+.account-who { display: grid; gap: 2px; justify-items: start; padding: var(--space-2) var(--space-2) var(--space-3); margin-bottom: var(--space-1); border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.account-item { justify-content: flex-start; width: 100%; }
+.topbar-actions { align-items: center; }
+.topbar-actions a[aria-current='page'] { background: var(--surface-selected); color: var(--fg); }
+
+/* Event header */
+.event-badges { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-top: var(--space-2); }
+.event-status-note { margin-top: var(--space-2); }
+
+/* Lifecycle */
+.lifecycle { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); }
+.lifecycle li { display: grid; gap: 2px; align-content: start; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.lifecycle li.lifecycle-current { border-color: var(--accent); background: var(--accent-bg); box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Passes list: selection bar, pager, checkboxes */
+.pass-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: 30px; }
+.pass-actions-end { margin-left: auto; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+th.check-cell, td.check-cell { width: 1%; padding-right: 0; }
+.check-cell input { display: block; }
+.import-summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.dialog .import-table { max-height: 240px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.dialog .import-table th { position: sticky; top: 0; background: var(--surface); }
+.exports { justify-content: flex-end; }
+
+/* Gate chips with rename/delete */
+.chip-actions { display: inline-flex; gap: 2px; margin-right: -6px; }
+.chip-btn { width: 28px; min-width: 28px; min-height: 28px; }
+
+/* Scanner health */
+.health-list { list-style: none; margin: calc(-1 * var(--space-1)) 0 0; padding: 0; display: grid; }
+.health-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.health-list li:last-child { border-bottom: 0; padding-bottom: 0; }
+.health-main { display: grid; gap: 2px; min-width: 0; }
+
+/* Print view for issued passes: hidden on screen (but laid out, so images load), the only thing printed. */
+.print-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--surface-2); border-radius: var(--radius-sm); font-size: var(--text-sm); }
+.print-sheet { position: fixed; top: 0; left: -300vw; width: 190mm; visibility: hidden; }
+.print-pass { display: grid; justify-items: center; gap: 2mm; padding: 5mm; border: 1px dashed #999; text-align: center; color: #000; background: #fff; break-inside: avoid; page-break-inside: avoid; }
+.print-pass img { width: 42mm; height: 42mm; }
+.print-missing { width: 42mm; height: 42mm; display: grid; place-items: center; font-size: 9pt; border: 1px solid #999; }
+.print-name { font-size: 13pt; font-weight: 600; }
+.print-event { font-size: 10pt; font-weight: 500; }
+.print-when { font-size: 9pt; }
+.print-ref { font-size: 9pt; letter-spacing: 0.04em; }
+.print-ref span { font-family: var(--mono); font-weight: 700; font-size: 11pt; }
 
 /* ---------------------------------------------------------------------------
    Scanner (phone-first, one-handed at 360px)
@@ -585,11 +647,15 @@ table[aria-busy='true'] tbody { opacity: 0.6; }
    Narrow screens
    --------------------------------------------------------------------------- */
 @media (max-width: 1180px) {
-  .ops-grid, .devices-grid { grid-template-columns: minmax(0, 1fr); }
+  .ops-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Below ~1440px the side form would squeeze the list table into horizontal scrolling: stack it above instead. */
+@media (max-width: 1439px) {
+  .passes-layout, .devices-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 1024px) {
-  .passes-layout { grid-template-columns: minmax(0, 1fr); }
   .content { padding: var(--space-5); }
 }
 
@@ -641,9 +707,22 @@ table[aria-busy='true'] tbody { opacity: 0.6; }
   .setup-step { grid-template-columns: 24px minmax(0, 1fr); }
   .setup-step-actions { grid-column: 2; justify-content: flex-start; }
   .demo-banner { padding-left: var(--space-3); }
+
+  .lifecycle { grid-template-columns: 1fr 1fr; }
+  .topbar-label, .account-name { display: none; }
+  .account-button { padding: 0 6px; }
+  .pass-actions-end { margin-left: 0; width: 100%; }
+  .exports { justify-content: flex-start; }
 }
 
 @media (max-width: 400px) {
   .result-title { font-size: 2rem; }
   .result-icon { width: 80px; height: 80px; }
+}
+
+@media print {
+  @page { margin: 10mm; }
+  body { background: #fff; }
+  #root, .toasts { display: none !important; }
+  .print-sheet { position: static; visibility: visible; width: auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4mm; }
 }

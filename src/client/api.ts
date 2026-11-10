@@ -35,7 +35,16 @@ export interface RequestOptions {
 export interface ApiInit extends RequestOptions {
   method?: string;
   body?: unknown;
+  /** Bearer credential (scanner device key). Admin pages omit it and rely on the session cookie. */
+  bearer?: string;
 }
+
+/**
+ * Cookie-authenticated requests that change state must carry this header
+ * (CSRF defense: a cross-site form or image cannot set it, and a cross-site
+ * fetch that sets it needs a CORS preflight the server never approves).
+ */
+export const CSRF_HEADER = { 'X-GatePass-CSRF': '1' } as const;
 
 function parseRetryAfter(response: Response): number | null {
   const value = Number(response.headers.get('Retry-After'));
@@ -68,18 +77,25 @@ async function withDeadline<T>(options: RequestOptions, read: (signal: AbortSign
   }
 }
 
-/** JSON fetch with bearer auth and a timeout. Throws ApiError with the server's message on non-2xx. */
-export function api<T>(path: string, token: string, init: ApiInit = {}): Promise<T> {
+/**
+ * JSON fetch with the session cookie (or `init.bearer`) and a timeout.
+ * Throws ApiError with the server's message on non-2xx.
+ */
+export function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   return withDeadline(init, async (signal) => {
+    const method = init.method ?? (init.body === undefined ? 'GET' : 'POST');
     const response = await fetch(path, {
-      method: init.method ?? (init.body === undefined ? 'GET' : 'POST'),
+      method,
+      credentials: 'same-origin',
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...(init.bearer ? { Authorization: `Bearer ${init.bearer}` } : {}),
+        ...(method === 'GET' || method === 'HEAD' ? {} : CSRF_HEADER),
         ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' })
       },
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
       signal
     });
+    if (response.status === 204) return null as T;
     const text = await response.text();
     let data: unknown = null;
     try {
@@ -95,12 +111,13 @@ export function api<T>(path: string, token: string, init: ApiInit = {}): Promise
   });
 }
 
-/** Renders a QR code through the admin-only QR endpoint and returns an object URL. */
-export function renderQrObjectUrl(token: string, data: string, config: unknown, file: 'svg' | 'png' = 'svg'): Promise<string> {
+/** Renders a QR code through the signed-in-only QR endpoint and returns an object URL. */
+export function renderQrObjectUrl(data: string, config: unknown, file: 'svg' | 'png' = 'svg'): Promise<string> {
   return withDeadline({}, async (signal) => {
     const response = await fetch('/api/qr/custom', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      headers: { ...CSRF_HEADER, 'Content-Type': 'application/json' },
       body: JSON.stringify({ data, file, size: 400, config }),
       signal
     });
@@ -109,9 +126,29 @@ export function renderQrObjectUrl(token: string, data: string, config: unknown, 
   });
 }
 
-export function formatDateTime(iso: string | null): string {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+/** Downloads a server-generated file (CSV export) through the session cookie. */
+export function downloadFile(path: string): Promise<void> {
+  return withDeadline({ timeoutMs: 60_000 }, async (signal) => {
+    const response = await fetch(path, { credentials: 'same-origin', signal });
+    if (!response.ok) {
+      const text = await response.text();
+      let message = `Download failed (${response.status})`;
+      try {
+        const data: unknown = JSON.parse(text);
+        if (data && typeof data === 'object' && 'error' in data && typeof data.error === 'string') message = data.error;
+      } catch {
+        // not JSON
+      }
+      throw new ApiError(response.status, message);
+    }
+    const filename = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') ?? '')?.[1] ?? 'export.csv';
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  });
 }
 
 /** HH:MM, with the date prepended when it is not today. */
@@ -119,15 +156,4 @@ export function formatTime(iso: string): string {
   const date = new Date(iso);
   const time = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
   return date.toDateString() === new Date().toDateString() ? time : `${date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${time}`;
-}
-
-/** `datetime-local` inputs use local time without a zone. */
-export function toLocalInput(iso: string): string {
-  const date = new Date(iso);
-  const offset = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
-}
-
-export function fromLocalInput(value: string): string {
-  return new Date(value).toISOString();
 }

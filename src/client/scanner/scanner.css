@@ -49,15 +49,19 @@ main.scanner .scanner-tools .icon-btn[aria-pressed='false'] { color: var(--muted
 main.scanner .scanner-tools .icon-btn:hover { background: var(--surface-2); }
 
 main.scanner .scanner-meta { grid-area: meta; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: var(--text-sm); color: var(--muted); min-width: 0; }
-main.scanner .scanner-device { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
+main.scanner .scanner-device, main.scanner .scanner-clock { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
 main.scanner .scanner-device > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-main.scanner .scanner-device svg, main.scanner .scanner-gate svg { flex-shrink: 0; }
+main.scanner .scanner-clock { font-variant-numeric: tabular-nums; }
+main.scanner .scanner-device svg, main.scanner .scanner-gate svg, main.scanner .scanner-clock svg { flex-shrink: 0; }
 main.scanner .scanner-gate {
   display: inline-flex; align-items: center; gap: 5px; padding: 1px var(--space-2); line-height: 1.5;
   border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--fg); font-weight: 500;
 }
+/* Connection: text plus dot, so the state never rests on colour alone. */
 main.scanner .scanner-net { display: inline-flex; align-items: center; gap: 6px; }
 main.scanner .scanner-net-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); transition: background-color 120ms; }
+main.scanner .scanner-net.is-slow { color: var(--fg); font-weight: 600; }
+main.scanner .scanner-net.is-slow .scanner-net-dot { background: var(--warn); }
 main.scanner .scanner-net.is-offline { color: var(--fg); font-weight: 600; }
 main.scanner .scanner-net.is-offline .scanner-net-dot { background: var(--bad); }
 
@@ -76,6 +80,7 @@ main.scanner .scanner-body {
   display: flex; flex-direction: column; gap: var(--space-4);
   padding: var(--scanner-pad) calc(var(--scanner-pad) + env(safe-area-inset-right)) calc(var(--scanner-pad) + env(safe-area-inset-bottom)) calc(var(--scanner-pad) + env(safe-area-inset-left));
 }
+main.scanner .scanner-scan, main.scanner .scanner-side { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
 
 /* Viewfinder: always dark, it frames a camera image. */
 main.scanner .viewfinder {
@@ -107,8 +112,29 @@ main.scanner .viewfinder-pending svg { animation: scanner-spin 900ms linear infi
   main.scanner .viewfinder-pending svg { animation: none; }
 }
 
+/* "Tap to start": one gesture opens the camera and unlocks audio for verdict tones. */
+main.scanner .viewfinder-start {
+  display: grid; place-content: center; justify-items: center; gap: var(--space-2); width: 100%; height: 100%;
+  padding: var(--space-5); border: 0; border-radius: inherit; background: none; color: #fff; font: inherit; text-align: center; cursor: pointer;
+}
+main.scanner .viewfinder-start:focus-visible { outline: 3px solid #fff; outline-offset: -6px; }
+main.scanner .viewfinder-start-title { font-size: var(--text-lg); font-weight: 650; }
+main.scanner .viewfinder-start-hint { font-size: var(--text-sm); color: rgb(255 255 255 / 0.78); max-width: 28ch; }
+/* Offline: the camera keeps running but nothing is decoded. */
+main.scanner .viewfinder-paused {
+  position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: var(--space-2);
+  background: rgb(17 19 22 / 0.82); color: #fff; font-size: var(--text-md); font-weight: 600;
+}
+
+main.scanner .camera-error { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); }
+main.scanner .camera-retry { min-height: var(--touch); padding: 0 var(--space-4); border-radius: 10px; font-weight: 600; }
+main.scanner .camera-select { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-3); color: var(--muted); }
+main.scanner .camera-select select { min-height: var(--touch); border-radius: 10px; }
+
 /* Manual entry ------------------------------------------------------------ */
-main.scanner .manual-form { display: flex; gap: var(--space-2); align-items: stretch; }
+main.scanner .manual-form { display: flex; flex-direction: column; gap: 6px; }
+main.scanner .manual-row { display: flex; gap: var(--space-2); align-items: stretch; }
+main.scanner .manual-help { margin: 0; font-size: var(--text-xs); color: var(--muted); line-height: 1.4; }
 main.scanner .manual-form input {
   min-height: 48px; padding: 0 14px; font-size: 1rem;
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
@@ -146,13 +172,14 @@ main.scanner .history-name { font-weight: 600; }
 main.scanner .history-detail { font-size: var(--text-xs); color: var(--muted); }
 main.scanner .history-verdict, main.scanner .history-time { font-size: var(--text-sm); color: var(--muted); white-space: nowrap; }
 main.scanner .history-empty { padding: 10px var(--scanner-pad); font-size: var(--text-sm); color: var(--muted); }
+main.scanner .scanner-footer { padding-top: var(--space-2); font-size: var(--text-xs); color: var(--muted); text-align: center; }
 
 /* Verdict overlay: covers the whole scanner, one solid colour per verdict. */
 main.scanner .result {
   position: absolute; inset: 0; z-index: 5; width: 100%; height: 100%; margin: 0; border: 0; border-radius: inherit;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3);
   padding: calc(var(--space-6) + env(safe-area-inset-top)) var(--space-5) calc(var(--space-6) + env(safe-area-inset-bottom));
-  font: inherit; text-align: center; cursor: pointer;
+  font: inherit; text-align: center; cursor: pointer; overflow-y: auto;
   background: var(--result-bg); color: var(--result-fg);
 }
 main.scanner .result:focus-visible { outline: 3px solid currentColor; outline-offset: -10px; }
@@ -166,25 +193,46 @@ main.scanner .result-ring {
   border: 3px solid currentColor; border-radius: 50%;
 }
 main.scanner .result .result-icon { width: 64px; height: 64px; padding: 0; border-radius: 0; background: none; color: currentColor; }
-main.scanner .result-title { font-size: 2.5rem; font-weight: 800; line-height: 1.05; letter-spacing: -0.01em; text-transform: uppercase; }
+main.scanner .result-title { margin: 0; font-size: 2.5rem; font-weight: 800; line-height: 1.05; letter-spacing: -0.01em; text-transform: uppercase; }
+main.scanner .result-desc { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); }
+main.scanner .result-desc p { margin: 0; }
 main.scanner .result-name { font-size: 1.375rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
 main.scanner .result-reason { font-size: 1.0625rem; font-weight: 650; }
 main.scanner .result-detail { max-width: 30ch; font-size: 1.0625rem; font-weight: 450; line-height: 1.4; }
-main.scanner .result-next {
-  margin-top: var(--space-6); padding: var(--space-3) var(--space-5);
-  border: 2px solid currentColor; border-radius: 12px; font-size: 1rem; font-weight: 600;
+main.scanner .result-note { padding: 2px var(--space-3); border: 1.5px solid currentColor; border-radius: 999px; font-size: var(--text-sm); font-weight: 600; }
+main.scanner .result-actions { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-3); width: min(100%, 300px); margin-top: var(--space-5); }
+main.scanner .result-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-height: 52px; padding: 0 var(--space-5);
+  border: 2px solid currentColor; border-radius: 12px; background: transparent; color: inherit; font: inherit; font-size: 1rem; font-weight: 600; cursor: pointer;
 }
+main.scanner .result-btn.result-retry { background: var(--result-fg); color: var(--result-bg); border-color: var(--result-fg); }
+main.scanner .result-btn:disabled { opacity: 0.6; cursor: default; }
+main.scanner .result-btn:focus-visible { outline: 3px solid currentColor; outline-offset: 3px; }
+main.scanner .result-btn.result-retry:focus-visible { outline-color: var(--result-fg); }
 
 @media (max-width: 380px) {
   main.scanner { --scanner-pad: var(--space-3); }
   main.scanner .result-title { font-size: 2.125rem; }
   main.scanner .result-ring { width: 112px; height: 112px; }
   main.scanner .result .result-icon { width: 56px; height: 56px; }
-  main.scanner .result-next { margin-top: var(--space-5); }
+  main.scanner .result-actions { margin-top: var(--space-4); }
 }
 
-/* Wide screens: centre the scanner in a phone-sized device frame. */
-@media (min-width: 600px) {
+/* Short landscape screens (phone on its side, kiosk mounts): viewfinder left, controls and feed right. */
+@media (orientation: landscape) and (max-height: 500px) {
+  main.scanner .scanner-bar { grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto; grid-template-areas: 'title meta tools'; padding-top: calc(var(--space-2) + env(safe-area-inset-top)); padding-bottom: var(--space-2); }
+  main.scanner .scanner-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; column-gap: var(--space-4); }
+  main.scanner .scanner-scan { position: sticky; top: 0; }
+  main.scanner .viewfinder { aspect-ratio: auto; height: calc(100dvh - 120px); min-height: 180px; }
+  main.scanner .result { flex-direction: row; flex-wrap: wrap; align-content: center; column-gap: var(--space-5); padding: var(--space-4) var(--space-5); }
+  main.scanner .result-ring { width: 88px; height: 88px; margin: 0; }
+  main.scanner .result .result-icon { width: 44px; height: 44px; }
+  main.scanner .result-title { font-size: 2rem; }
+  main.scanner .result-actions { flex-direction: row; width: auto; margin-top: 0; flex-basis: 100%; justify-content: center; }
+}
+
+/* Wide screens: centre the scanner in a phone-sized device frame (not on short landscape phones). */
+@media (min-width: 600px) and (min-height: 501px) {
   main.scanner {
     width: 390px; height: min(844px, calc(100dvh - 2 * var(--space-5)));
     margin: max(var(--space-5), calc((100dvh - 844px) / 2)) auto var(--space-5);
