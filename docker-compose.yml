@@ -17,6 +17,9 @@ services:
       DATABASE_FILE: /data/gatepass.db
       # One proxy hop (Caddy, or a reverse proxy on the host) sets X-Forwarded-For.
       TRUST_PROXY: "1"
+      # Self-registration of organizer accounts (default off: accounts come from invitations).
+      # Read from .env or the shell by compose interpolation.
+      ALLOW_SIGNUP: ${ALLOW_SIGNUP:-false}
     volumes:
       - gatepass-data:/data
     ports:
@@ -32,7 +35,8 @@ services:
         condition: service_healthy
     environment:
       # Read from .env by compose variable interpolation; only the domain is passed to Caddy.
-      GATEPASS_DOMAIN: ${GATEPASS_DOMAIN:-}
+      # Defaults to localhost (Caddy's internal CA) so the profile starts before a domain is set.
+      GATEPASS_DOMAIN: ${GATEPASS_DOMAIN:-localhost}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
