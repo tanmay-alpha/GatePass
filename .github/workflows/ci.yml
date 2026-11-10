@@ -1,7 +1,14 @@
 name: CI
 on:
+  # Branch pushes are covered by their pull request; running both doubles the
+  # jobs and has left one queued behind the account's concurrent-job limit.
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:
@@ -31,6 +38,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
