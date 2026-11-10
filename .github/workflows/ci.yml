@@ -16,7 +16,7 @@ jobs:
           - os: windows-latest
             node: 24
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
@@ -45,7 +45,7 @@ jobs:
             browser: chromium
     name: e2e (${{ matrix.project }})
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -58,7 +58,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Build linux/amd64 and linux/arm64 images
@@ -78,7 +78,7 @@ jobs:
       CONTAINER: gatepass-ci
       VOLUME: gatepass-ci-data
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Build linux/amd64 image
         run: docker build -t gatepass:ci .
       - name: Restart persistence, verify and graceful stop
