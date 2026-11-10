@@ -382,4 +382,20 @@ describe('security review regressions', () => {
     await h.admin(request(h.app).post(`/api/platform/users/${rogueId}/disable`)).expect(200);
     await new Browser(h).send('post', '/api/invitations/accept', { token: planted.url.split('/').at(-1), name: 'Sleeper', password: PASSWORD }).expect(410);
   }, 30_000);
+
+  it('applies the CSRF header rule to auth routes whatever the URL case', async () => {
+    await organizer('case@example.com');
+    await request(h.app).post('/API/AUTH/LOGIN').send({ email: 'case@example.com', password: PASSWORD }).expect(403);
+  });
+
+  it('refuses a requestId reused for a different pass instead of replaying the other pass’s verdict', async () => {
+    const browser = await organizer('rid@example.com');
+    const event = await browser.createEvent();
+    const { key } = (await browser.send('post', `/api/events/${event.id}/scanners`, { label: 'Door' }).expect(201)).body;
+    const [first, second] = (await browser.send('post', `/api/events/${event.id}/passes`, { count: 2 }).expect(201)).body;
+    const redeem = (code: string) => request(h.app).post('/api/scanner/redeem').set('Authorization', `Bearer ${key}`).send({ code, requestId: 'one-attempt-01' });
+    expect((await redeem(first.token).expect(200)).body.outcome).toBe('admitted');
+    await redeem(second.token).expect(409);
+    expect(h.service.getPass(second.id).status).toBe('active');
+  });
 });
