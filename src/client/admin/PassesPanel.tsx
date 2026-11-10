@@ -281,8 +281,8 @@ export function PassesPanel({ event, onChanged }: Props) {
                   <th scope="col">Attendee</th>
                   <th scope="col">Status</th>
                   <th scope="col">Policy</th>
-                  <th scope="col">Expires ({zoneLabel(zone, event.startsAt)})</th>
-                  <th scope="col">Checked in</th>
+                  <th scope="col" className="num">Expires ({zoneLabel(zone, event.startsAt)})</th>
+                  <th scope="col" className="num">Checked in</th>
                   <th scope="col">
                     <span className="sr-only">Actions</span>
                   </th>

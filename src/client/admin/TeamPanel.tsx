@@ -128,7 +128,7 @@ export function TeamPanel({ event, onChanged }: { event: EventSummary; onChanged
               <tr>
                 <th scope="col">Name</th>
                 <th scope="col">Role</th>
-                <th scope="col">Added</th>
+                <th scope="col" className="num">Added</th>
                 {manage ? (
                   <th scope="col">
                     <span className="sr-only">Actions</span>

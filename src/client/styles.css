@@ -647,11 +647,15 @@ th.check-cell, td.check-cell { width: 1%; padding-right: 0; }
    Narrow screens
    --------------------------------------------------------------------------- */
 @media (max-width: 1180px) {
-  .ops-grid, .devices-grid { grid-template-columns: minmax(0, 1fr); }
+  .ops-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Below ~1440px the side form would squeeze the list table into horizontal scrolling: stack it above instead. */
+@media (max-width: 1439px) {
+  .passes-layout, .devices-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 1024px) {
-  .passes-layout { grid-template-columns: minmax(0, 1fr); }
   .content { padding: var(--space-5); }
 }
 

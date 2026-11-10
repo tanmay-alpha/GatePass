@@ -130,8 +130,8 @@ export function ScannersSection({ event, gates, onChanged }: { event: EventSumma
               <tr>
                 <th scope="col">Label</th>
                 <th scope="col">Gate</th>
-                <th scope="col">Created</th>
-                <th scope="col">Last used ({zoneLabel(zone, event.startsAt)})</th>
+                <th scope="col" className="num">Created</th>
+                <th scope="col" className="num">Last used ({zoneLabel(zone, event.startsAt)})</th>
                 <th scope="col">Status</th>
                 <th scope="col">
                   <span className="sr-only">Actions</span>

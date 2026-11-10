@@ -39,7 +39,7 @@ export function InvitationTable({
             <th scope="col">Email</th>
             {showRole ? <th scope="col">Role</th> : null}
             <th scope="col">Status</th>
-            <th scope="col">Expires</th>
+            <th scope="col" className="num">Expires</th>
             <th scope="col">
               <span className="sr-only">Actions</span>
             </th>
