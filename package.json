@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "smoke:qr": "tsx scripts/qr-smoke.ts",
-    "bench": "tsx --disable-warning=ExperimentalWarning scripts/bench.ts"
+    "bench": "tsx --disable-warning=ExperimentalWarning scripts/bench.ts",
+    "load-test": "tsx --disable-warning=ExperimentalWarning scripts/load-test.ts"
   },
   "license": "MIT",
   "type": "module",
