@@ -8,13 +8,13 @@ Please include the affected route or file, steps to reproduce, and the impact. O
 
 ## Threat model summary
 
-GatePass is meant for one organiser (or one trusted team sharing a token) running a single instance. The full threat model, with threats, mitigations, tests and this iteration's review findings, is in [docs/threat-model.md](docs/threat-model.md); the user-facing summary is [README.md#security-model](README.md#security-model). In short:
+GatePass runs as a single instance. Organizers sign in with individual accounts and work on events through event roles (owner, manager); platform admins manage accounts; an operator break-glass token exists for API-only recovery. The full threat model, with the role matrix, mitigations, tests, the security review findings and outstanding risks, is in [docs/security-and-threat-model.md](docs/security-and-threat-model.md); the user-facing summary is [README.md#security-model](README.md#security-model). In short:
 
 | Asset | Protection |
 | --- | --- |
 | Pass tokens | 256-bit random; only SHA-256 stored; shown once at issue/reissue; reissue rotates the token. |
 | Single-use entry and capacity | Redemption inside a `BEGIN IMMEDIATE` transaction plus a primary key on `redemptions.pass_id` and a capacity `CHECK`; checked under concurrent HTTP requests, a second connection, and worker threads with separate connections. |
-| Admin API | Mandatory `ADMIN_TOKEN` (at least 24 chars) bearer auth, compared in constant time; the server will not start without it. |
+| Admin API | Individual accounts: scrypt password hashes; session cookie `__Host-gatepass_session` (HttpOnly, Secure, SameSite=Strict), stored only as a SHA-256 hash; CSRF header required on cookie writes. Every event route checks the caller's event role on the server (non-members get 404). `ADMIN_TOKEN` (at least 24 chars, compared in constant time) is an API-only break-glass operator credential, audited as `operator`; the server will not start without it. |
 | Scanner API | Per-device `gps_` keys, stored as SHA-256 hashes, scoped to one event, individually revocable. |
 | Attendee privacy across events | A pass scanned at another event is reported as `invalid`, with no details. |
 | Server internals | Generic 500 responses; zod validation with 400 responses; strict CSP; `no-store` on API and pass page responses. |
@@ -22,16 +22,17 @@ GatePass is meant for one organiser (or one trusted team sharing a token) runnin
 
 Known gaps, by design:
 
-- `ADMIN_TOKEN` is one shared secret. There are no user accounts, no roles, and no per-person audit identity.
+- `ADMIN_TOKEN` grants the operator full API access to every event. It is meant for break-glass use only and is not offered in the UI.
+- A platform admin can issue a reset link for an organizer account and so take it over. This is audited and accepted for account recovery without email.
 - Rate limits are kept in process memory. They reset on restart and are not shared across processes. Add proxy-level limits for anything larger.
 - Anyone with a pass link can see the event and the attendee name on `/p/<token>`.
 - A scanner key stays valid on its device until it is revoked.
-- `/api/qr/custom` requires the admin token (it was public in earlier versions) and is rate-limited.
+- `/api/qr/custom` requires a signed-in account or the operator token (it was public in earlier versions) and is rate-limited.
 - The application does not enforce HTTPS. Terminate TLS at a reverse proxy, or set `HTTPS_CERT_FILE`/`HTTPS_KEY_FILE`.
 
 ## Operator responsibilities
 
-- Generate `ADMIN_TOKEN` randomly. Keep it in the runtime environment or an ignored `.env` file, never in source control. To rotate it, change the variable and restart.
+- Generate `ADMIN_TOKEN` randomly. Keep it in the runtime environment or an ignored `.env` file, never in source control, and use it only for break-glass operations. To rotate it, change the variable, restart, and confirm the new value works once the new deploy is live.
 - Serve GatePass over HTTPS and set `APP_PUBLIC_URL` to that HTTPS origin. Set `TRUST_PROXY` to match your proxy so rate limits see real client IPs.
 - Store the database directory on a private persistent volume and back it up. It contains attendee names and emails.
 - Revoke the scanner key of any lost door device.
