@@ -56,6 +56,63 @@ export class AccessControl {
     return { id: row.id as string, name: row.name as string };
   }
 
+  /** Event of a gate, or 404. Used to authorize gate routes. */
+  gateEventId(gateId: string): string {
+    const row = this.db.prepare('SELECT event_id FROM gates WHERE id = ?').get(gateId) as Row | undefined;
+    if (!row) throw httpError(404, 'Gate not found');
+    return row.event_id as string;
+  }
+
+  renameGate(gateId: string, name: string, actor: string): Gate {
+    const eventId = this.gateEventId(gateId);
+    transaction(this.db, () => {
+      try {
+        this.db.prepare('UPDATE gates SET name = ? WHERE id = ?').run(name, gateId);
+      } catch (error) {
+        if (isConstraintError(error, 'UNIQUE')) throw httpError(409, 'A gate with that name already exists');
+        throw error;
+      }
+      recordAudit(this.db, { eventId, actor, action: 'gate.renamed', entityId: gateId, details: { name }, at: this.now() });
+    });
+    return this.listGates(eventId).find((gate) => gate.id === gateId)!;
+  }
+
+  /** Only gates nothing refers to: no scanner, policy, redemption or scan history. */
+  deleteGate(gateId: string, actor: string): void {
+    const eventId = this.gateEventId(gateId);
+    transaction(this.db, () => {
+      const used = this.db
+        .prepare(
+          `SELECT (SELECT COUNT(*) FROM scanners WHERE gate_id = :id) + (SELECT COUNT(*) FROM policy_gates WHERE gate_id = :id)
+                + (SELECT COUNT(*) FROM redemptions WHERE gate_id = :id) + (SELECT COUNT(*) FROM scans WHERE gate_id = :id) AS n`
+        )
+        .get({ id: gateId }) as Row;
+      if (Number(used.n) > 0) throw httpError(409, 'This gate is used by scanners, policies or scan history and cannot be deleted. Rename it instead.');
+      this.db.prepare('DELETE FROM gates WHERE id = ?').run(gateId);
+      recordAudit(this.db, { eventId, actor, action: 'gate.deleted', entityId: gateId, details: {}, at: this.now() });
+    });
+  }
+
+  /** Event of a policy, or 404. Used to authorize policy routes. */
+  policyEventId(policyId: string): string {
+    const row = this.db.prepare('SELECT event_id FROM admission_policies WHERE id = ?').get(policyId) as Row | undefined;
+    if (!row) throw httpError(404, 'Admission policy not found');
+    return row.event_id as string;
+  }
+
+  /** Only policies with no passes and no admissions. */
+  deletePolicy(policyId: string, actor: string): void {
+    const eventId = this.policyEventId(policyId);
+    transaction(this.db, () => {
+      const used = this.db
+        .prepare('SELECT (SELECT COUNT(*) FROM passes WHERE policy_id = :id) + (SELECT COUNT(*) FROM redemptions WHERE policy_id = :id) AS n')
+        .get({ id: policyId }) as Row;
+      if (Number(used.n) > 0) throw httpError(409, 'Passes use this policy, so it cannot be deleted. Move them to another policy first.');
+      this.db.prepare('DELETE FROM admission_policies WHERE id = ?').run(policyId);
+      recordAudit(this.db, { eventId, actor, action: 'policy.deleted', entityId: policyId, details: {}, at: this.now() });
+    });
+  }
+
   // ---------------------------------------------------------------- policies
 
   listPolicies(eventId: string): AdmissionPolicy[] {
@@ -120,7 +177,11 @@ export class AccessControl {
         this.db.prepare('DELETE FROM policy_gates WHERE policy_id = ?').run(policyId);
         this.setGates(current.eventId, policyId, patch.gateIds);
       }
-      recordAudit(this.db, { eventId: current.eventId, actor, action: 'policy.updated', entityId: policyId, details: { fields: Object.keys(patch) }, at: this.now() });
+      const details: Record<string, unknown> = { fields: Object.keys(patch) };
+      if (capacity !== current.capacity) details.capacity = { from: current.capacity, to: capacity };
+      if (opensAt !== current.opensAt || closesAt !== current.closesAt) details.window = { from: [current.opensAt, current.closesAt], to: [opensAt, closesAt] };
+      if (patch.gateIds) details.gateIds = { from: current.gateIds, to: [...new Set(patch.gateIds)] };
+      recordAudit(this.db, { eventId: current.eventId, actor, action: 'policy.updated', entityId: policyId, details, at: this.now() });
     });
     return this.getPolicy(policyId);
   }

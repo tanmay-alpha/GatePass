@@ -2,7 +2,8 @@ import type { EventSummary, Pass } from '../shared/types';
 
 export interface PassView {
   pass: Pass;
-  event: EventSummary;
+  /** Only the columns the attendee page needs; no aggregate counts. */
+  event: Pick<EventSummary, 'name' | 'venue' | 'timeZone' | 'startsAt' | 'endsAt' | 'status' | 'design'>;
   admission: {
     policyName: string | null;
     gates: string[];
@@ -19,7 +20,9 @@ const STATUS_TEXT: Record<Pass['status'], string> = {
 
 /**
  * Server-rendered, script-free page an attendee opens from the QR or a shared
- * link. Unknown and malformed tokens get the same response.
+ * link. Unknown and malformed tokens get the same response. Every time is
+ * shown in the event's own time zone, labelled, so attendees elsewhere are not
+ * misled by their device clock.
  */
 export function renderPassPage(view: PassView | null): string {
   if (!view) {
@@ -33,19 +36,25 @@ export function renderPassPage(view: PassView | null): string {
     );
   }
   const { pass, event, admission, qrSvg } = view;
+  const zone = validZone(event.timeZone);
   const attendee = pass.attendeeName ? escapeHtml(pass.attendeeName) : 'Guest';
   const venue = event.venue ? escapeHtml(event.venue) : '—';
   const admissionText = escapeHtml(formatAdmission(admission));
-  const redeemed = pass.redeemedAt ? ` Checked in ${escapeHtml(formatDate(pass.redeemedAt))}.` : '';
+  const redeemed = pass.redeemedAt ? ` Checked in ${escapeHtml(formatMoment(pass.redeemedAt, zone))}.` : '';
+  const reference = escapeHtml(pass.id.slice(0, 8).toUpperCase());
+  const referenceBlock = `<p class="ref-label" id="ref-label">Reference (for manual entry at the door)</p>
+      <p class="ref" aria-describedby="ref-label">${reference}</p>`;
+  const eventOver = event.status === 'ended' || event.status === 'archived' ? ' This event has ended.' : '';
 
   const body = `
     <div class="card">
       <p class="brand">GATEPASS</p>
       <h1 class="event-name">${escapeHtml(event.name)}</h1>
       <div class="grid">
-        <div class="field">
+        <div class="field field-wide">
           <span class="label">Date</span>
-          <span class="value">${escapeHtml(formatPassDate(event.startsAt))}</span>
+          <span class="value">${escapeHtml(formatEventWhen(event.startsAt, event.endsAt, zone))}</span>
+          <span class="zone">${escapeHtml(zoneLabel(event.startsAt, zone))}</span>
         </div>
         <div class="field">
           <span class="label">Venue</span>
@@ -55,7 +64,7 @@ export function renderPassPage(view: PassView | null): string {
           <span class="label">Attendee</span>
           <span class="value">${attendee}</span>
         </div>
-        <div class="field">
+        <div class="field field-wide">
           <span class="label">Admission</span>
           <span class="value">${admissionText}</span>
         </div>
@@ -65,12 +74,11 @@ export function renderPassPage(view: PassView | null): string {
         <div class="dashed-line"></div>
         <div class="notch notch-right"></div>
       </div>
-      ${pass.status === 'active'
-        ? `<div class="qr-container"><div class="qr">${qrSvg}</div></div><p class="ref">${escapeHtml(pass.id.slice(0, 8).toUpperCase())}</p>`
-        : `<div class="inactive-wrap"><p class="ref">${escapeHtml(pass.id.slice(0, 8).toUpperCase())}</p></div>`}
+      ${pass.status === 'active' ? `<div class="qr-container"><div class="qr">${qrSvg}</div></div>` : '<div class="inactive-wrap"></div>'}
+      ${referenceBlock}
     </div>
     <p class="status ${pass.status}" role="status">${STATUS_TEXT[pass.status]}${redeemed}</p>
-    <p class="fine">Valid until ${escapeHtml(formatDate(pass.expiresAt))}. Opening this page does not check you in.</p>`;
+    <p class="fine">Valid until ${escapeHtml(formatMoment(pass.expiresAt, zone))}.${eventOver} Opening this page does not check you in.</p>`;
 
   return layout(event.name, body);
 }
@@ -81,13 +89,53 @@ function formatAdmission(admission: { policyName: string | null; gates: string[]
   return `${admission.policyName} · ${admission.gates.join(', ')}`;
 }
 
-function formatPassDate(iso: string): string {
-  const d = new Date(iso);
-  const weekday = d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' });
-  const day = d.toLocaleDateString('en-GB', { day: 'numeric', timeZone: 'UTC' });
-  const month = d.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' });
-  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
-  return `${weekday}, ${day} ${month} · ${time} UTC`;
+/** The event's IANA zone, or UTC when the stored value is not one this runtime knows. */
+function validZone(timeZone: string): string {
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone });
+    return timeZone;
+  } catch {
+    return 'UTC';
+  }
+}
+
+/** "Sun, 15 Nov 2026" in `timeZone`. */
+function formatDay(date: Date, timeZone: string): string {
+  const part = (options: Intl.DateTimeFormatOptions) => date.toLocaleDateString('en-GB', { ...options, timeZone });
+  return `${part({ weekday: 'short' })}, ${part({ day: 'numeric' })} ${part({ month: 'short' })} ${part({ year: 'numeric' })}`;
+}
+
+/** "19:00" (24-hour) in `timeZone`. */
+function formatClock(date: Date, timeZone: string): string {
+  return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone });
+}
+
+/** Short zone name at that instant: "UTC", "BST", "GMT+5:30". */
+function zoneAbbreviation(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone, timeZoneName: 'short' }).formatToParts(date);
+  return parts.find((part) => part.type === 'timeZoneName')?.value ?? timeZone;
+}
+
+/** "Sun, 15 Nov 2026 · 19:00–23:00", or both days when the event runs past midnight. */
+export function formatEventWhen(startsAt: string, endsAt: string, timeZone: string): string {
+  const start = new Date(startsAt);
+  const end = new Date(endsAt);
+  const startDay = formatDay(start, timeZone);
+  const endDay = formatDay(end, timeZone);
+  if (startDay === endDay) return `${startDay} · ${formatClock(start, timeZone)}–${formatClock(end, timeZone)}`;
+  return `${startDay} · ${formatClock(start, timeZone)} – ${endDay} · ${formatClock(end, timeZone)}`;
+}
+
+/** "Times in Asia/Kolkata (GMT+5:30)"; just "Times in UTC" for UTC. */
+export function zoneLabel(at: string, timeZone: string): string {
+  const abbreviation = zoneAbbreviation(new Date(at), timeZone);
+  return timeZone === 'UTC' || abbreviation === timeZone ? `Times in ${timeZone}` : `Times in ${timeZone} (${abbreviation})`;
+}
+
+/** One instant with its zone: "Sun, 15 Nov 2026 · 23:00 GMT+5:30". */
+export function formatMoment(iso: string, timeZone: string): string {
+  const date = new Date(iso);
+  return `${formatDay(date, timeZone)} · ${formatClock(date, timeZone)} ${zoneAbbreviation(date, timeZone)}`;
 }
 
 function layout(title: string, body: string): string {
@@ -116,9 +164,9 @@ function layout(title: string, body: string): string {
     --card:#ffffff;
     --border:#e2e4e9;
     --fg:#111316;
-    --muted:#6b7280;
+    --muted:#5f6673;
     --ok:#1a7f37;
-    --warn:#9a6700;
+    --warn:#805600;
     --bad:#cf222e;
   }
 }
@@ -169,6 +217,7 @@ main{
   line-height:1.25;
   margin:0 0 20px;
   color:var(--fg);
+  word-break:break-word;
 }
 .card.not-found .event-name{
   margin-bottom:12px;
@@ -190,7 +239,10 @@ main{
   gap:3px;
   min-width:0;
 }
-.label{
+.field-wide{
+  grid-column:1 / -1;
+}
+.label,.ref-label{
   font-size:0.72rem;
   font-weight:500;
   color:var(--muted);
@@ -205,6 +257,10 @@ main{
   word-break:break-word;
   font-feature-settings:'tnum';
   font-variant-numeric:tabular-nums;
+}
+.zone{
+  font-size:0.75rem;
+  color:var(--muted);
 }
 .divider{
   position:relative;
@@ -265,20 +321,25 @@ main{
   height:100%;
   border-radius:6px;
 }
+.ref-label{
+  text-align:center;
+  margin:0 0 2px;
+}
 .ref{
   font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
-  font-size:0.8rem;
-  letter-spacing:0.12em;
-  color:var(--muted);
+  font-size:1.25rem;
+  font-weight:600;
+  letter-spacing:0.16em;
+  color:var(--fg);
   text-align:center;
   margin:0;
   font-feature-settings:'tnum';
   font-variant-numeric:tabular-nums;
+  user-select:all;
+  -webkit-user-select:all;
 }
 .inactive-wrap{
-  padding:28px 0 16px;
-  display:flex;
-  justify-content:center;
+  padding:12px 0 0;
 }
 .status{
   display:flex;
@@ -303,7 +364,7 @@ main{
 .status.redeemed{color:var(--warn)}
 .status.revoked,.status.expired{color:var(--bad)}
 .fine{
-  font-size:0.72rem;
+  font-size:0.75rem;
   color:var(--muted);
   text-align:center;
   margin:4px 0 0;
@@ -311,14 +372,51 @@ main{
   font-feature-settings:'tnum';
   font-variant-numeric:tabular-nums;
 }
+@page{
+  margin:12mm;
+}
+@media print{
+  :root{
+    color-scheme:light;
+    --bg:#ffffff;
+    --card:#ffffff;
+    --border:#000000;
+    --fg:#000000;
+    --muted:#333333;
+    --ok:#000000;
+    --warn:#000000;
+    --bad:#000000;
+  }
+  body{
+    display:block;
+    min-height:0;
+    padding:0;
+    font-size:12pt;
+  }
+  main{
+    margin:0 auto;
+    max-width:90mm;
+  }
+  .card{
+    border:1px solid #000000;
+    break-inside:avoid;
+    page-break-inside:avoid;
+  }
+  .notch{
+    display:none;
+  }
+  .qr{
+    -webkit-print-color-adjust:exact;
+    print-color-adjust:exact;
+  }
+  .status::before{
+    display:none;
+  }
+}
 </style>
 </head>
 <body><main>${body}</main></body>
 </html>`;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }) + ' UTC';
 }
 
 function escapeHtml(value: string): string {

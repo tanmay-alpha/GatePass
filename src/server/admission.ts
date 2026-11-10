@@ -4,7 +4,7 @@ import type { EventStatus, PassStatus, ScanResult, StoredScanOutcome } from '../
 export interface AdmissionInput {
   now: string;
   scanner: { eventId: string; gateId: string | null };
-  event: { startsAt: string; endsAt: string; status: EventStatus };
+  event: { startsAt: string; endsAt: string; status: EventStatus; capacity: number | null; admittedCount: number };
   pass: { eventId: string; status: PassStatus } | null;
   policy: {
     name: string;
@@ -46,6 +46,9 @@ export function evaluateAdmission({ now, scanner, event, pass, policy }: Admissi
   }
   if (policy?.capacity != null && policy.admittedCount >= policy.capacity) {
     return { admit: false, outcome: 'capacity_full', detail: { ...policyName, capacity: policy.capacity } };
+  }
+  if (event.capacity !== null && event.admittedCount >= event.capacity) {
+    return { admit: false, outcome: 'capacity_full', detail: { capacity: event.capacity, eventCapacity: true } };
   }
   return { admit: true };
 }

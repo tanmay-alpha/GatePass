@@ -23,6 +23,13 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
     res.status(400).json({ error: `${where}${issue?.message ?? 'Invalid request'}` });
     return;
   }
+  // Write-lock contention beyond busy_timeout (e.g. a CLI backup holding the lock): transient, retryable.
+  if (error instanceof Error && /database is locked|SQLITE_BUSY/.test(error.message)) {
+    console.error(error);
+    res.setHeader('Retry-After', '1');
+    res.status(503).json({ error: 'The server is busy. Try again.' });
+    return;
+  }
   const status = typeof error === 'object' && error !== null && 'status' in error ? Number(error.status) : 500;
   if (status >= 400 && status < 500) {
     // body-parser errors (malformed JSON, oversized bodies) carry `expose`.
@@ -80,6 +87,14 @@ export class FailureThrottle {
     }
     entry.count += 1;
     return entry.count > this.limit ? Math.ceil((entry.resetAt - now) / 1000) : 0;
+  }
+
+  /** Seconds this key must still wait (it is over the limit), without recording anything; 0 when not blocked. */
+  blocked(key: string): number {
+    const entry = this.failures.get(key);
+    const now = this.clock();
+    if (!entry || entry.resetAt <= now || entry.count < this.limit) return 0;
+    return Math.ceil((entry.resetAt - now) / 1000);
   }
 }
 

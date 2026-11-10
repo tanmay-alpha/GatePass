@@ -160,7 +160,7 @@ describe('persistence, backup and recovery', () => {
     h = createHarness({ generateToken: () => 'B'.repeat(43) }); // every token collides
     const event = h.service.createEvent(EVENT_INPUT, 'admin');
     expect(() => h.service.issuePasses(event.id, { count: 3 }, 'admin')).toThrow(/UNIQUE/);
-    expect(h.service.listPasses(event.id)).toHaveLength(0);
+    expect(h.service.listPasses(event.id).total).toBe(0);
     expect(h.service.listAudit(event.id).map((entry) => entry.action)).toEqual(['event.created']);
     expect(h.service.issuePasses(event.id, { count: 1 }, 'admin')).toHaveLength(1);
   });

@@ -59,16 +59,55 @@ export function operationsSummary(db: Database, access: AccessControl, event: Ev
     .reverse()
     .map((row) => ({ bucketStart: row.bucket as string, admitted: Number(row.admitted), denied: Number(row.denied) }));
 
+  const passRow = db
+    .prepare(
+      `SELECT COUNT(*) AS issued,
+              COALESCE(SUM(r.pass_id IS NOT NULL), 0) AS redeemed,
+              COALESCE(SUM(r.pass_id IS NULL AND p.revoked_at IS NOT NULL), 0) AS revoked,
+              COALESCE(SUM(r.pass_id IS NULL AND p.revoked_at IS NULL AND p.expires_at <= ?), 0) AS expired
+       FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id WHERE p.event_id = ?`
+    )
+    .get(nowIso, event.id) as Row;
+  const issued = Number(passRow.issued);
+  const redeemed = Number(passRow.redeemed);
+  const revoked = Number(passRow.revoked);
+  const expired = Number(passRow.expired);
+
+  const recentSince = new Date(now.getTime() - 15 * 60_000).toISOString();
+  const idleSince = new Date(now.getTime() - SCANNER_IDLE_MINUTES * 60_000).toISOString();
+  const scanners: OperationsSummary['scanners'] = (
+    db
+      .prepare(
+        `SELECT sc.id, sc.label, g.name AS gate_name, sc.revoked_at,
+                MAX(COALESCE(sc.last_used_at, ''), COALESCE(sc.last_seen_at, '')) AS last_activity,
+                (SELECT COUNT(*) FROM scans s WHERE s.scanner_id = sc.id AND s.created_at >= ?) AS recent
+         FROM scanners sc LEFT JOIN gates g ON g.id = sc.gate_id
+         WHERE sc.event_id = ? ORDER BY sc.revoked_at IS NOT NULL, sc.label`
+      )
+      .all(recentSince, event.id) as Row[]
+  ).map((row) => {
+    const lastUsedAt = (row.last_activity as string) || null;
+    const revokedScanner = row.revoked_at !== null;
+    const state = revokedScanner ? 'revoked' : !lastUsedAt ? 'never_used' : lastUsedAt >= idleSince ? 'recent' : 'idle';
+    return { id: row.id as string, label: row.label as string, gateName: (row.gate_name as string | null) ?? null, lastUsedAt, revoked: revokedScanner, scansLast15m: Number(row.recent), state };
+  });
+
   return {
     generatedAt: nowIso,
     totals: { scans, admitted, denied: scans - admitted },
     outcomes,
+    passes: { issued, active: issued - redeemed - revoked - expired, redeemed, revoked, expired },
+    capacity: { limit: event.capacity, admitted: event.admittedCount, remaining: event.capacity === null ? null : event.capacity - event.admittedCount },
     gates,
     policies,
+    scanners,
     timeline,
     alerts: alerts(db, event.id, policies, now)
   };
 }
+
+/** A device with no scan or heartbeat for this long is shown as idle. */
+export const SCANNER_IDLE_MINUTES = 10;
 
 function alerts(db: Database, eventId: string, policies: OperationsSummary['policies'], now: Date): OperationsAlert[] {
   const result: OperationsAlert[] = [];
