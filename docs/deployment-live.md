@@ -170,3 +170,20 @@ Production verification was executed against `https://gatepass-sandy.vercel.app`
 ### Not Verified / Out of Scope
 - **Physical Phone Camera Scanning:** Browser camera permission prompts were verified over HTTPS, but testing with physical mobile hardware was not performed.
 - **Data Persistence:** Persistence across restarts cannot be verified on the Render Free tier as it provides an ephemeral filesystem by design.
+
+## 7. Release record — 2026-11-10 (PR #11)
+
+| Gate | Evidence |
+| --- | --- |
+| GitHub checks | PR #11: all 20 checks passed (check on ubuntu Node 22/24 and windows Node 24, e2e chromium/firefox/webkit/mobile-chrome, docker multi-arch build, docker-run restart persistence, Vercel). One PR-triggered WebKit job hung in the queue and passed on rerun; the push-triggered run on the same SHA passed first time. |
+| Migration / backup | `tests/migration.test.ts` (populated v2 → v3, row counts and hashes preserved, `.pre-v3.bak` written) and `tests/recovery.test.ts` (CLI backup/restore). The live database is ephemeral, so no production data was migrated. |
+| Frontend/backend compatibility | Both built from merge commit `234ba8802ca5b0b17474432ad1c7d8830dc29535`. |
+| Staging E2E | No separate staging service exists; the e2e suite ran against the built server locally and in CI, and the preview deployment was checked to be static-only. |
+| Approval | Owner chose "merge and deploy" on 2026-11-10; `ALLOW_SIGNUP=true` added to Render through the API before the merge. |
+| Deployed SHA | Render deploy for `234ba88` live at 13:24:47 UTC; Vercel production deployment `gatepass-o191u68h5` (commit `234ba88`) aliased to `gatepass-sandy.vercel.app`. |
+| Health | `GET /api/health` via Vercel and on the origin: `{"ok":true,"service":"gatepass","signup":true,"demo":true}`. HSTS and CSP present on the Vercel front. |
+| Key journeys | `E2E_BASE_URL=https://gatepass-sandy.vercel.app npx playwright test --project=chromium`: 6/6 passed (sign-up, onboarding, invite manager, roles, CSV import, attendance export, admit/duplicate/wrong gate/full, revocation, expiry). Probes: `/api/events` without a session 401; cookie-less login without the CSRF header 403; origin without `X-Origin-Secret` 403; removed `/api/admin/session` 404. |
+| Logs | 100 Render log lines after the deploy contained no error, exception or failure lines. |
+| Rollback | Documented in [deployment-runbook.md](deployment-runbook.md#rollback). Not exercised on production. Its parts are covered by tests: an older build refuses a newer schema (`tests/database.test.ts`), and `.pre-v3.bak` / `restore` bring back a version 2 file (`tests/migration.test.ts`, `tests/recovery.test.ts`). On this demo the disk is ephemeral, so redeploying `4ff70f1` would start from an empty database. |
+
+Still demo-only: Render free plan, no persistent disk, `DEMO_MODE=true`.
