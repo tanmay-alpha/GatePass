@@ -1,22 +1,12 @@
 import { Ticket } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, IssuedPass } from '../../shared/types';
-import { api, formatDateTime, fromLocalInput } from '../api';
+import { attendeesFromCsv, parseCsv } from '../csv';
 import { ErrorNote, FieldError, SectionHead, errorMessage, focusFirstInvalid } from '../ui';
+import { formatDateTimeInZone, fromZoneInput, zoneLabel } from '../time';
+import { adminApi } from './http';
 
 const MAX_PASSES = 500;
-
-/** Parses "Name, email" lines; either part may be empty. */
-function parseAttendees(text: string): Array<{ name: string; email: string }> {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name = '', email = ''] = line.split(',').map((part) => part.trim());
-      return name.includes('@') && !email ? { name: '', email: name } : { name, email };
-    });
-}
 
 interface Errors {
   attendees?: string;
@@ -24,30 +14,26 @@ interface Errors {
   expiresAt?: string;
 }
 
-function validate(mode: 'named' | 'count', lineCount: number, count: string, expiresAt: string): Errors {
+function validate(mode: 'named' | 'count', lineCount: number, count: string, expiresAt: string, expiresIso: string | null): Errors {
   const errors: Errors = {};
   if (mode === 'named') {
     if (lineCount === 0) errors.attendees = 'Add at least one attendee, one per line.';
-    else if (lineCount > MAX_PASSES) errors.attendees = `Up to ${MAX_PASSES} attendees at a time; this list has ${lineCount}. Split it into smaller batches.`;
+    else if (lineCount > MAX_PASSES) errors.attendees = `Up to ${MAX_PASSES} attendees at a time; this list has ${lineCount}. Use Import CSV for longer lists.`;
   } else {
     const value = Number(count);
     if (!count.trim() || !Number.isInteger(value) || value < 1 || value > MAX_PASSES) errors.count = `Enter a whole number from 1 to ${MAX_PASSES}.`;
   }
-  if (expiresAt) {
-    const expiry = new Date(expiresAt).getTime();
-    if (Number.isNaN(expiry) || expiry <= Date.now()) errors.expiresAt = 'Choose an expiry in the future, or leave it empty.';
-  }
+  if (expiresAt && (!expiresIso || new Date(expiresIso).getTime() <= Date.now())) errors.expiresAt = 'Choose an expiry in the future, or leave it empty.';
   return errors;
 }
 
 interface Props {
-  token: string;
   event: EventSummary;
   policies: AdmissionPolicy[];
   onIssued: (passes: IssuedPass[]) => Promise<void>;
 }
 
-export function IssueForm({ token, event, policies, onIssued }: Props) {
+export function IssueForm({ event, policies, onIssued }: Props) {
   const [mode, setMode] = useState<'named' | 'count'>('named');
   const [attendees, setAttendees] = useState('');
   const [count, setCount] = useState('10');
@@ -56,14 +42,16 @@ export function IssueForm({ token, event, policies, onIssued }: Props) {
   const [showErrors, setShowErrors] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const lines = parseAttendees(attendees);
+  // Same parser as CSV import, so quoted names with commas ("Lovelace, Ada") survive.
+  const lines = attendeesFromCsv(parseCsv(attendees)).rows;
   const countValue = Number(count);
   const total = mode === 'named' ? lines.length : Number.isInteger(countValue) && countValue > 0 ? countValue : 0;
-  const errors = showErrors ? validate(mode, lines.length, count, expiresAt) : {};
+  const expiresIso = expiresAt ? fromZoneInput(expiresAt, event.timeZone) : null;
+  const errors = showErrors ? validate(mode, lines.length, count, expiresAt, expiresIso) : {};
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (Object.keys(validate(mode, lines.length, count, expiresAt)).length) {
+    if (Object.keys(validate(mode, lines.length, count, expiresAt, expiresIso)).length) {
       setShowErrors(true);
       focusFirstInvalid(e.currentTarget);
       return;
@@ -73,10 +61,10 @@ export function IssueForm({ token, event, policies, onIssued }: Props) {
     try {
       const body = {
         ...(mode === 'named' ? { attendees: lines } : { count: countValue }),
-        ...(expiresAt ? { expiresAt: fromLocalInput(expiresAt) } : {}),
+        ...(expiresIso ? { expiresAt: expiresIso } : {}),
         ...(policyId ? { policyId } : {})
       };
-      await onIssued(await api<IssuedPass[]>(`/api/events/${event.id}/passes`, token, { body }));
+      await onIssued(await adminApi<IssuedPass[]>(`/api/events/${event.id}/passes`, { body }));
       setAttendees('');
       setShowErrors(false);
     } catch (err) {
@@ -111,7 +99,7 @@ export function IssueForm({ token, event, policies, onIssued }: Props) {
               aria-describedby="attendees-hint attendees-error"
             />
             <span id="attendees-hint" className="field-hint">
-              One per line: <code>Name, email</code>. Email is optional; up to {MAX_PASSES} lines.
+              One per line: <code>Name, email</code>. Email is optional; quote names that contain commas. Up to {MAX_PASSES} lines.
             </span>
             <FieldError id="attendees-error" message={errors.attendees} />
           </label>
@@ -136,20 +124,7 @@ export function IssueForm({ token, event, policies, onIssued }: Props) {
             <FieldError id="count-error" message={errors.count} />
           </label>
         )}
-        <label>
-          Admission policy
-          <select value={policyId} onChange={(e) => setPolicyId(e.target.value)} aria-describedby="issue-policy-hint">
-            <option value="">No policy</option>
-            {policies.map((policy) => (
-              <option key={policy.id} value={policy.id}>
-                {policy.name}
-              </option>
-            ))}
-          </select>
-          <span id="issue-policy-hint" className="field-hint">
-            {policies.length ? 'No policy: any gate, any time during the event.' : 'Create policies on the Access tab to restrict gates, times or capacity.'}
-          </span>
-        </label>
+        <PolicySelect id="issue-policy" policies={policies} value={policyId} onChange={setPolicyId} />
         <label>
           Expires
           <input
@@ -160,7 +135,7 @@ export function IssueForm({ token, event, policies, onIssued }: Props) {
             aria-describedby="issue-expiry-hint issue-expiry-error"
           />
           <span id="issue-expiry-hint" className="field-hint">
-            Empty: event end ({formatDateTime(event.endsAt)})
+            In {zoneLabel(event.timeZone, event.endsAt)}. Empty: event end ({formatDateTimeInZone(event.endsAt, event.timeZone, false)})
           </span>
           <FieldError id="issue-expiry-error" message={errors.expiresAt} />
         </label>
@@ -170,5 +145,25 @@ export function IssueForm({ token, event, policies, onIssued }: Props) {
         </button>
       </form>
     </section>
+  );
+}
+
+/** Admission policy picker shared by issuing and CSV import. */
+export function PolicySelect({ id, policies, value, onChange }: { id: string; policies: AdmissionPolicy[]; value: string; onChange: (value: string) => void }) {
+  return (
+    <label>
+      Admission policy
+      <select value={value} onChange={(e) => onChange(e.target.value)} aria-describedby={`${id}-hint`}>
+        <option value="">No policy</option>
+        {policies.map((policy) => (
+          <option key={policy.id} value={policy.id}>
+            {policy.name}
+          </option>
+        ))}
+      </select>
+      <span id={`${id}-hint`} className="field-hint">
+        {policies.length ? 'No policy: any gate, any time during the event.' : 'Create policies on the Access tab to restrict gates, times or capacity.'}
+      </span>
+    </label>
   );
 }

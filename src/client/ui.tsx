@@ -139,25 +139,12 @@ export function CapacityLine({ admitted, capacity }: { admitted: number; capacit
   );
 }
 
-/** "Nov 7, 2026" */
-export function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
-}
-
-/** "Nov 7, 18:00": compact date and time for dense tables. */
+/** "Nov 7, 18:00" in the viewer's zone: for account-level times not tied to an event (event times use `time.ts`). */
 export function formatShortDateTime(iso: string | null): string {
   if (!iso) return '—';
   const date = new Date(iso);
   const day = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   return `${day}, ${date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
-}
-
-/** "Nov 7, 18:00 – 23:30", or both dates when the range spans days. */
-export function formatDateRange(startIso: string, endIso: string): string {
-  const start = new Date(startIso);
-  const end = new Date(endIso);
-  const time = (date: Date) => date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  return start.toDateString() === end.toDateString() ? `${formatShortDateTime(startIso)} – ${time(end)}` : `${formatShortDateTime(startIso)} – ${formatShortDateTime(endIso)}`;
 }
 
 export function errorMessage(error: unknown): string {

@@ -4,7 +4,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 const PORT = '3410';
 // E2E_BASE_URL runs the same specs against an already deployed instance
-// (with E2E_ADMIN_TOKEN); otherwise a local built server is started.
+// (which must allow self-registration: the specs sign up fresh organizer
+// accounts); otherwise a local built server is started.
 const deployed = process.env.E2E_BASE_URL;
 const BASE_URL = deployed ?? `http://127.0.0.1:${PORT}`;
 
@@ -25,7 +26,13 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+    // Phone-sized admin: the guided first-event flow must work at phone width.
+    { name: 'mobile-chrome', use: { ...devices['Pixel 7'] }, testMatch: /onboarding\.spec\.ts$/ }
+  ],
   webServer: deployed
     ? undefined
     : {
@@ -35,6 +42,7 @@ export default defineConfig({
         reuseExistingServer: false,
         env: {
           ADMIN_TOKEN: 'e2e-admin-token-0123456789abcdef',
+          ALLOW_SIGNUP: 'true',
           PORT,
           HOST: '127.0.0.1',
           APP_PUBLIC_URL: BASE_URL,

@@ -1,9 +1,11 @@
-import { Info, TriangleAlert } from 'lucide-react';
+import { Download, Info, TriangleAlert } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import type { AlertKind, EventSummary, OperationsSummary, StoredScanOutcome } from '../../shared/types';
-import { api, formatTime } from '../api';
 import { Bar, EmptyState, ErrorNote, OutcomeBadge, SectionHead, Stat, TableMessage, ToneBadge, capacityTone, errorMessage, type Tone } from '../ui';
+import { formatTimeInZone, zoneLabel } from '../time';
 import { LIVE_POLL_MS, usePolling } from './hooks';
+import { adminApi, adminDownload } from './http';
+import { can } from './model';
 import { ScanFeed } from './ScanFeed';
 
 const ALERT_LABEL: Record<AlertKind, string> = {
@@ -22,62 +24,198 @@ const POLICY_STATE: Record<PolicyState, { label: string; tone: Tone }> = {
   closed: { label: 'Closed', tone: 'muted' }
 };
 
-/** Live door picture: totals, alerts, timeline, gates, policy capacity and the scan feed, refreshed while visible. */
-export function OperationsPanel({ token, event, onChanged }: { token: string; event: EventSummary; onChanged: () => Promise<void> }) {
+type ScannerState = OperationsSummary['scanners'][number]['state'];
+
+const SCANNER_STATE: Record<ScannerState, { label: string; tone: Tone }> = {
+  recent: { label: 'Recent', tone: 'ok' },
+  idle: { label: 'Idle', tone: 'warn' },
+  never_used: { label: 'Never used', tone: 'muted' },
+  revoked: { label: 'Revoked', tone: 'bad' }
+};
+
+/** Live door picture: turnout, capacity, devices, alerts, timeline, gates, policies and the scan feed, refreshed while visible. */
+export function OperationsPanel({ event, onChanged }: { event: EventSummary; onChanged: () => Promise<void> }) {
   const [summary, setSummary] = useState<OperationsSummary | null>(null);
   const [error, setError] = useState('');
 
   const poll = useCallback(async () => {
     try {
-      setSummary(await api<OperationsSummary>(`/api/events/${event.id}/operations`, token));
+      setSummary(await adminApi<OperationsSummary>(`/api/events/${event.id}/operations`));
       setError('');
     } catch (err) {
       setError(errorMessage(err));
     }
-  }, [event.id, token]);
+  }, [event.id]);
 
   usePolling(poll, LIVE_POLL_MS);
 
   return (
     <div className="stack-lg">
+      {can(event, 'export') ? <Exports event={event} /> : null}
       <ErrorNote message={error} />
-      {summary ? <Summary summary={summary} /> : !error ? <p className="muted" role="status">Loading operations…</p> : null}
+      {summary ? (
+        <Summary summary={summary} zone={event.timeZone} />
+      ) : !error ? (
+        <p className="muted" role="status">
+          Loading operations…
+        </p>
+      ) : null}
       <section className="card" aria-labelledby="feed-title">
         <SectionHead id="feed-title" title="Live scan feed" description="Newest first, from every device.">
           <span className="card-meta" title={`Refreshes every ${LIVE_POLL_MS / 1000} s while this tab is open`}>
             <span className="live-dot" aria-hidden /> Live
-            {summary ? <span className="num"> · updated {new Date(summary.generatedAt).toLocaleTimeString()}</span> : null}
+            {summary ? <span className="num"> · updated {formatTimeInZone(summary.generatedAt, event.timeZone)}</span> : null}
           </span>
         </SectionHead>
-        <ScanFeed token={token} event={event} onChanged={onChanged} />
+        <ScanFeed event={event} onChanged={onChanged} />
       </section>
     </div>
   );
 }
 
-function Summary({ summary }: { summary: OperationsSummary }) {
-  const { totals } = summary;
+function Exports({ event }: { event: EventSummary }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  async function run(kind: 'attendance' | 'scans' | 'audit') {
+    setBusy(kind);
+    setError('');
+    try {
+      await adminDownload(`/api/events/${event.id}/exports/${kind}.csv`);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="stack-sm">
+      <div className="actions exports" role="group" aria-label="Exports">
+        <span className="muted small">Export CSV:</span>
+        {(
+          [
+            ['attendance', 'Attendance'],
+            ['scans', 'Scans'],
+            ['audit', 'Audit log']
+          ] as const
+        ).map(([kind, label]) => (
+          <button key={kind} type="button" className="btn btn-secondary btn-small" onClick={() => void run(kind)} disabled={busy !== null}>
+            <Download size={14} aria-hidden /> {busy === kind ? 'Exporting…' : `${label} CSV`}
+          </button>
+        ))}
+      </div>
+      <ErrorNote message={error} />
+    </div>
+  );
+}
+
+function Summary({ summary, zone }: { summary: OperationsSummary; zone: string }) {
+  const { totals, passes, capacity } = summary;
   return (
     <>
       <div className="stats stats-lg">
-        <Stat label="Scans" value={totals.scans} />
-        <Stat label="Admitted" value={totals.admitted} />
-        <Stat label="Denied" value={totals.denied} />
-        <Stat label="Admit rate" value={totals.scans ? `${((totals.admitted / totals.scans) * 100).toFixed(1)}%` : '—'} />
+        <Stat label="Admitted / issued" value={`${passes.redeemed} / ${passes.issued}`} />
+        <Stat label="Turnout" value={passes.issued ? `${Math.round((passes.redeemed / passes.issued) * 100)}%` : '—'} />
+        <Stat label="Capacity left" value={capacity.remaining === null ? 'No limit' : capacity.remaining} />
+        <Stat label="Denied scans" value={totals.denied} />
       </div>
       <div className="ops-grid">
-        <Alerts alerts={summary.alerts} />
-        <Timeline buckets={summary.timeline} outcomes={summary.outcomes} total={totals.scans} />
+        <PassStates passes={passes} capacity={capacity} />
+        <Scanners scanners={summary.scanners} zone={zone} />
       </div>
       <div className="ops-grid">
-        <Gates gates={summary.gates} />
-        <Policies policies={summary.policies} />
+        <Alerts alerts={summary.alerts} zone={zone} />
+        <Timeline buckets={summary.timeline} outcomes={summary.outcomes} total={totals.scans} zone={zone} />
+      </div>
+      <div className="ops-grid">
+        <Gates gates={summary.gates} zone={zone} />
+        <Policies policies={summary.policies} zone={zone} />
       </div>
     </>
   );
 }
 
-function Alerts({ alerts }: { alerts: OperationsSummary['alerts'] }) {
+const PASS_ROWS: Array<{ key: 'active' | 'redeemed' | 'revoked' | 'expired'; label: string; tone: Tone; note: string }> = [
+  { key: 'active', label: 'Active', tone: 'info', note: 'valid, not used yet' },
+  { key: 'redeemed', label: 'Redeemed', tone: 'ok', note: 'admitted' },
+  { key: 'revoked', label: 'Revoked', tone: 'bad', note: 'cancelled by an organizer' },
+  { key: 'expired', label: 'Expired', tone: 'muted', note: 'unused past expiry' }
+];
+
+function PassStates({ passes, capacity }: { passes: OperationsSummary['passes']; capacity: OperationsSummary['capacity'] }) {
+  return (
+    <section className="card" aria-labelledby="pass-states-title">
+      <SectionHead id="pass-states-title" title="Passes">
+        <span className="card-meta num">{passes.issued} issued</span>
+      </SectionHead>
+      {passes.issued === 0 ? (
+        <p className="muted small">No passes issued yet.</p>
+      ) : (
+        <ul className="outcome-list">
+          {PASS_ROWS.map((row) => (
+            <li key={row.key}>
+              <span className="outcome-name">
+                <ToneBadge tone={row.tone}>{row.label}</ToneBadge>
+              </span>
+              <Bar value={passes[row.key]} max={passes.issued} tone={row.tone} />
+              <span className="muted num outcome-share">{Math.round((passes[row.key] / passes.issued) * 100)}%</span>
+              <span className="num outcome-count" title={row.note}>
+                {passes[row.key]}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="outcomes">
+        <h3 className="label">Event capacity</h3>
+        {capacity.limit === null ? (
+          <p className="small muted num">{capacity.admitted} admitted · no event-wide limit (set one in Settings)</p>
+        ) : (
+          <div className="capacity-line">
+            <Bar value={capacity.admitted} max={capacity.limit} tone={capacityTone(capacity.admitted, capacity.limit)} />
+            <span className="small num">
+              {capacity.admitted}/{capacity.limit} admitted · {capacity.remaining} left
+            </span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function Scanners({ scanners, zone }: { scanners: OperationsSummary['scanners']; zone: string }) {
+  return (
+    <section className="card" aria-labelledby="scanner-health-title">
+      <SectionHead id="scanner-health-title" title="Scanner devices">
+        <span className="card-meta">Idle = no request for 10 min</span>
+      </SectionHead>
+      {scanners.length === 0 ? (
+        <p className="muted small">No devices yet. Add one on the Access tab.</p>
+      ) : (
+        <ul className="health-list">
+          {scanners.map((scanner) => {
+            const state = SCANNER_STATE[scanner.state];
+            return (
+              <li key={scanner.id}>
+                <div className="health-main">
+                  <span className="strong">{scanner.label}</span>
+                  <span className="muted small">
+                    {scanner.gateName ?? 'Any gate'} · {scanner.lastUsedAt ? `last seen ${formatTimeInZone(scanner.lastUsedAt, zone)}` : 'never seen'}
+                    {scanner.scansLast15m ? ` · ${scanner.scansLast15m} scans in 15 min` : ''}
+                  </span>
+                </div>
+                <ToneBadge tone={state.tone}>{state.label}</ToneBadge>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function Alerts({ alerts, zone }: { alerts: OperationsSummary['alerts']; zone: string }) {
   return (
     <section className="card" aria-labelledby="alerts-title">
       <SectionHead id="alerts-title" title="Alerts">
@@ -101,7 +239,7 @@ function Alerts({ alerts }: { alerts: OperationsSummary['alerts'] }) {
                   <div className="alert-message">{alert.message}</div>
                 </div>
                 <time className="alert-time num" dateTime={alert.lastAt}>
-                  {formatTime(alert.lastAt)}
+                  {formatTimeInZone(alert.lastAt, zone)}
                 </time>
               </li>
             );
@@ -113,13 +251,14 @@ function Alerts({ alerts }: { alerts: OperationsSummary['alerts'] }) {
 }
 
 /** Stacked bars (admitted below, denied on top) scaled to the busiest bucket, with the outcome breakdown underneath. */
-function Timeline({ buckets, outcomes, total }: { buckets: OperationsSummary['timeline']; outcomes: OperationsSummary['outcomes']; total: number }) {
+function Timeline({ buckets, outcomes, total, zone }: { buckets: OperationsSummary['timeline']; outcomes: OperationsSummary['outcomes']; total: number; zone: string }) {
   const peak = Math.max(1, ...buckets.map((bucket) => bucket.admitted + bucket.denied));
   const busiest = buckets.find((bucket) => bucket.admitted + bucket.denied === peak);
   const ticks = [...new Set([0, Math.floor((buckets.length - 1) / 2), buckets.length - 1])].filter((index) => index >= 0);
+  const time = (iso: string) => formatTimeInZone(iso, zone);
   return (
     <section className="card" aria-labelledby="timeline-title">
-      <SectionHead id="timeline-title" title="Scans per 15 min">
+      <SectionHead id="timeline-title" title={`Scans per 15 min (${buckets.length ? zoneLabel(zone, buckets[0].bucketStart) : zone})`}>
         <span className="legend" aria-hidden>
           <span className="legend-item">
             <span className="legend-dot legend-admitted" /> Admitted
@@ -136,12 +275,12 @@ function Timeline({ buckets, outcomes, total }: { buckets: OperationsSummary['ti
           <div
             className="chart"
             role="img"
-            aria-label={`Scans per 15 minutes from ${formatTime(buckets[0].bucketStart)} to ${formatTime(buckets[buckets.length - 1].bucketStart)}.${busiest ? ` Busiest: ${peak} scans at ${formatTime(busiest.bucketStart)}.` : ''}`}
+            aria-label={`Scans per 15 minutes from ${time(buckets[0].bucketStart)} to ${time(buckets[buckets.length - 1].bucketStart)}.${busiest ? ` Busiest: ${peak} scans at ${time(busiest.bucketStart)}.` : ''}`}
           >
             {buckets.map((bucket) => {
               const scans = bucket.admitted + bucket.denied;
               return (
-                <div key={bucket.bucketStart} className="chart-col" title={`${formatTime(bucket.bucketStart)}: ${bucket.admitted} admitted, ${bucket.denied} denied`}>
+                <div key={bucket.bucketStart} className="chart-col" title={`${time(bucket.bucketStart)}: ${bucket.admitted} admitted, ${bucket.denied} denied`}>
                   {scans > 0 ? (
                     <div className="chart-bar" style={{ height: `${(scans / peak) * 100}%` }}>
                       {bucket.denied > 0 ? <span className="chart-denied" style={{ flexGrow: bucket.denied }} /> : null}
@@ -154,7 +293,7 @@ function Timeline({ buckets, outcomes, total }: { buckets: OperationsSummary['ti
           </div>
           <div className="chart-axis num" aria-hidden>
             {ticks.map((index) => (
-              <span key={index}>{formatTime(buckets[index].bucketStart)}</span>
+              <span key={index}>{time(buckets[index].bucketStart)}</span>
             ))}
           </div>
         </div>
@@ -186,7 +325,7 @@ function Outcomes({ outcomes, total }: { outcomes: OperationsSummary['outcomes']
   );
 }
 
-function Gates({ gates }: { gates: OperationsSummary['gates'] }) {
+function Gates({ gates, zone }: { gates: OperationsSummary['gates']; zone: string }) {
   return (
     <section className="card" aria-labelledby="gates-ops-title">
       <SectionHead id="gates-ops-title" title="Admissions by gate" />
@@ -212,7 +351,7 @@ function Gates({ gates }: { gates: OperationsSummary['gates'] }) {
                 <td className="strong">{gate.id ? gate.name : <span className="muted">{gate.name || 'Any gate'}</span>}</td>
                 <td className="num">{gate.admitted}</td>
                 <td className="num">{gate.denied}</td>
-                <td className="num muted">{gate.lastScanAt ? formatTime(gate.lastScanAt) : '—'}</td>
+                <td className="num muted">{gate.lastScanAt ? formatTimeInZone(gate.lastScanAt, zone) : '—'}</td>
               </tr>
             ))}
             {gates.length === 0 ? <TableMessage colSpan={4}>No scans yet. Add gates and scanner devices on the Access tab.</TableMessage> : null}
@@ -230,7 +369,7 @@ function policyBarTone(state: PolicyState, admitted: number, capacity: number): 
   return capacityTone(admitted, capacity);
 }
 
-function Policies({ policies }: { policies: OperationsSummary['policies'] }) {
+function Policies({ policies, zone }: { policies: OperationsSummary['policies']; zone: string }) {
   return (
     <section className="card" aria-labelledby="capacity-title">
       <SectionHead id="capacity-title" title="Policy capacity" />
@@ -246,7 +385,7 @@ function Policies({ policies }: { policies: OperationsSummary['policies'] }) {
                   <div className="capacity-title">
                     <span className="capacity-name">{policy.name}</span>
                     <span className="muted small num">
-                      {formatTime(policy.opensAt)} – {formatTime(policy.closesAt)}
+                      {formatTimeInZone(policy.opensAt, zone)} – {formatTimeInZone(policy.closesAt, zone)}
                     </span>
                   </div>
                   <span className="muted num">{policy.capacity === null ? `${policy.admitted} admitted` : `${policy.admitted}/${policy.capacity}`}</span>

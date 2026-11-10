@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../api';
 import { errorMessage } from '../ui';
+import { adminApi } from './http';
 
 /** Cadence for live operations data. */
 export const LIVE_POLL_MS = 5000;
@@ -12,25 +12,26 @@ export interface Resource<T> {
   reload: () => Promise<void>;
 }
 
-/** GETs `path` on mount and whenever it changes; responses to superseded requests are dropped. */
-export function useResource<T>(path: string, token: string): Resource<T> {
-  const [state, setState] = useState<{ data: T | null; error: string; loading: boolean }>({ data: null, error: '', loading: true });
+/** GETs `path` on mount and whenever it changes; responses to superseded requests are dropped. `null` skips the request. */
+export function useResource<T>(path: string | null): Resource<T> {
+  const [state, setState] = useState<{ data: T | null; error: string; loading: boolean }>({ data: null, error: '', loading: path !== null });
   const latest = useRef(0);
 
   const reload = useCallback(async () => {
     const request = ++latest.current;
+    if (path === null) return;
     try {
-      const data = await api<T>(path, token);
+      const data = await adminApi<T>(path);
       if (request === latest.current) setState({ data, error: '', loading: false });
     } catch (err) {
       if (request === latest.current) setState((current) => ({ ...current, error: errorMessage(err), loading: false }));
     }
-  }, [path, token]);
+  }, [path]);
 
   useEffect(() => {
-    setState((current) => ({ ...current, loading: true }));
+    setState((current) => ({ ...current, loading: path !== null }));
     void reload();
-  }, [reload]);
+  }, [reload, path]);
 
   return { ...state, reload };
 }

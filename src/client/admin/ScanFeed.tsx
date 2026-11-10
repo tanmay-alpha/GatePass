@@ -1,13 +1,14 @@
 import { useCallback, useRef, useState } from 'react';
 import type { EventSummary, ScanRecord } from '../../shared/types';
-import { api, formatTime } from '../api';
 import { ErrorNote, OutcomeBadge, TableMessage, errorMessage } from '../ui';
+import { formatTimeInZone, zoneLabel } from '../time';
 import { LIVE_POLL_MS, usePolling } from './hooks';
+import { adminApi } from './http';
 
 const MAX_ROWS = 300;
 
 /** Polls for scans newer than the last seen id; cheap thanks to the (event_id, id) index. */
-export function ScanFeed({ token, event, onChanged }: { token: string; event: EventSummary; onChanged: () => Promise<void> }) {
+export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged: () => Promise<void> }) {
   const [scans, setScans] = useState<ScanRecord[] | null>(null);
   const [error, setError] = useState('');
   const lastId = useRef(0);
@@ -16,7 +17,7 @@ export function ScanFeed({ token, event, onChanged }: { token: string; event: Ev
 
   const poll = useCallback(async () => {
     try {
-      const fresh = await api<ScanRecord[]>(`/api/events/${event.id}/scans?after=${lastId.current}&limit=100`, token);
+      const fresh = await adminApi<ScanRecord[]>(`/api/events/${event.id}/scans?after=${lastId.current}&limit=100`);
       const isNew = loaded.current;
       loaded.current = true;
       if (fresh.length) lastId.current = fresh[0].id;
@@ -27,7 +28,7 @@ export function ScanFeed({ token, event, onChanged }: { token: string; event: Ev
     } catch (err) {
       setError(errorMessage(err));
     }
-  }, [event.id, token, onChanged]);
+  }, [event.id, onChanged]);
 
   usePolling(poll, LIVE_POLL_MS);
 
@@ -38,7 +39,7 @@ export function ScanFeed({ token, event, onChanged }: { token: string; event: Ev
         <table>
           <thead>
             <tr>
-              <th scope="col">Time</th>
+              <th scope="col">Time ({zoneLabel(event.timeZone, event.startsAt)})</th>
               <th scope="col">Result</th>
               <th scope="col">Attendee</th>
               <th scope="col">Gate</th>
@@ -48,7 +49,7 @@ export function ScanFeed({ token, event, onChanged }: { token: string; event: Ev
           <tbody>
             {scans?.map((scan) => (
               <tr key={scan.id}>
-                <td className="num muted">{formatTime(scan.createdAt)}</td>
+                <td className="num muted">{formatTimeInZone(scan.createdAt, event.timeZone)}</td>
                 <td>
                   <OutcomeBadge outcome={scan.outcome} />
                 </td>
