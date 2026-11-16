@@ -67,7 +67,7 @@ export function PasswordField({ label, value, onChange, autoComplete, error, hin
         onChange={(e) => onChange(e.target.value)}
         required
         aria-invalid={error ? true : undefined}
-        aria-describedby={`${id}-hint ${id}-error`}
+        aria-describedby={[hint ? `${id}-hint` : '', error ? `${id}-error` : ''].join(' ').trim() || undefined}
       />
       {hint ? (
         <span id={`${id}-hint`} className="field-hint">
@@ -224,12 +224,12 @@ export function SignUp({ demo, onSignedIn }: { demo: boolean; onSignedIn: (sessi
       <form className="stack" onSubmit={submit} noValidate>
         <label>
           Your name
-          <input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={`${id}-name`} />
+          <input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={errors.name ? `${id}-name` : undefined} />
           <FieldError id={`${id}-name`} message={errors.name} />
         </label>
         <label>
           Email
-          <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required aria-invalid={errors.email ? true : undefined} aria-describedby={`${id}-email`} />
+          <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required aria-invalid={errors.email ? true : undefined} aria-describedby={errors.email ? `${id}-email` : undefined} />
           <FieldError id={`${id}-email`} message={errors.email} />
         </label>
         <PasswordField label="Password" value={password} onChange={setPassword} autoComplete="new-password" error={errors.password} hint={`At least ${MIN_PASSWORD} characters. A short sentence is easy to remember.`} />
@@ -501,7 +501,7 @@ function CreateInvitedAccount({ email, busy, error, onSubmit }: { email: string;
       </label>
       <label>
         Your name
-        <input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={`${id}-name`} />
+        <input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={errors.name ? `${id}-name` : undefined} />
         <FieldError id={`${id}-name`} message={errors.name} />
       </label>
       <PasswordField label="Choose a password" value={password} onChange={setPassword} autoComplete="new-password" error={errors.password} hint={`At least ${MIN_PASSWORD} characters.`} />

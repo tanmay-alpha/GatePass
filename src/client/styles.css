@@ -199,11 +199,14 @@ input[aria-invalid='true']:focus, select[aria-invalid='true']:focus, textarea[ar
 input:hover:not(:disabled):not(:focus), select:hover:not(:disabled):not(:focus), textarea:hover:not(:disabled):not(:focus) { border-color: color-mix(in srgb, var(--border-strong) 60%, var(--muted)); }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
 input:disabled, select:disabled, textarea:disabled { background: var(--surface-2); color: var(--muted); cursor: not-allowed; }
-input[readonly] { background: var(--surface-2); }
+/* Read-only values (invited email, copy links) show "…" where they are cut; focusing scrolls to the rest. */
+input[readonly] { background: var(--surface-2); text-overflow: ellipsis; }
 input[type='color'] { padding: 3px; height: var(--control-h); cursor: pointer; }
 input[type='checkbox'] { width: 16px; height: 16px; min-height: 0; margin: 0; accent-color: var(--accent); box-shadow: none; }
 input[type='checkbox']:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 textarea { resize: vertical; line-height: 1.5; }
+/* A narrow picker ends its value with "…" instead of cutting it mid-word. */
+select { text-overflow: ellipsis; }
 fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 legend { font-size: var(--text-sm); font-weight: 500; padding: 0; margin-bottom: var(--space-2); }
 .checks { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
@@ -299,7 +302,8 @@ legend { font-size: var(--text-sm); font-weight: 500; padding: 0; margin-bottom:
 .card-meta { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-sm); color: var(--muted); }
 
 .dialog {
-  width: min(560px, calc(100vw - 2 * var(--space-4))); max-height: calc(100vh - 2 * var(--space-4));
+  width: min(560px, calc(100vw - 2 * var(--space-4))); max-height: calc(100vh - 2 * var(--space-4)); max-height: calc(100dvh - 2 * var(--space-4));
+  overscroll-behavior: contain;
   border: 1px solid var(--border-strong); border-radius: var(--radius); padding: var(--space-5);
   background: var(--surface); color: var(--fg); box-shadow: var(--shadow-pop);
 }
@@ -657,18 +661,6 @@ th.check-cell, td.check-cell { width: 1%; padding-right: 0; }
 .health-list li:last-child { border-bottom: 0; padding-bottom: 0; }
 .health-main { display: grid; gap: 2px; min-width: 0; }
 
-/* Print view for issued passes: hidden on screen (but laid out, so images load), the only thing printed. */
-.print-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--surface-2); border-radius: var(--radius-sm); font-size: var(--text-sm); }
-.print-sheet { position: fixed; top: 0; left: -300vw; width: 190mm; visibility: hidden; }
-.print-pass { display: grid; justify-items: center; gap: 2mm; padding: 5mm; border: 1px dashed #999; text-align: center; color: #000; background: #fff; break-inside: avoid; page-break-inside: avoid; }
-.print-pass img { width: 42mm; height: 42mm; }
-.print-missing { width: 42mm; height: 42mm; display: grid; place-items: center; font-size: 9pt; border: 1px solid #999; }
-.print-name { font-size: 13pt; font-weight: 600; }
-.print-event { font-size: 10pt; font-weight: 500; }
-.print-when { font-size: 9pt; }
-.print-ref { font-size: 9pt; letter-spacing: 0.04em; }
-.print-ref span { font-family: var(--mono); font-weight: 700; font-size: 11pt; }
-
 /* ---------------------------------------------------------------------------
    Scanner (phone-first, one-handed at 360px)
    --------------------------------------------------------------------------- */
@@ -746,7 +738,8 @@ th.check-cell, td.check-cell { width: 1%; padding-right: 0; }
 }
 
 @media (max-width: 860px) {
-  .layout { grid-template-columns: 1fr; }
+  /* Picker row keeps its own height; the page below takes the rest (a short page no longer stretches the picker row). */
+  .layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
   .content { padding: var(--space-4); }
   .topbar { padding: 0 var(--space-3); }
@@ -837,5 +830,4 @@ th.check-cell, td.check-cell { width: 1%; padding-right: 0; }
   @page { margin: 10mm; }
   body { background: #fff; }
   #root, .toasts { display: none !important; }
-  .print-sheet { position: static; visibility: visible; width: auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4mm; }
 }
