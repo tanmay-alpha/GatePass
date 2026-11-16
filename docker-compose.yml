@@ -1,13 +1,17 @@
 # GatePass on a single host.
 #   docker compose up -d --build                  # app only, on 127.0.0.1:3000
 #   docker compose --profile proxy up -d --build  # app + Caddy with automatic HTTPS
+#   GATEPASS_COMMIT=$(git rev-parse HEAD) docker compose up -d --build   # record the commit in /api/health and /version.json
 # Requires a .env file next to this file (copy .env.example). See docs/deployment.md.
+# Backups off the host: scripts/offsite-backup.sh (docs/deployment-runbook.md).
 name: gatepass
 
 services:
   gatepass:
     build:
       context: .
+      args:
+        GATEPASS_COMMIT: ${GATEPASS_COMMIT:-}
     image: gatepass:local
     env_file: .env
     environment:

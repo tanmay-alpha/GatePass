@@ -15,6 +15,10 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund
 
 COPY . .
+# Commit the image is built from (docker build --build-arg GATEPASS_COMMIT=$(git rev-parse HEAD)).
+# .git is not in the build context, so this is the only source for
+# dist/client/version.json here; empty means "unknown" (null).
+ARG GATEPASS_COMMIT=""
 RUN npm run build
 
 # ---------------------------------------------------------------- runtime
@@ -50,5 +54,11 @@ EXPOSE 3000
 # hung process within about 30 s instead of minutes.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
+# Reported by /api/health as build.commit. Declared last so a new commit does
+# not invalidate the dependency layers above. When empty, the server falls back
+# to RENDER_GIT_COMMIT, which Render sets at runtime.
+ARG GATEPASS_COMMIT=""
+ENV GATEPASS_COMMIT=${GATEPASS_COMMIT}
 
 CMD ["node", "dist/server/index.js"]

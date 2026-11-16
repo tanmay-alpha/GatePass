@@ -23,8 +23,8 @@ jobs:
           - os: windows-latest
             node: 24
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -53,8 +53,8 @@ jobs:
             browser: chromium
     name: e2e (${{ matrix.project }})
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -66,11 +66,11 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
       - name: Build linux/amd64 and linux/arm64 images
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -78,18 +78,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Runs the real image: restart persistence on a named volume, the `verify`
-  # maintenance command, and a graceful SIGTERM stop.
+  # Runs the real image: build commit reporting, one-time scanner enrollment,
+  # restart persistence on a named volume, the `verify`, `backup` and `restore`
+  # maintenance commands, no secrets in the logs, and a graceful SIGTERM stop.
   docker-run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       CONTAINER: gatepass-ci
       VOLUME: gatepass-ci-data
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Build linux/amd64 image
-        run: docker build -t gatepass:ci .
-      - name: Restart persistence, verify and graceful stop
+        run: docker build --build-arg GATEPASS_COMMIT="$GITHUB_SHA" -t gatepass:ci .
+      - name: Persistence, backup/restore, verify and graceful stop
         shell: bash
         run: |
           set -euo pipefail
@@ -116,6 +118,19 @@ jobs:
             curl -fsS -X POST "$BASE/api/scanner/redeem" -H "Authorization: Bearer $SCANNER_KEY" \
               -H 'Content-Type: application/json' --data "$(jq -nc --arg code "$1" --arg id "$2" '{code: $code, requestId: $id}')"
           }
+          pass_status() { # pass_status PASS_ID -> status, or "absent"
+            api GET "/api/events/$EVENT_ID/passes" | jq -r --arg id "$1" '(.[] | select(.id == $id) | .status) // "absent"'
+          }
+          verify() { # verify [FILE]: exit 0 and "ok": true
+            docker exec "$CONTAINER" node dist/server/index.js verify ${1:+"$1"} | tee verify.json
+            jq -e '.ok == true' verify.json >/dev/null
+          }
+          stop_gracefully() {
+            docker stop -t 15 "$CONTAINER" >/dev/null
+            EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER")
+            echo "exit code after docker stop: $EXIT_CODE"
+            [ "$EXIT_CODE" = 0 ]
+          }
           iso() { date -u -d "@$(( $(date +%s) + $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
 
           docker volume create "$VOLUME" >/dev/null
@@ -123,34 +138,83 @@ jobs:
             -e ADMIN_TOKEN="$TOKEN" -e APP_PUBLIC_URL=http://localhost:3000 gatepass:ci >/dev/null
           wait_healthy
 
+          # The image reports the commit it was built from (health and the static version file).
+          HEALTH=$(curl -fsS "$BASE/api/health")
+          echo "health: $HEALTH"
+          jq -e --arg sha "$GITHUB_SHA" '.ok == true and .build.commit == $sha and (.build.schema | type == "number" and . >= 1)' <<<"$HEALTH" >/dev/null
+          curl -fsS "$BASE/version.json" | jq -e --arg sha "$GITHUB_SHA" '.commit == $sha' >/dev/null
+
           EVENT_ID=$(api POST /api/events "$(jq -nc --arg s "$(iso -3600)" --arg e "$(iso 86400)" \
             '{name: "CI restart check", startsAt: $s, endsAt: $e, status: "active"}')" | jq -er .id)
-          SCANNER_KEY=$(api POST "/api/events/$EVENT_ID/scanners" '{"label":"CI door"}' | jq -er .key)
-          PASS=$(api POST "/api/events/$EVENT_ID/passes" '{"count":1}' | jq -ec '.[0]')
-          PASS_ID=$(jq -er .id <<<"$PASS")
-          PASS_TOKEN=$(jq -er .token <<<"$PASS")
+
+          # Scanner setup links carry a one-time enrollment code; the device exchanges it for its key.
+          ENROLL_URL=$(api POST "/api/events/$EVENT_ID/scanners" '{"label":"CI door"}' | jq -er .enrollment.url)
+          ENROLL_CODE=${ENROLL_URL#*#enroll=}
+          [ -n "$ENROLL_CODE" ] && [ "$ENROLL_CODE" != "$ENROLL_URL" ]
+          enroll() {
+            curl -sS -o enroll.json -w '%{http_code}' -X POST "$BASE/api/scanner/enroll" \
+              -H 'Content-Type: application/json' --data "$(jq -nc --arg code "$ENROLL_CODE" '{code: $code}')"
+          }
+          FIRST_USE=$(enroll)
+          echo "enrollment: HTTP $FIRST_USE"
+          [[ "$FIRST_USE" == 2?? ]]
+          SCANNER_KEY=$(jq -er .key enroll.json)
+          REUSE=$(enroll)
+          echo "second use of the enrollment code: HTTP $REUSE"
+          case "$REUSE" in 2*) echo "enrollment code was accepted twice" >&2; exit 1 ;; esac
+          rm -f enroll.json
+
+          PASSES=$(api POST "/api/events/$EVENT_ID/passes" '{"count":1}')
+          PASS_ID=$(jq -er '.[0].id' <<<"$PASSES")
+          PASS_TOKEN=$(jq -er '.[0].token' <<<"$PASSES")
           FIRST=$(redeem "$PASS_TOKEN" ci-first-scan-0001 | jq -er .outcome)
           echo "first scan: $FIRST"
           [ "$FIRST" = admitted ]
 
+          echo "::group::Restart persistence"
           docker restart -t 15 "$CONTAINER" >/dev/null
           wait_healthy
-
-          STATUS=$(api GET "/api/events/$EVENT_ID/passes" | jq -er --arg id "$PASS_ID" '.[] | select(.id == $id) | .status')
+          STATUS=$(pass_status "$PASS_ID")
           echo "pass status after restart: $STATUS"
           [ "$STATUS" = redeemed ]
           SECOND=$(redeem "$PASS_TOKEN" ci-second-scan-0002 | jq -er .outcome)
           echo "re-scan after restart: $SECOND"
           [ "$SECOND" = already_redeemed ]
+          verify
+          echo "::endgroup::"
 
-          docker exec "$CONTAINER" node dist/server/index.js verify | tee verify.json
-          jq -e '.ok == true' verify.json >/dev/null
+          echo "::group::Online backup, then restore into a stopped server"
+          docker exec "$CONTAINER" node dist/server/index.js backup /data/backup-ci.db
+          verify /data/backup-ci.db
+          # Written after the backup, so the restore must drop it.
+          LATE_ID=$(api POST "/api/events/$EVENT_ID/passes" '{"count":1}' | jq -er '.[0].id')
+          [ "$(pass_status "$LATE_ID")" = active ]
+          stop_gracefully
+          docker run --rm -v "$VOLUME:/data" gatepass:ci node dist/server/index.js restore /data/backup-ci.db
+          docker start "$CONTAINER" >/dev/null
+          wait_healthy
+          STATUS=$(pass_status "$PASS_ID")
+          echo "admitted pass after restore: $STATUS"
+          [ "$STATUS" = redeemed ]
+          LATE=$(pass_status "$LATE_ID")
+          echo "pass issued after the backup, after restore: $LATE"
+          [ "$LATE" = absent ]
+          THIRD=$(redeem "$PASS_TOKEN" ci-third-scan-0003 | jq -er .outcome)
+          echo "re-scan after restore: $THIRD"
+          [ "$THIRD" = already_redeemed ]
+          verify
+          echo "::endgroup::"
 
-          docker stop -t 15 "$CONTAINER" >/dev/null
-          EXIT_CODE=$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER")
-          echo "exit code after docker stop: $EXIT_CODE"
-          [ "$EXIT_CODE" = 0 ]
-          docker logs "$CONTAINER" 2>&1 | tail -n 5
+          stop_gracefully
+          docker logs "$CONTAINER" > container.log 2>&1
+          tail -n 5 container.log
+          # Credentials and pass tokens must never reach the logs.
+          for secret in "$TOKEN" "$SCANNER_KEY" "$ENROLL_CODE" "$PASS_TOKEN"; do
+            if grep -qF -- "$secret" container.log; then
+              echo "a credential or pass token appears in the container log" >&2
+              exit 1
+            fi
+          done
       - name: Remove container and volume
         if: always()
         run: |

@@ -153,6 +153,25 @@ describe('vercel.mjs environment policy', () => {
     }
   });
 
+  it('serves /version.json with Cache-Control: no-store before the filesystem phase', () => {
+    for (const env of [{ VERCEL_ENV: 'production', GATEPASS_BACKEND_ORIGIN: PROD_ORIGIN }, { VERCEL_ENV: 'preview' }]) {
+      const routes = loaded(env).routes;
+      const index = routes.findIndex((route) => route.src !== undefined && new RegExp(`^${route.src}$`).test('/version.json') && route.headers?.['Cache-Control']);
+      expect(index).toBeGreaterThanOrEqual(0);
+      const route = routes[index];
+      expect(route.headers).toEqual({ 'Cache-Control': 'no-store' });
+      expect(route.continue).toBe(true);
+      expect(new RegExp(`^${route.src}$`).test('/versionXjson')).toBe(false);
+      expect(index).toBeLessThan(routes.findIndex((route) => route.handle === 'filesystem'));
+      // Neither proxied to the backend nor answered by the static-only 503 route.
+      for (const other of routes.slice(0, index)) {
+        if (other.dest) expect(new RegExp(`^${other.src}$`).test('/version.json')).toBe(false);
+      }
+      const noBackend = routes.find((other) => other.status === 503);
+      if (noBackend) expect(new RegExp(`^${noBackend.src}$`).test('/version.json')).toBe(false);
+    }
+  });
+
   it('ships the 503 body as a static file Vite copies into dist/client', () => {
     expect(existsSync('public/preview-no-backend.json')).toBe(true);
   });
