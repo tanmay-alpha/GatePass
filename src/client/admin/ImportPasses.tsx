@@ -115,8 +115,11 @@ export function ImportPasses({ event, policies, onClose, onImported }: Props) {
             Rows are numbered from the first attendee row.
           </p>
 
-          <h3 className="label">First rows as read</h3>
-          <div className="table-wrap import-table">
+          <h3 className="label" id={`${id}-sample`}>
+            First rows as read
+          </h3>
+          {/* Scrolls inside the dialog: focusable so keyboard users can scroll it too. */}
+          <div className="table-wrap import-table" tabIndex={0} role="region" aria-labelledby={`${id}-sample`}>
             <table>
               <thead>
                 <tr>
@@ -139,8 +142,10 @@ export function ImportPasses({ event, policies, onClose, onImported }: Props) {
             </table>
           </div>
 
-          <h3 className="label">Skipped rows</h3>
-          <div className="table-wrap import-table">
+          <h3 className="label" id={`${id}-skipped`}>
+            Skipped rows
+          </h3>
+          <div className="table-wrap import-table" tabIndex={0} role="region" aria-labelledby={`${id}-skipped`}>
             <table aria-label="Skipped rows">
               <thead>
                 <tr>

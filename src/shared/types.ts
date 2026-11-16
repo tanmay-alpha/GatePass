@@ -55,8 +55,10 @@ export interface EventSummary {
   /** Setup progress, for the guided checklist. */
   gateCount: number;
   policyCount: number;
-  /** Scanner devices that are not revoked. */
+  /** Scanner devices that are not revoked, whether or not a phone has claimed its setup link yet. */
   scannerCount: number;
+  /** Of those, the devices that hold a key and can scan (enrolled, or issued before one-time setup links). */
+  readyScannerCount: number;
   scanCount: number;
   /** The caller's role on this event; `operator` for the break-glass token. */
   myRole: EventRole | 'operator';
@@ -75,13 +77,35 @@ export interface AccountUser {
   platformRole: PlatformRole;
   createdAt: string;
   disabledAt: string | null;
+  /** False for accounts created from a manager invitation while self-registration is closed. */
+  canCreateEvents: boolean;
+}
+
+/** Present while the account's current password was set through a reset link someone else created. */
+export interface SecurityNotice {
+  kind: 'password_reset_by_admin';
+  at: string;
+  /** Display label of who created the reset link (an email or "operator"). */
+  by: string;
 }
 
 /** GET /api/auth/session */
 export interface SessionInfo {
   user: AccountUser;
   expiresAt: string;
+  securityNotice?: SecurityNotice | null;
 }
+
+/**
+ * Outcome of handing a message to the email provider. `sent` means the
+ * provider accepted it (with its message id); it does not prove delivery.
+ */
+export type EmailReport = { status: 'sent'; providerId: string } | { status: 'failed'; error: string } | { status: 'disabled' };
+
+/** POST /api/platform/users/:id/reset-link */
+export type PasswordResetResult =
+  | { delivery: 'email'; email: EmailReport; expiresAt: string }
+  | { delivery: 'link'; url: string; expiresAt: string };
 
 export interface EventMember {
   userId: string;
@@ -106,10 +130,15 @@ export interface Invitation {
   status: 'pending' | 'accepted' | 'revoked' | 'expired';
 }
 
-/** Returned once when an invitation or reset is created; the link is never retrievable again. */
+/**
+ * Returned once when an invitation is created or re-sent. When the email was
+ * handed to the provider, the link is not returned (only the invitee gets
+ * it); otherwise `url` is there to share manually.
+ */
 export interface InvitationLink {
   invitation: Invitation;
-  url: string;
+  url?: string;
+  email: EmailReport;
 }
 
 /** GET /api/invitations/:token — what the invitee sees before accepting. */
@@ -176,6 +205,13 @@ export interface AdmissionPolicy {
   updatedAt: string;
 }
 
+/**
+ * Device setup state: `pending` (a one-time setup link is waiting), `expired`
+ * (the link lapsed unused), `enrolled` (a device claimed its key) or `legacy`
+ * (a key handed out before one-time setup links existed).
+ */
+export type ScannerSetupState = 'pending' | 'expired' | 'enrolled' | 'legacy';
+
 export interface Scanner {
   id: string;
   eventId: string;
@@ -186,6 +222,28 @@ export interface Scanner {
   createdAt: string;
   revokedAt: string | null;
   lastUsedAt: string | null;
+  enrolledAt: string | null;
+  setup: ScannerSetupState;
+  /** Expiry of the pending setup link, when there is one. */
+  setupExpiresAt: string | null;
+}
+
+/** One-time device setup link (`/scan#enroll=<code>`), shown once. */
+export interface ScannerEnrollment {
+  url: string;
+  expiresAt: string;
+}
+
+/** POST /api/events/:id/scanners, POST /api/scanners/:id/rotate */
+export interface ScannerSetupLink {
+  scanner: Scanner;
+  enrollment: ScannerEnrollment;
+}
+
+/** POST /api/scanner/enroll — the permanent device key, returned exactly once. */
+export interface ScannerEnrollResult {
+  key: string;
+  session: ScannerSession;
 }
 
 export type ScanOutcome =

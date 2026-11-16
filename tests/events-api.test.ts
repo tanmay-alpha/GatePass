@@ -114,7 +114,7 @@ describe('revocation and reissue', () => {
     const filtered = await h.admin(request(h.app).get(`/api/events/${event.id}/passes`).query({ status: 'revoked' })).expect(200);
     expect(filtered.body).toHaveLength(1);
     const audit = await h.admin(request(h.app).get(`/api/events/${event.id}/audit`)).expect(200);
-    expect(audit.body.map((entry: { action: string }) => entry.action)).toEqual(['pass.revoked', 'passes.issued', 'scanner.created', 'event.created']);
+    expect(audit.body.map((entry: { action: string }) => entry.action)).toEqual(['pass.revoked', 'scanner.enrolled', 'passes.issued', 'scanner.created', 'event.created']);
   });
 
   it('reissue invalidates the old token and keeps the same pass', async () => {

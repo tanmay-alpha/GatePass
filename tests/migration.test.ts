@@ -310,3 +310,40 @@ describe('migrating a populated version 2 database', () => {
     expect(readdirSync(path.dirname(file)).filter((name) => name.includes('.pre-v'))).toHaveLength(2);
   });
 });
+
+describe('migrating a version 3 database (accounts, pre-enrollment scanner keys) to version 4', () => {
+  it('keeps accounts able to create events, keeps issued scanner keys working, and lets them move to one-time setup links', () => {
+    const file = tempFile();
+    const v3 = new DatabaseSync(file);
+    v3.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    migrate(v3, MIGRATIONS.slice(0, 3));
+    v3.exec(`
+      INSERT INTO users (id, email, name, password_hash, created_at, password_changed_at) VALUES ('u1', 'owner@example.com', 'Owner', 'scrypt$x', '2030-05-01T00:00:00.000Z', '2030-05-01T00:00:00.000Z');
+      INSERT INTO events (id, name, starts_at, ends_at, status, created_at, updated_at) VALUES ('e1', 'Before enrollment', '${E1.start}', '${E1.end}', 'active', 'x', 'x');
+      INSERT INTO event_members (event_id, user_id, role, created_at) VALUES ('e1', 'u1', 'owner', 'x');
+    `);
+    v3.prepare("INSERT INTO scanners (id, event_id, label, key_hash, created_at, key_issued_by) VALUES ('s1', 'e1', 'Door', ?, 'x', 'user:u1')").run(hashToken(scannerKey('s1')));
+    v3.prepare("INSERT INTO passes (id, event_id, token_hash, expires_at, created_at) VALUES ('p1', 'e1', ?, ?, 'x')").run(hashToken(token('p1')), E1.end);
+    v3.close();
+
+    const db = track(openDatabase(file));
+    expect(schemaVersion(db)).toBe(SCHEMA_VERSION);
+    expect(readSnapshot(`${file}.pre-v${SCHEMA_VERSION}.bak`).version).toBe(3);
+    expect(verifyDatabase(db).violations).toEqual([]);
+
+    const service = new GatePass(db, { publicUrl: 'https://gate.example', now: () => new Date(NOW) });
+    expect(service.accounts.getUser('u1')).toMatchObject({ canCreateEvents: true });
+    expect(service.accounts.securityNotice('u1')).toBeNull();
+    expect(service.listScanners('e1')).toEqual([expect.objectContaining({ id: 's1', setup: 'legacy', enrolledAt: null })]);
+
+    // The key handed out before the upgrade still admits…
+    const legacy = service.authenticateScanner(scannerKey('s1'))!;
+    expect(service.redeem(legacy, token('p1')).outcome).toBe('admitted');
+    // …until it is rotated, which moves the device to a one-time setup link.
+    const rotated = service.rotateScanner('s1', 'user:u1');
+    expect(service.authenticateScanner(scannerKey('s1'))).toBeNull();
+    const enrolled = service.enrollScanner(rotated.enrollment.url.split('#enroll=')[1])!;
+    expect(service.authenticateScanner(enrolled.key)).toMatchObject({ id: 's1', eventId: 'e1' });
+    expect(verifyDatabase(db).violations).toEqual([]);
+  });
+});

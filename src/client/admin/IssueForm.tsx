@@ -77,72 +77,76 @@ export function IssueForm({ event, policies, onIssued }: Props) {
   return (
     <section id="issue-passes" className="card" aria-labelledby="issue-title">
       <SectionHead id="issue-title" title="Issue passes" />
-      <form className="stack" onSubmit={submit} noValidate>
-        <div className="segmented segmented-block" role="radiogroup" aria-label="Who the passes are for">
-          <button type="button" role="radio" aria-checked={mode === 'named'} className={mode === 'named' ? 'active' : ''} onClick={() => setMode('named')}>
-            Named attendees
-          </button>
-          <button type="button" role="radio" aria-checked={mode === 'count'} className={mode === 'count' ? 'active' : ''} onClick={() => setMode('count')}>
-            Unnamed batch
+      <form className="issue-form" onSubmit={submit} noValidate>
+        <div className="issue-main">
+          <div className="segmented segmented-block" role="radiogroup" aria-label="Who the passes are for">
+            <button type="button" role="radio" aria-checked={mode === 'named'} className={mode === 'named' ? 'active' : ''} onClick={() => setMode('named')}>
+              Named attendees
+            </button>
+            <button type="button" role="radio" aria-checked={mode === 'count'} className={mode === 'count' ? 'active' : ''} onClick={() => setMode('count')}>
+              Unnamed batch
+            </button>
+          </div>
+          {mode === 'named' ? (
+            <label>
+              Attendees
+              <textarea
+                rows={4}
+                value={attendees}
+                onChange={(e) => setAttendees(e.target.value)}
+                placeholder={'Ada Lovelace, ada@example.com\nGrace Hopper'}
+                required
+                aria-invalid={errors.attendees ? true : undefined}
+                aria-describedby="attendees-hint attendees-error"
+              />
+              <span id="attendees-hint" className="field-hint">
+                One per line: <code>Name, email</code>. Email is optional; quote names that contain commas. Up to {MAX_PASSES} lines.
+              </span>
+              <FieldError id="attendees-error" message={errors.attendees} />
+            </label>
+          ) : (
+            <label>
+              Number of passes
+              <input
+                type="number"
+                min={1}
+                max={MAX_PASSES}
+                step={1}
+                inputMode="numeric"
+                value={count}
+                onChange={(e) => setCount(e.target.value)}
+                required
+                aria-invalid={errors.count ? true : undefined}
+                aria-describedby="count-hint count-error"
+              />
+              <span id="count-hint" className="field-hint">
+                1–{MAX_PASSES}
+              </span>
+              <FieldError id="count-error" message={errors.count} />
+            </label>
+          )}
+        </div>
+        <div className="issue-side">
+          <PolicySelect id="issue-policy" policies={policies} value={policyId} onChange={setPolicyId} />
+          <label>
+            Expires
+            <input
+              type="datetime-local"
+              value={expiresAt}
+              onChange={(e) => setExpiresAt(e.target.value)}
+              aria-invalid={errors.expiresAt ? true : undefined}
+              aria-describedby="issue-expiry-hint issue-expiry-error"
+            />
+            <span id="issue-expiry-hint" className="field-hint">
+              In {zoneLabel(event.timeZone, event.endsAt)}. Empty: event end ({formatDateTimeInZone(event.endsAt, event.timeZone, false)})
+            </span>
+            <FieldError id="issue-expiry-error" message={errors.expiresAt} />
+          </label>
+          <ErrorNote message={error} />
+          <button className="btn btn-primary btn-block" disabled={busy}>
+            <Ticket size={16} aria-hidden /> {busy ? 'Issuing…' : total > 0 ? `Issue ${total} pass${total === 1 ? '' : 'es'}` : 'Issue passes'}
           </button>
         </div>
-        {mode === 'named' ? (
-          <label>
-            Attendees
-            <textarea
-              rows={4}
-              value={attendees}
-              onChange={(e) => setAttendees(e.target.value)}
-              placeholder={'Ada Lovelace, ada@example.com\nGrace Hopper'}
-              required
-              aria-invalid={errors.attendees ? true : undefined}
-              aria-describedby="attendees-hint attendees-error"
-            />
-            <span id="attendees-hint" className="field-hint">
-              One per line: <code>Name, email</code>. Email is optional; quote names that contain commas. Up to {MAX_PASSES} lines.
-            </span>
-            <FieldError id="attendees-error" message={errors.attendees} />
-          </label>
-        ) : (
-          <label>
-            Number of passes
-            <input
-              type="number"
-              min={1}
-              max={MAX_PASSES}
-              step={1}
-              inputMode="numeric"
-              value={count}
-              onChange={(e) => setCount(e.target.value)}
-              required
-              aria-invalid={errors.count ? true : undefined}
-              aria-describedby="count-hint count-error"
-            />
-            <span id="count-hint" className="field-hint">
-              1–{MAX_PASSES}
-            </span>
-            <FieldError id="count-error" message={errors.count} />
-          </label>
-        )}
-        <PolicySelect id="issue-policy" policies={policies} value={policyId} onChange={setPolicyId} />
-        <label>
-          Expires
-          <input
-            type="datetime-local"
-            value={expiresAt}
-            onChange={(e) => setExpiresAt(e.target.value)}
-            aria-invalid={errors.expiresAt ? true : undefined}
-            aria-describedby="issue-expiry-hint issue-expiry-error"
-          />
-          <span id="issue-expiry-hint" className="field-hint">
-            In {zoneLabel(event.timeZone, event.endsAt)}. Empty: event end ({formatDateTimeInZone(event.endsAt, event.timeZone, false)})
-          </span>
-          <FieldError id="issue-expiry-error" message={errors.expiresAt} />
-        </label>
-        <ErrorNote message={error} />
-        <button className="btn btn-primary btn-block" disabled={busy}>
-          <Ticket size={16} aria-hidden /> {busy ? 'Issuing…' : total > 0 ? `Issue ${total} pass${total === 1 ? '' : 'es'}` : 'Issue passes'}
-        </button>
       </form>
     </section>
   );

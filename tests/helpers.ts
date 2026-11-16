@@ -61,12 +61,22 @@ export const EVENT_INPUT = {
   endsAt: '2030-06-01T23:00:00.000Z'
 };
 
-/** Creates an event, one scanner and `count` passes through the HTTP API. */
+/** Creates an event, one scanner (enrolled through its one-time setup link) and `count` passes through the HTTP API. */
 export async function seedEvent(h: Harness, count = 1) {
   const event = (await h.admin(request(h.app).post('/api/events')).send(EVENT_INPUT).expect(201)).body;
   const scanner = (await h.admin(request(h.app).post(`/api/events/${event.id}/scanners`)).send({ label: 'Door 1' }).expect(201)).body;
   const passes = (await h.admin(request(h.app).post(`/api/events/${event.id}/passes`)).send({ count }).expect(201)).body;
-  return { event, scannerKey: scanner.key as string, scannerId: scanner.scanner.id as string, passes };
+  return { event, scannerKey: await enroll(h.app, scanner), scannerId: scanner.scanner.id as string, passes };
+}
+
+/** The one-time code in a setup link (`…/scan#enroll=<code>`). */
+export function setupCode(created: { enrollment: { url: string } }): string {
+  return created.enrollment.url.split('#enroll=')[1];
+}
+
+/** Claims a scanner's one-time setup link the way the door device does, and returns the device key. */
+export async function enroll(app: Express, created: { enrollment: { url: string } }): Promise<string> {
+  return (await request(app).post('/api/scanner/enroll').send({ code: setupCode(created) }).expect(201)).body.key as string;
 }
 
 export function scan(h: Harness, key: string, code: string) {

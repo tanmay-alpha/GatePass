@@ -19,6 +19,19 @@ export function isUnanswered(error: unknown): boolean {
 }
 
 /**
+ * True when the server may have judged the scan although no usable verdict
+ * reached this device: no answer at all, a 5xx (a proxy in front of the API
+ * can answer 502/504 after the admission was committed), or a 2xx whose body
+ * was not a verdict (a proxy error page). The next attempt at the same code
+ * must reuse the requestId: the server replays a stored verdict, and judges
+ * afresh when it stored none, so reusing it is always safe. Answered client
+ * errors (4xx) were refused before any judgement.
+ */
+export function mayHaveBeenJudged(error: unknown): boolean {
+  return !(error instanceof ApiError) || error.status === 0 || error.status >= 500;
+}
+
+/**
  * Remembers the requestId of scans whose response never arrived, keyed by the
  * exact code, so submitting the same code again within {@link RETRY_WINDOW_MS}
  * replays the server's stored result instead of judging it a second time

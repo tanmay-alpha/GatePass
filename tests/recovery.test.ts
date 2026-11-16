@@ -163,7 +163,8 @@ async function seed(server: ServerProcess, count: number): Promise<Seeded> {
   });
   const gate = await ok<{ id: string }>(server, 'POST', `/api/events/${event.id}/gates`, { name: 'Main' });
   const policy = await ok<{ id: string }>(server, 'POST', `/api/events/${event.id}/policies`, { name: 'General', capacity: 500, gateIds: [gate.id] });
-  const { key } = await ok<{ key: string }>(server, 'POST', `/api/events/${event.id}/scanners`, { label: 'Door 1', gateId: gate.id });
+  const { enrollment } = await ok<{ enrollment: { url: string } }>(server, 'POST', `/api/events/${event.id}/scanners`, { label: 'Door 1', gateId: gate.id });
+  const { key } = await ok<{ key: string }>(server, 'POST', '/api/scanner/enroll', { code: enrollment.url.split('#enroll=')[1] });
   const passes = await ok<IssuedPass[]>(server, 'POST', `/api/events/${event.id}/passes`, { count, policyId: policy.id });
   return { eventId: event.id, policyId: policy.id, scannerKey: key, passes: passes.map(({ id, token }) => ({ id, token })) };
 }

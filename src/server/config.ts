@@ -40,10 +40,23 @@ const envSchema = z.object({
   /** `true` on deployments without durable storage; the UI then warns that data resets. */
   DEMO_MODE: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   /** `true` lets anyone create an organizer account; otherwise accounts come from invitations. */
-  ALLOW_SIGNUP: z.enum(['true', 'false']).default('false').transform((value) => value === 'true')
-}).refine((env) => !env.CLIENT_IP_HEADER || env.ORIGIN_SECRET, {
-  message: 'CLIENT_IP_HEADER requires ORIGIN_SECRET; without it any client could set the header and pick its own rate-limit bucket'
-});
+  ALLOW_SIGNUP: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  /** Resend API key: enables emailed invitations and password resets. Unset = links are shared by hand. */
+  RESEND_API_KEY: z.string().min(10, 'RESEND_API_KEY looks too short').optional(),
+  /** Sender, e.g. `GatePass <no-reply@your-verified-domain>`; required with RESEND_API_KEY. */
+  MAIL_FROM: z.string().min(3).max(200).optional(),
+  /**
+   * Commit this build came from, reported by /api/health for release checks
+   * (Render sets RENDER_GIT_COMMIT). Never fatal: a value that is not a git
+   * hash is reported as unknown.
+   */
+  GATEPASS_COMMIT: z.string().optional(),
+  RENDER_GIT_COMMIT: z.string().optional()
+})
+  .refine((env) => !env.CLIENT_IP_HEADER || env.ORIGIN_SECRET, {
+    message: 'CLIENT_IP_HEADER requires ORIGIN_SECRET; without it any client could set the header and pick its own rate-limit bucket'
+  })
+  .refine((env) => !env.RESEND_API_KEY || env.MAIL_FROM, { message: 'RESEND_API_KEY requires MAIL_FROM (a sender on a domain verified with Resend)' });
 
 export type AppConfig = z.infer<typeof envSchema>;
 
@@ -55,6 +68,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`Invalid configuration:\n${parsed.error.issues.map((issue) => `  - ${issue.message}`).join('\n')}`);
   }
   return parsed.data;
+}
+
+/** The build's git commit, or null when unknown. */
+export function buildCommit(config: Pick<AppConfig, 'GATEPASS_COMMIT' | 'RENDER_GIT_COMMIT'>): string | null {
+  const value = config.GATEPASS_COMMIT ?? config.RENDER_GIT_COMMIT;
+  return value && /^[0-9a-f]{7,40}$/i.test(value) ? value.toLowerCase() : null;
 }
 
 /** Express accepts numbers or address lists for `trust proxy`. */

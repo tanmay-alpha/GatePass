@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import express from 'express';
@@ -38,6 +39,10 @@ export interface AppOptions {
   rateLimits?: boolean;
   /** Deployment has no durable storage; reported by /api/health so the UI can warn. */
   demoMode?: boolean;
+  /** Git commit of this build, reported by /api/health so a release check can match frontend and backend. */
+  buildCommit?: string | null;
+  /** One structured JSON line per request on stdout (route pattern, never the raw path). Off in tests. */
+  requestLog?: boolean;
 }
 
 const isoDateTime = z.string().refine((value) => !Number.isNaN(Date.parse(value)), 'must be an ISO 8601 date-time');
@@ -130,6 +135,10 @@ const loginSchema = z.strictObject({ email: z.string().trim().min(1).max(254), p
 const passwordChangeSchema = z.strictObject({ currentPassword: password, newPassword: password });
 const acceptSchema = z.strictObject({ token: z.string().min(1).max(100), name: personName.optional(), password: password.optional() });
 const resetSchema = z.strictObject({ token: z.string().min(1).max(100), password });
+const forgotSchema = z.strictObject({ email: z.string().trim().min(1).max(254) });
+const resetLinkSchema = z.strictObject({ reason: z.string().trim().max(500).optional(), delivery: z.enum(['email', 'link']).optional() });
+const eventCreationSchema = z.strictObject({ allowed: z.boolean() });
+const enrollSchema = z.strictObject({ code: z.string().min(1).max(100) });
 const managerInviteSchema = z.strictObject({ email });
 const platformInviteSchema = z.strictObject({ email, role: z.enum(['organizer', 'platform_admin']) });
 const ownerSchema = z.strictObject({ userId: id });
@@ -147,11 +156,33 @@ export function createApp({
   originSecret,
   clientIpHeader,
   rateLimits = true,
-  demoMode = false
+  demoMode = false,
+  buildCommit = null,
+  requestLog = false
 }: AppOptions): express.Express {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', trustProxy);
+
+  // Every response carries an id that also appears in the server log line,
+  // so a failure seen at the door can be matched to the log. The log names
+  // the route pattern (`/p/:token`), never the raw path, so tokens in URLs
+  // are not written to logs.
+  app.use((req, res, next) => {
+    const started = process.hrtime.bigint();
+    const requestId = randomUUID();
+    res.locals.requestId = requestId;
+    res.setHeader('X-Request-Id', requestId);
+    if (requestLog) {
+      res.on('finish', () => {
+        if (req.path === '/api/health' && res.statusCode === 200) return;
+        const route = req.route ? `${req.baseUrl}${String(req.route.path)}` : req.path.startsWith('/api/') ? 'unmatched' : 'static';
+        const ms = Math.round(Number(process.hrtime.bigint() - started) / 1e5) / 10;
+        console.log(JSON.stringify({ level: res.statusCode >= 500 ? 'error' : 'info', msg: 'request', requestId, method: req.method, route, status: res.statusCode, ms }));
+      });
+    }
+    next();
+  });
   const limit = (perMinute: number, key?: Parameters<typeof rateLimit>[1]) => (rateLimits ? rateLimit(perMinute, key) : passThrough);
   const secureCookie = publicUrl.startsWith('https://');
   // `__Host-` cookies must be Secure, Path=/ and carry no Domain: the browser refuses anything else.
@@ -333,22 +364,43 @@ export function createApp({
   };
   const scannerOf = (res: express.Response): AuthenticatedScanner => res.locals.scanner as AuthenticatedScanner;
 
-  const sessionInfo = (user: AccountUser, expiresAt: string): SessionInfo => ({ user, expiresAt });
+  const sessionInfo = (user: AccountUser, expiresAt: string): SessionInfo => ({ user, expiresAt, securityNotice: service.accounts.securityNotice(user.id) });
   const sendCsv = (res: express.Response, filename: string, body: string) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(body);
   };
   const authLimit = limit(20);
+  // Self-service reset emails: per address and requester, enough to retry a lost email; per address
+  // overall, a ceiling on how many emails strangers can cause.
+  const resetRequests = new FailureThrottle(3, 60 * 60_000);
+  const resetAddress = new FailureThrottle(10, 60 * 60_000);
+  // Invitations send email to addresses the inviter chooses: bounded per requester and per recipient.
+  const inviteLimit = limit(30);
+  const inviteEmails = new FailureThrottle(5, 60 * 60_000);
+  /** Refuses (429) once one address has been sent the hourly maximum of invitation emails. */
+  const spendInviteEmail = (address: string) => {
+    if (rateLimits && service.accounts.mailer.enabled && inviteEmails.fail(address.toLowerCase()) > 0) {
+      throw httpError(429, 'Too many invitation emails were sent to this address. Try again in an hour.');
+    }
+  };
 
   // ------------------------------------------------------------ public
 
+  // Readiness, not just liveness: 503 unless the database answers with the schema this build expects.
   app.get('/api/health', (_req, res) => {
     try {
-      service.ping();
-      res.json({ ok: true, service: 'gatepass', signup: allowSignup, ...(demoMode ? { demo: true } : {}) });
+      const schema = service.ping();
+      res.json({
+        ok: true,
+        service: 'gatepass',
+        signup: allowSignup,
+        ...(demoMode ? { demo: true } : {}),
+        email: service.accounts.mailer.enabled,
+        build: { commit: buildCommit, schema }
+      });
     } catch (error) {
-      console.error(error);
+      console.error(JSON.stringify({ level: 'error', msg: 'health check failed', error: error instanceof Error ? error.message : String(error) }));
       res.status(503).json({ ok: false });
     }
   });
@@ -418,6 +470,13 @@ export function createApp({
     res.json(sessionInfo(principal.user, (res.locals.session as { expiresAt: string }).expiresAt));
   });
 
+  app.post('/api/auth/security-notice/acknowledge', requireAccount, (_req, res) => {
+    const principal = principalOf(res);
+    if (principal.kind === 'operator') throw httpError(400, 'The operator token has no account session.');
+    service.accounts.acknowledgeSecurityNotice(principal.user.id);
+    res.status(204).end();
+  });
+
   app.post('/api/auth/password', requireAccount, authLimit, async (req, res) => {
     const principal = principalOf(res);
     if (principal.kind === 'operator') throw httpError(400, 'The operator token has no password.');
@@ -434,6 +493,16 @@ export function createApp({
     res.status(204).end();
   });
 
+  // Same answer whether or not the account exists, and the email is sent after
+  // responding, so neither the body nor the timing reveals registered addresses.
+  app.post('/api/auth/forgot', authLimit, (req, res) => {
+    const { email: address } = forgotSchema.parse(req.body);
+    res.status(202).json({ ok: true, email: service.accounts.mailer.enabled });
+    const key = address.toLowerCase();
+    if (rateLimits && (resetRequests.fail(`${key}|${req.ip ?? 'unknown'}`) > 0 || resetAddress.fail(key) > 0)) return;
+    service.accounts.runInBackground(service.accounts.requestPasswordReset(address, { ip: req.ip ?? 'unknown' }), 'password reset request failed');
+  });
+
   // POST with the token in the body: a GET path would put the one-time token into proxy request logs.
   app.post('/api/invitations/preview', authLimit, (req, res) => {
     const preview = service.accounts.previewInvitation(z.strictObject({ token: z.string().min(1).max(100) }).parse(req.body).token);
@@ -445,7 +514,12 @@ export function createApp({
     const input = acceptSchema.parse(req.body);
     const token = sessionToken(req);
     const current = token ? service.accounts.authenticate(token) : null;
-    const result = await service.accounts.acceptInvitation(input.token, { currentUser: current?.user ?? null, name: input.name, password: input.password });
+    const result = await service.accounts.acceptInvitation(input.token, {
+      currentUser: current?.user ?? null,
+      name: input.name,
+      password: input.password,
+      selfRegistrationOpen: allowSignup
+    });
     if (result.session) setSessionCookie(res, result.session.token);
     res.json({ user: result.user, eventId: result.eventId });
   });
@@ -461,24 +535,36 @@ export function createApp({
   app.post('/api/platform/users/:userId/enable', requireAccount, requirePlatformAdmin, (req, res) => {
     res.json(service.accounts.setDisabled(req.params.userId, false, actor(res)));
   });
-  app.post('/api/platform/users/:userId/reset-link', requireAccount, requirePlatformAdmin, (req, res) => {
-    res.json(service.accounts.createPasswordReset(req.params.userId, actor(res)));
+  app.post('/api/platform/users/:userId/event-creation', requireAccount, requirePlatformAdmin, (req, res) => {
+    res.json(service.accounts.setEventCreation(req.params.userId, eventCreationSchema.parse(req.body).allowed, actor(res)));
+  });
+  app.post('/api/platform/users/:userId/reset-link', requireAccount, requirePlatformAdmin, async (req, res) => {
+    res.json(await service.accounts.createPasswordReset(req.params.userId, actor(res), resetLinkSchema.parse(req.body ?? {})));
   });
   app.get('/api/platform/invitations', requireAccount, requirePlatformAdmin, (_req, res) => {
     res.json(service.accounts.listInvitations(null));
   });
-  app.post('/api/platform/invitations', requireAccount, requirePlatformAdmin, (req, res) => {
+  app.post('/api/platform/invitations', requireAccount, requirePlatformAdmin, inviteLimit, async (req, res) => {
     const input = platformInviteSchema.parse(req.body);
-    res.status(201).json(service.accounts.createInvitation(input, actor(res)));
+    spendInviteEmail(input.email);
+    res.status(201).json(await service.accounts.createInvitation(input, actor(res)));
   });
 
   // Platform invitations need a platform admin; manager invitations need `team` on their event.
-  app.post('/api/invitations/:invitationId/revoke', requireAccount, (req, res) => {
-    const invitation = service.accounts.getInvitation(req.params.invitationId);
+  const authorizeInvitation = (invitationId: string, res: express.Response) => {
+    const invitation = service.accounts.getInvitation(invitationId);
     const principal = principalOf(res);
     if (invitation.eventId) service.authorize(principal, invitation.eventId, 'team');
     else if (principal.kind === 'user' && principal.user.platformRole !== 'platform_admin') throw httpError(404, 'Invitation not found');
-    res.json(service.accounts.revokeInvitation(invitation.id, actor(res)));
+    return invitation;
+  };
+  app.post('/api/invitations/:invitationId/revoke', requireAccount, (req, res) => {
+    res.json(service.accounts.revokeInvitation(authorizeInvitation(req.params.invitationId, res).id, actor(res)));
+  });
+  app.post('/api/invitations/:invitationId/resend', requireAccount, inviteLimit, async (req, res) => {
+    const invitation = authorizeInvitation(req.params.invitationId, res);
+    spendInviteEmail(invitation.email);
+    res.json(await service.accounts.resendInvitation(invitation.id, actor(res)));
   });
 
   // ------------------------------------------------------------ admin
@@ -504,7 +590,14 @@ export function createApp({
     res.json(service.listEvents(principalOf(res)));
   });
 
-  app.post('/api/events', requireAccount, (req, res) => {
+  /** Accounts created from a manager invitation while sign-up is closed only work on events they are invited to. */
+  const requireEventCreation: Middleware = (_req, res, next) => {
+    const principal = principalOf(res);
+    if (principal.kind === 'user' && !principal.user.canCreateEvents) return next(httpError(403, 'Your account can work on the events you were invited to, but cannot create new ones. Ask a platform administrator.'));
+    next();
+  };
+
+  app.post('/api/events', requireAccount, requireEventCreation, (req, res) => {
     const input = createEventSchema.parse(req.body);
     const event = service.createEvent({ ...input, design: input.design as Partial<DesignConfig> | undefined }, actor(res), ownerIdOf(res));
     res.status(201).json(service.getEvent(event.id, principalOf(res)));
@@ -521,7 +614,7 @@ export function createApp({
     res.json(service.getEvent(req.params.eventId, principalOf(res)));
   });
 
-  app.post('/api/events/:eventId/clone', requireAccount, requireEvent('edit'), (req, res) => {
+  app.post('/api/events/:eventId/clone', requireAccount, requireEventCreation, requireEvent('edit'), (req, res) => {
     const event = service.cloneEvent(req.params.eventId, cloneSchema.parse(req.body), actor(res), ownerIdOf(res));
     res.status(201).json(service.getEvent(event.id, principalOf(res)));
   });
@@ -542,9 +635,10 @@ export function createApp({
   app.get('/api/events/:eventId/invitations', requireAccount, requireEvent('team'), (req, res) => {
     res.json(service.accounts.listInvitations(req.params.eventId));
   });
-  app.post('/api/events/:eventId/invitations', requireAccount, requireEvent('team'), (req, res) => {
+  app.post('/api/events/:eventId/invitations', requireAccount, requireEvent('team'), inviteLimit, async (req, res) => {
     const input = managerInviteSchema.parse(req.body);
-    res.status(201).json(service.accounts.createInvitation({ role: 'manager', email: input.email, eventId: req.params.eventId }, actor(res)));
+    spendInviteEmail(input.email);
+    res.status(201).json(await service.accounts.createInvitation({ role: 'manager', email: input.email, eventId: req.params.eventId }, actor(res)));
   });
 
   app.get('/api/events/:eventId/operations', requireAccount, requireEvent('view'), (req, res) => {
@@ -642,6 +736,26 @@ export function createApp({
 
   // ------------------------------------------------------------ scanner
 
+  // Unauthenticated by design: the one-time setup code (256 bits) is the
+  // credential. Bad codes count as failed authentication, so guessing is
+  // throttled per address; the request limit leaves room for a venue setting
+  // up many door phones on one network at once.
+  app.post('/api/scanner/enroll', limit(60), (req, res) => {
+    const { code } = enrollSchema.parse(req.body);
+    const enrolled = service.enrollScanner(code);
+    if (!enrolled) {
+      const wait = rateLimits ? failures.fail(req.ip ?? 'unknown') : 0;
+      if (wait > 0) {
+        res.setHeader('Retry-After', String(wait));
+        res.status(429).json({ error: 'Too many failed attempts' });
+        return;
+      }
+      res.status(410).json({ error: 'This setup link is invalid, expired or already used. Ask an organizer for a new one.' });
+      return;
+    }
+    res.status(201).json(enrolled);
+  });
+
   app.get('/api/scanner/session', requireScanner, limit(60, (_req, res) => `scanner-session:${scannerOf(res).id}`), (_req, res) => {
     res.json(service.scannerSession(scannerOf(res)));
   });
@@ -658,7 +772,8 @@ export function createApp({
 
   if (clientDir && existsSync(path.join(clientDir, 'index.html'))) {
     const root = path.resolve(clientDir);
-    app.use(express.static(root, { index: false }));
+    // version.json names the deployed commit for release checks; it must never be served from a cache.
+    app.use(express.static(root, { index: false, setHeaders: (res, file) => path.basename(file) === 'version.json' && res.setHeader('Cache-Control', 'no-store') }));
     app.get('/{*path}', (_req, res) => res.sendFile(path.join(root, 'index.html')));
   }
 

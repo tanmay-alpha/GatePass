@@ -1,17 +1,18 @@
-import { CalendarPlus, Plus, ScanLine, ShieldCheck } from 'lucide-react';
+import { Plus, ScanLine, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import type { AccountUser, EventSummary, SessionInfo } from '../../shared/types';
+import type { AccountUser, EventSummary, SecurityNotice, SessionInfo } from '../../shared/types';
 import { api, ApiError, WAKING_MESSAGE } from '../api';
-import { EmptyState, ErrorNote, SectionHead, ToneBadge, errorMessage } from '../ui';
+import { EmptyState, ErrorNote, SectionHead, ToneBadge, errorMessage, formatShortDateTime } from '../ui';
 import { formatDateInZone } from '../time';
 import { AccountMenu } from './AccountMenu';
 import { CurrentUserContext } from './current-user';
-import { AuthLayout, InvitePage, ResetPassword, SignIn, SignUp, WAKE_TIMEOUT_MS } from './AuthScreens';
+import { AuthLayout, ForgotPassword, InvitePage, ResetPassword, SignIn, SignUp, WAKE_TIMEOUT_MS } from './AuthScreens';
 import { DemoBanner } from './DemoBanner';
 import { EVENT_TABS, EventDetail, type EventTab } from './EventDetail';
 import { EventForm } from './EventForm';
 import { UNAUTHORIZED_EVENT, adminApi } from './http';
 import { STATUS_META } from './model';
+import { EventsOverview } from './EventsOverview';
 import { PlatformPage } from './PlatformPage';
 import { ToastProvider, useToast } from './toast';
 
@@ -20,6 +21,8 @@ interface Health {
   demo?: boolean;
   /** Self-registration is allowed. */
   signup: boolean;
+  /** Invitations and reset links can be emailed (self-service recovery). */
+  email?: boolean;
 }
 
 type Boot = { state: 'loading'; slow: boolean } | { state: 'error'; message: string } | { state: 'ready'; health: Health; session: SessionInfo | null };
@@ -29,11 +32,12 @@ type Route =
   | { kind: 'platform' }
   | { kind: 'invite'; token: string }
   | { kind: 'reset'; token: string }
-  | { kind: 'signup' };
+  | { kind: 'signup' }
+  | { kind: 'forgot' };
 
 /**
  * `#/events/<id>[/<tab>]`, `#/platform`, `#/invite/<token>`, `#/reset/<token>`,
- * `#/signup`; anything else is the event list. Unknown tabs fall back to Operations.
+ * `#/signup`, `#/forgot`; anything else is the event list. Unknown tabs fall back to Operations.
  */
 function routeFromHash(): Route {
   const hash = window.location.hash;
@@ -41,6 +45,7 @@ function routeFromHash(): Route {
   if (token) return { kind: token[1] as 'invite' | 'reset', token: token[2] };
   if (hash === '#/platform') return { kind: 'platform' };
   if (hash === '#/signup') return { kind: 'signup' };
+  if (hash === '#/forgot') return { kind: 'forgot' };
   const match = /^#\/events\/([\w-]+)(?:\/([\w-]+))?$/.exec(hash);
   const tab = EVENT_TABS.find((item) => item.id === match?.[2])?.id ?? 'operations';
   return { kind: 'events', eventId: match ? match[1] : null, tab };
@@ -175,11 +180,12 @@ function AdminRoot() {
   }
   if (!user) {
     if (route.kind === 'signup' && boot.health.signup) return <SignUp demo={demo} onSignedIn={signedIn} />;
-    return <SignIn demo={demo} signupAllowed={boot.health.signup} notice={notice} onSignedIn={signedIn} />;
+    if (route.kind === 'forgot') return <ForgotPassword demo={demo} emailEnabled={boot.health.email === true} />;
+    return <SignIn demo={demo} signupAllowed={boot.health.signup} emailEnabled={boot.health.email === true} notice={notice} onSignedIn={signedIn} />;
   }
   return (
     <CurrentUserContext.Provider value={user}>
-      <Dashboard user={user} demo={demo} route={route} onSignOut={signOut} onSession={setSession} />
+      <Dashboard user={user} demo={demo} route={route} securityNotice={boot.session?.securityNotice ?? null} onSignOut={signOut} onSession={setSession} />
     </CurrentUserContext.Provider>
   );
 }
@@ -188,11 +194,14 @@ interface DashboardProps {
   user: AccountUser;
   demo: boolean;
   route: Route;
+  securityNotice: SecurityNotice | null;
   onSignOut: () => Promise<void>;
   onSession: (session: SessionInfo) => void;
 }
 
-function Dashboard({ user, demo, route, onSignOut, onSession }: DashboardProps) {
+function Dashboard({ user, demo, route, securityNotice, onSignOut, onSession }: DashboardProps) {
+  const [noticeDismissed, setNoticeDismissed] = useState(false);
+  const canCreate = user.canCreateEvents;
   const [events, setEvents] = useState<EventSummary[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
@@ -223,7 +232,7 @@ function Dashboard({ user, demo, route, onSignOut, onSession }: DashboardProps) 
   if (creating) {
     content = (
       <section className="card form-card" aria-labelledby="new-event-title">
-        <SectionHead id="new-event-title" title="New event" description="Name, venue, time zone and the time window passes are valid in. Gates, policies and devices come next." />
+        <SectionHead id="new-event-title" level={1} title="New event" description="Name, venue, time zone and the time window passes are valid in. Gates, policies and devices come next." />
         <EventForm
           onCancel={() => setCreating(false)}
           onSaved={async (event) => {
@@ -257,23 +266,19 @@ function Dashboard({ user, demo, route, onSignOut, onSession }: DashboardProps) 
         }}
       />
     );
-  } else if (events !== null) {
+  } else if (events !== null && eventRoute?.eventId) {
     content = (
       <section className="card">
-        <EmptyState title={eventRoute?.eventId ? 'Event not found' : events.length ? 'Select an event' : 'Create your first event'}>
-          <p>
-            {eventRoute?.eventId
-              ? 'It may have been removed, or you are not on its team. Choose another event from the list.'
-              : events.length
-                ? 'Choose an event from the list to manage passes, gates and check-ins.'
-                : 'An event holds its passes, gates, admission policies and door devices. Events you are invited to manage also appear here.'}
-          </p>
-          <button className="btn btn-primary" onClick={() => setCreating(true)}>
-            <CalendarPlus size={16} aria-hidden /> New event
-          </button>
+        <EmptyState title="Event not found">
+          <p>It may have been removed, or you are not on its team. Choose another event from the list.</p>
+          <a className="btn btn-secondary" href="#/">
+            All events
+          </a>
         </EmptyState>
       </section>
     );
+  } else if (events !== null) {
+    content = <EventsOverview events={events} canCreate={canCreate} onCreate={() => setCreating(true)} />;
   } else content = null;
 
   return (
@@ -295,16 +300,39 @@ function Dashboard({ user, demo, route, onSignOut, onSession }: DashboardProps) 
         </nav>
       </header>
       <DemoBanner demo={demo} />
+      {securityNotice && !noticeDismissed ? (
+        <div className="notice security-notice" role="alert">
+          <p>
+            The password of this account was last set through a reset link that {securityNotice.by === 'operator' ? 'the GatePass operator' : securityNotice.by} created (
+            {formatShortDateTime(securityNotice.at)}). If you did not ask for this, change your password now and tell your administrator.
+          </p>
+          <button
+            type="button"
+            className="btn btn-ghost btn-small"
+            onClick={() => {
+              // Recorded on the server, so the notice does not return on other devices.
+              adminApi('/api/auth/security-notice/acknowledge', { method: 'POST' }).then(
+                () => setNoticeDismissed(true),
+                (err: unknown) => setError(errorMessage(err))
+              );
+            }}
+          >
+            I asked for this
+          </button>
+        </div>
+      ) : null}
       <div className="layout">
         <aside className="sidebar" aria-label="Events">
           <div className="sidebar-head">
             <h2 className="label">Events</h2>
-            <button className="btn btn-ghost btn-icon sidebar-new" onClick={() => setCreating(true)} aria-label="New event" title="New event">
-              <Plus size={16} aria-hidden />
-              <span className="sidebar-new-text" aria-hidden>
-                New event
-              </span>
-            </button>
+            {canCreate ? (
+              <button className="btn btn-ghost btn-icon sidebar-new" onClick={() => setCreating(true)} aria-label="New event" title="New event">
+                <Plus size={16} aria-hidden />
+                <span className="sidebar-new-text" aria-hidden>
+                  New event
+                </span>
+              </button>
+            ) : null}
           </div>
           {events?.length ? (
             /* Narrow screens show this picker instead of the list. */

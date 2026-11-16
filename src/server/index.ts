@@ -3,9 +3,10 @@ import http from 'node:http';
 import https from 'node:https';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from './app';
-import { loadConfig, trustProxySetting } from './config';
+import { buildCommit, loadConfig, trustProxySetting } from './config';
 import { backupDatabase, openDatabase } from './db';
 import { GatePass } from './gatepass';
+import { disabledMailer, resendMailer } from './mailer';
 import { restoreDatabase, verifyDatabase } from './integrity';
 
 // Maintenance commands. Run `restore` only while the server is stopped.
@@ -69,7 +70,9 @@ function start(): void {
   }
 
   const db = openDatabase(config.DATABASE_FILE);
-  const service = new GatePass(db, { publicUrl: config.APP_PUBLIC_URL });
+  const mailer = config.RESEND_API_KEY && config.MAIL_FROM ? resendMailer({ apiKey: config.RESEND_API_KEY, from: config.MAIL_FROM }) : disabledMailer;
+  const service = new GatePass(db, { publicUrl: config.APP_PUBLIC_URL, mailer });
+  const commit = buildCommit(config);
   const app = createApp({
     service,
     adminToken: config.ADMIN_TOKEN,
@@ -79,28 +82,44 @@ function start(): void {
     clientDir: config.CLIENT_DIR,
     originSecret: config.ORIGIN_SECRET,
     clientIpHeader: config.CLIENT_IP_HEADER,
-    demoMode: config.DEMO_MODE
+    demoMode: config.DEMO_MODE,
+    buildCommit: commit,
+    requestLog: true
   });
 
   const tls = config.HTTPS_CERT_FILE && config.HTTPS_KEY_FILE ? { cert: readFileSync(config.HTTPS_CERT_FILE), key: readFileSync(config.HTTPS_KEY_FILE) } : null;
   const server = tls ? https.createServer(tls, app) : http.createServer(app);
 
   server.listen(config.PORT, config.HOST, () => {
-    console.log(`GatePass listening on ${tls ? 'https' : 'http'}://${config.HOST}:${config.PORT} (public URL ${config.APP_PUBLIC_URL})`);
+    console.log(
+      JSON.stringify({
+        level: 'info',
+        msg: 'listening',
+        url: `${tls ? 'https' : 'http'}://${config.HOST}:${config.PORT}`,
+        publicUrl: config.APP_PUBLIC_URL,
+        commit,
+        demo: config.DEMO_MODE,
+        email: mailer.enabled,
+        database: config.DATABASE_FILE
+      })
+    );
   });
 
   // Stop accepting connections, let in-flight requests finish (each redeem is
-  // one synchronous transaction, so none is ever half-applied), then close the
+  // one synchronous transaction, so none is ever half-applied), let emails
+  // already handed to the provider finish and be audited, then close the
   // database, which checkpoints the WAL. Idle keep-alive sockets from a proxy
   // would otherwise hold server.close() open until the hard deadline.
   let stopping = false;
   const shutdown = (signal: string) => {
     if (stopping) return;
     stopping = true;
-    console.log(`${signal} received, shutting down`);
+    console.log(JSON.stringify({ level: 'info', msg: 'shutting down', signal }));
     server.close(() => {
-      db.close();
-      process.exit(0);
+      void service.accounts.idle().finally(() => {
+        db.close();
+        process.exit(0);
+      });
     });
     server.closeIdleConnections();
     setTimeout(() => server.closeAllConnections(), 5_000).unref();

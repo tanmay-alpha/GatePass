@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createHarness, scan, seedEvent, type Harness } from './helpers';
+import { createHarness, enroll, scan, seedEvent, type Harness } from './helpers';
 
 let h: Harness;
 beforeEach(() => {
@@ -13,8 +13,10 @@ const api = () => request(h.app);
 async function gate(eventId: string, name: string) {
   return (await h.admin(api().post(`/api/events/${eventId}/gates`)).send({ name }).expect(201)).body;
 }
+/** Created and enrolled: `key` is the device key the setup link yields. */
 async function scannerAt(eventId: string, label: string, gateId: string | null) {
-  return (await h.admin(api().post(`/api/events/${eventId}/scanners`)).send({ label, gateId }).expect(201)).body;
+  const created = (await h.admin(api().post(`/api/events/${eventId}/scanners`)).send({ label, gateId }).expect(201)).body;
+  return { ...created, key: await enroll(h.app, created) };
 }
 async function policy(eventId: string, body: object) {
   return (await h.admin(api().post(`/api/events/${eventId}/policies`)).send(body).expect(201)).body;

@@ -17,15 +17,18 @@ import type {
   ScanRecord,
   ScanResult,
   Scanner,
+  ScannerEnrollment,
   ScannerSession,
+  ScannerSetupLink,
   StoredScanOutcome
 } from '../shared/types';
 import { Accounts } from './accounts';
 import { evaluateAdmission } from './admission';
 import { listAudit, recordAudit } from './audit';
 import { toCsv } from './csv';
-import { transaction, type Database } from './db';
+import { SCHEMA_VERSION, schemaVersion, transaction, type Database } from './db';
 import { httpError } from './http';
+import type { Mailer } from './mailer';
 import { operationsSummary } from './operations';
 import { ROLE_PERMISSIONS, type Principal } from './permissions';
 import { AccessControl } from './policies';
@@ -38,6 +41,8 @@ export interface GatePassOptions {
   now?: () => Date;
   /** Injected for tests; defaults to 256-bit random tokens. */
   generateToken?: () => string;
+  /** Transactional email for invitations and password resets; disabled when absent. */
+  mailer?: Mailer;
 }
 
 export interface EventInput {
@@ -120,7 +125,7 @@ export class GatePass {
     this.newToken = options.generateToken ?? generateToken;
     this.publicUrl = options.publicUrl.replace(/\/+$/, '');
     this.access = new AccessControl(db, () => this.timestamp());
-    this.accounts = new Accounts(db, { now: this.now, publicUrl: this.publicUrl, generateToken: this.newToken });
+    this.accounts = new Accounts(db, { now: this.now, publicUrl: this.publicUrl, generateToken: this.newToken, mailer: options.mailer });
   }
 
   passUrl(token: string): string {
@@ -427,43 +432,84 @@ export class GatePass {
 
   listScanners(eventId: string): Scanner[] {
     this.getEvent(eventId);
-    return (this.db.prepare(`${SCANNER_SELECT} WHERE s.event_id = ? ORDER BY s.created_at DESC`).all(eventId) as Row[]).map(toScanner);
+    const now = this.timestamp();
+    return (this.db.prepare(`${SCANNER_SELECT} WHERE s.event_id = ? ORDER BY s.created_at DESC`).all(eventId) as Row[]).map((row) => toScanner(row, now));
   }
 
-  createScanner(eventId: string, label: string, gateId: string | null, actor: string): { scanner: Scanner; key: string } {
+  /**
+   * Creates the device record and a one-time setup link. The permanent key is
+   * minted only when a device claims the link (`enrollScanner`), so the link
+   * that travels by chat or screen is single-use and expires.
+   */
+  createScanner(eventId: string, label: string, gateId: string | null, actor: string): ScannerSetupLink {
     const id = randomUUID();
-    const key = `gps_${this.newToken()}`;
+    const code = this.newToken();
     transaction(this.db, () => {
       this.getEvent(eventId);
       if (gateId) this.access.assertGate(eventId, gateId);
+      // Placeholder key nobody holds: the device gets its real key on enrollment.
       this.db
         .prepare('INSERT INTO scanners (id, event_id, gate_id, label, key_hash, created_at, key_issued_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(id, eventId, gateId, label, hashToken(key), this.timestamp(), actor);
+        .run(id, eventId, gateId, label, hashToken(`unclaimed_${this.newToken()}`), this.timestamp(), actor);
       this.audit(eventId, actor, 'scanner.created', id, { label, gateId });
+      this.insertEnrollment(id, code, actor);
     });
-    return { scanner: this.getScanner(id), key };
+    return { scanner: this.getScanner(id), enrollment: this.enrollmentOf(code) };
   }
 
-  /** New key for the same device record (gate, label and history kept); the old key stops working at once. */
-  rotateScanner(id: string, actor: string): { scanner: Scanner; key: string } {
-    const key = `gps_${this.newToken()}`;
+  /**
+   * Stops the current key at once and returns a new one-time setup link for
+   * the same device record (gate, label and history kept). Also the way to
+   * replace a setup link that expired unused.
+   */
+  rotateScanner(id: string, actor: string): ScannerSetupLink {
+    const code = this.newToken();
     transaction(this.db, () => {
       const scanner = this.getScanner(id);
       if (scanner.revokedAt) throw httpError(409, 'A revoked scanner cannot be rotated. Create a new one.');
-      this.db.prepare('UPDATE scanners SET key_hash = ?, key_issued_by = ? WHERE id = ?').run(hashToken(key), actor, id);
+      this.db.prepare('UPDATE scanners SET key_hash = ?, key_issued_by = ?, enrolled_at = NULL WHERE id = ?').run(hashToken(`unclaimed_${this.newToken()}`), actor, id);
       this.audit(scanner.eventId, actor, 'scanner.rotated', id, {});
+      this.insertEnrollment(id, code, actor);
     });
-    return { scanner: this.getScanner(id), key };
+    return { scanner: this.getScanner(id), enrollment: this.enrollmentOf(code) };
   }
 
   revokeScanner(id: string, actor: string): Scanner {
     transaction(this.db, () => {
       const scanner = this.getScanner(id);
       if (scanner.revokedAt) return;
-      this.db.prepare('UPDATE scanners SET revoked_at = ? WHERE id = ?').run(this.timestamp(), id);
+      const at = this.timestamp();
+      this.db.prepare('UPDATE scanners SET revoked_at = ? WHERE id = ?').run(at, id);
+      this.db.prepare('UPDATE scanner_enrollments SET invalidated_at = ? WHERE scanner_id = ? AND used_at IS NULL AND invalidated_at IS NULL').run(at, id);
       this.audit(scanner.eventId, actor, 'scanner.revoked', id, {});
     });
     return this.getScanner(id);
+  }
+
+  /**
+   * Claims a one-time setup code: exactly one device gets a fresh permanent
+   * key, returned once. Unknown, used, expired or invalidated codes and
+   * revoked scanners all return null (the caller answers 410).
+   */
+  enrollScanner(code: string): { key: string; session: ScannerSession } | null {
+    if (!isWellFormedToken(code)) return null;
+    const key = `gps_${this.newToken()}`;
+    const scanner = transaction(this.db, (): AuthenticatedScanner | null => {
+      const at = this.timestamp();
+      const row = this.db
+        .prepare(
+          `SELECT s.id, s.event_id, s.gate_id, s.label, e.created_by FROM scanner_enrollments e JOIN scanners s ON s.id = e.scanner_id
+           WHERE e.token_hash = ? AND e.used_at IS NULL AND e.invalidated_at IS NULL AND e.expires_at > ? AND s.revoked_at IS NULL`
+        )
+        .get(hashToken(code), at) as Row | undefined;
+      if (!row) return null;
+      this.db.prepare('UPDATE scanner_enrollments SET used_at = ? WHERE token_hash = ?').run(at, hashToken(code));
+      // The person who created the link stays the key's issuer: removing them from the team revokes it.
+      this.db.prepare('UPDATE scanners SET key_hash = ?, key_issued_by = ?, enrolled_at = ? WHERE id = ?').run(hashToken(key), row.created_by as string, at, row.id as string);
+      this.audit(row.event_id as string, `scanner:${row.id as string}`, 'scanner.enrolled', row.id as string, {});
+      return { id: row.id as string, eventId: row.event_id as string, gateId: (row.gate_id as string | null) ?? null, label: row.label as string };
+    });
+    return scanner ? { key, session: this.scannerSession(scanner) } : null;
   }
 
   /** Read-only: resolves a scanner key without recording use (use is recorded on redeem). */
@@ -672,9 +718,16 @@ export class GatePass {
     );
   }
 
-  /** Cheap liveness probe used by /api/health. */
-  ping(): void {
-    this.db.prepare('SELECT 1').get();
+  /**
+   * Readiness probe for /api/health: the connection is open, the schema is
+   * the one this build expects, and the admission tables answer an indexed
+   * read. Throws otherwise. Cheap enough to run on every health check.
+   */
+  ping(): number {
+    const version = schemaVersion(this.db);
+    if (version !== SCHEMA_VERSION) throw new Error(`Database schema version ${version} differs from this build (${SCHEMA_VERSION})`);
+    this.db.prepare('SELECT (SELECT 1 FROM events LIMIT 1), (SELECT 1 FROM redemptions LIMIT 1), (SELECT 1 FROM scanners LIMIT 1)').get();
+    return version;
   }
 
   // ---------------------------------------------------------------- internals
@@ -756,7 +809,21 @@ export class GatePass {
   private getScanner(id: string): Scanner {
     const row = this.db.prepare(`${SCANNER_SELECT} WHERE s.id = ?`).get(id) as Row | undefined;
     if (!row) throw httpError(404, 'Scanner not found');
-    return toScanner(row);
+    return toScanner(row, this.timestamp());
+  }
+
+  /** Must run inside a transaction. Only the newest setup link of a device works. */
+  private insertEnrollment(scannerId: string, code: string, actor: string): void {
+    const now = this.now();
+    this.db.prepare('UPDATE scanner_enrollments SET invalidated_at = ? WHERE scanner_id = ? AND used_at IS NULL AND invalidated_at IS NULL').run(now.toISOString(), scannerId);
+    this.db
+      .prepare('INSERT INTO scanner_enrollments (token_hash, scanner_id, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)')
+      .run(hashToken(code), scannerId, actor, now.toISOString(), new Date(now.getTime() + ENROLLMENT_TTL_MS).toISOString());
+  }
+
+  /** The code travels in the URL fragment, which browsers never send to a server or proxy log. */
+  private enrollmentOf(code: string): ScannerEnrollment {
+    return { url: `${this.publicUrl}/scan#enroll=${code}`, expiresAt: new Date(this.now().getTime() + ENROLLMENT_TTL_MS).toISOString() };
   }
 
   private audit(eventId: string | null, actor: string, action: string, entityId: string | null, details: Record<string, unknown>): void {
@@ -777,10 +844,18 @@ const EVENT_COLUMNS = `
   (SELECT COUNT(*) FROM gates g WHERE g.event_id = e.id) AS gate_count,
   (SELECT COUNT(*) FROM admission_policies ap WHERE ap.event_id = e.id) AS policy_count,
   (SELECT COUNT(*) FROM scanners s WHERE s.event_id = e.id AND s.revoked_at IS NULL) AS scanner_count,
+  (SELECT COUNT(*) FROM scanners s WHERE s.event_id = e.id AND s.revoked_at IS NULL
+     AND (s.enrolled_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM scanner_enrollments n WHERE n.scanner_id = s.id))) AS ready_scanner_count,
   (SELECT COUNT(*) FROM scans sc WHERE sc.event_id = e.id) AS scan_count`;
 const EVENT_SELECT = `SELECT ${EVENT_COLUMNS} FROM events e`;
 
-const SCANNER_SELECT = 'SELECT s.*, g.name AS gate_name FROM scanners s LEFT JOIN gates g ON g.id = s.gate_id';
+const SCANNER_SELECT = `SELECT s.*, g.name AS gate_name,
+  (SELECT MAX(e.expires_at) FROM scanner_enrollments e WHERE e.scanner_id = s.id AND e.used_at IS NULL AND e.invalidated_at IS NULL) AS setup_expires_at,
+  EXISTS (SELECT 1 FROM scanner_enrollments e WHERE e.scanner_id = s.id) AS has_enrollments
+  FROM scanners s LEFT JOIN gates g ON g.id = s.gate_id`;
+
+/** Lifetime of a one-time scanner setup link. */
+export const ENROLLMENT_TTL_MS = 60 * 60_000;
 
 const ALL_PERMISSIONS = ROLE_PERMISSIONS.owner;
 
@@ -805,6 +880,7 @@ function toEvent(row: Row, role: EventRole | 'operator'): EventSummary {
     gateCount: Number(row.gate_count),
     policyCount: Number(row.policy_count),
     scannerCount: Number(row.scanner_count),
+    readyScannerCount: Number(row.ready_scanner_count),
     scanCount: Number(row.scan_count),
     myRole: role,
     permissions: [...(role === 'operator' ? ALL_PERMISSIONS : ROLE_PERMISSIONS[role])]
@@ -831,7 +907,10 @@ function toPass(row: Row, now: string): Pass {
   };
 }
 
-function toScanner(row: Row): Scanner {
+function toScanner(row: Row, now: string): Scanner {
+  const enrolledAt = (row.enrolled_at as string | null) ?? null;
+  const pendingUntil = (row.setup_expires_at as string | null) ?? null;
+  const pending = pendingUntil !== null && pendingUntil > now;
   return {
     id: row.id as string,
     eventId: row.event_id as string,
@@ -840,7 +919,10 @@ function toScanner(row: Row): Scanner {
     gateName: (row.gate_name as string | null) ?? null,
     createdAt: row.created_at as string,
     revokedAt: (row.revoked_at as string | null) ?? null,
-    lastUsedAt: (row.last_used_at as string | null) ?? null
+    lastUsedAt: (row.last_used_at as string | null) ?? null,
+    enrolledAt,
+    setup: pending ? 'pending' : enrolledAt ? 'enrolled' : Number(row.has_enrollments) ? 'expired' : 'legacy',
+    setupExpiresAt: pending ? pendingUntil : null
   };
 }
 

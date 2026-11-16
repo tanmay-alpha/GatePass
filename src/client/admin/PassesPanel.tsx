@@ -270,7 +270,7 @@ export function PassesPanel({ event, onChanged }: Props) {
           ) : null}
 
           <div className="table-wrap">
-            <table aria-busy={loading}>
+            <table className="table-cards" aria-busy={loading}>
               <thead>
                 <tr>
                   {managePasses ? (
@@ -298,19 +298,23 @@ export function PassesPanel({ event, onChanged }: Props) {
                         ) : null}
                       </td>
                     ) : null}
-                    <td>
+                    <td className="cell-primary">
                       <div className="strong">{pass.attendeeName || <span className="muted">Unnamed</span>}</div>
                       <div className="muted small">
                         {pass.attendeeEmail ? `${pass.attendeeEmail} · ` : ''}
                         <code>{passReference(pass.id)}</code>
                       </div>
                     </td>
-                    <td>
+                    <td className="cell-badge">
                       <PassStatusBadge status={pass.status} />
                     </td>
-                    <td>{pass.policyId ? (policyNames.get(pass.policyId) ?? '…') : <span className="muted">None</span>}</td>
-                    <td className="num muted nowrap">{formatShortInZone(pass.expiresAt, zone)}</td>
-                    <td className="num muted nowrap">{formatShortInZone(pass.redeemedAt, zone)}</td>
+                    <td data-label="Policy">{pass.policyId ? (policyNames.get(pass.policyId) ?? '…') : <span className="muted">None</span>}</td>
+                    <td className="num muted nowrap" data-label={`Expires (${zoneLabel(zone, event.startsAt)})`}>
+                      {formatShortInZone(pass.expiresAt, zone)}
+                    </td>
+                    <td className="num muted nowrap" data-label="Checked in">
+                      {formatShortInZone(pass.redeemedAt, zone)}
+                    </td>
                     <td className="row-actions">
                       {managePasses && pass.status === 'active' ? (
                         <>
@@ -322,6 +326,7 @@ export function PassesPanel({ event, onChanged }: Props) {
                             title="Change policy"
                           >
                             <Shuffle size={15} aria-hidden />
+                            <span className="row-action-text">Change policy</span>
                           </button>
                           <button
                             className="btn btn-ghost btn-icon"
@@ -331,6 +336,7 @@ export function PassesPanel({ event, onChanged }: Props) {
                             title="Reissue"
                           >
                             <RefreshCw size={15} aria-hidden />
+                            <span className="row-action-text">Reissue</span>
                           </button>
                         </>
                       ) : null}
@@ -343,6 +349,7 @@ export function PassesPanel({ event, onChanged }: Props) {
                           title="Revoke"
                         >
                           <Ban size={15} aria-hidden />
+                          <span className="row-action-text">Revoke</span>
                         </button>
                       ) : null}
                     </td>

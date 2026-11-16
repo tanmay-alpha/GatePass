@@ -2,7 +2,7 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/server/app';
 import { ROLE_PERMISSIONS } from '../src/server/permissions';
-import { ADMIN_TOKEN, createHarness, EVENT_INPUT, scan, type Harness } from './helpers';
+import { ADMIN_TOKEN, createHarness, enroll, EVENT_INPUT, scan, type Harness } from './helpers';
 
 let h: Harness;
 beforeEach(() => {
@@ -141,7 +141,7 @@ describe('sessions', () => {
     expect(common.status).toBe(400);
 
     const closed = createApp({ service: h.service, adminToken: ADMIN_TOKEN, publicUrl: 'https://gate.example', allowSignup: false });
-    await request(closed).get('/api/health').expect(200, { ok: true, service: 'gatepass', signup: false });
+    await request(closed).get('/api/health').expect(200).expect((res) => expect(res.body).toMatchObject({ ok: true, service: 'gatepass', signup: false }));
     await request(closed).post('/api/auth/register').set('X-GatePass-CSRF', '1').send({ email: 'x@example.com', name: 'X', password: PASSWORD }).expect(403);
   });
 });
@@ -201,7 +201,7 @@ describe('tenant isolation', () => {
     // Nothing changed.
     expect(h.service.getPass(pass.id).status).toBe('active');
     expect(h.service.getEvent(event.id).name).toBe('Alice only');
-    await scan(h, scanner.key, pass.token).expect(200);
+    await scan(h, await enroll(h.app, scanner), pass.token).expect(200);
   }, 30_000);
 
   it('does not let a platform admin read organizers’ events through their role alone', async () => {
@@ -274,7 +274,7 @@ describe('event roles', () => {
   it('never accepts scanner keys or account sessions in place of each other', async () => {
     const browser = await organizer('door@example.com');
     const event = await browser.createEvent();
-    const { key } = (await browser.send('post', `/api/events/${event.id}/scanners`, { label: 'Door' }).expect(201)).body;
+    const key = await enroll(h.app, (await browser.send('post', `/api/events/${event.id}/scanners`, { label: 'Door' }).expect(201)).body);
     await request(h.app).get(`/api/events/${event.id}`).set('Authorization', `Bearer ${key}`).expect(401);
     await request(h.app).post('/api/scanner/redeem').set('Cookie', browser.cookie).set('X-GatePass-CSRF', '1').send({ code: 'x' }).expect(401);
   });
@@ -321,8 +321,9 @@ describe('one-time links', () => {
   it('uses a password reset link once, ends existing sessions, and only the newest link works', async () => {
     const user = await organizer('reset@example.com');
     const userId = (await user.send('get', '/api/auth/session')).body.user.id;
-    const first = (await h.admin(request(h.app).post(`/api/platform/users/${userId}/reset-link`)).expect(200)).body.url.split('/').at(-1);
-    const second = (await h.admin(request(h.app).post(`/api/platform/users/${userId}/reset-link`)).expect(200)).body.url.split('/').at(-1);
+    const resetLink = () => h.admin(request(h.app).post(`/api/platform/users/${userId}/reset-link`)).send({ reason: 'Owner called the help desk' });
+    const first = (await resetLink().expect(200)).body.url.split('/').at(-1);
+    const second = (await resetLink().expect(200)).body.url.split('/').at(-1);
     await new Browser(h).send('post', '/api/auth/reset', { token: first, password: 'brand new passphrase' }).expect(410);
     await new Browser(h).send('post', '/api/auth/reset', { token: second, password: 'brand new passphrase' }).expect(204);
     await new Browser(h).send('post', '/api/auth/reset', { token: second, password: 'another passphrase!' }).expect(410);
@@ -360,7 +361,7 @@ describe('security review regressions', () => {
 
     const user = await organizer('owner@example.com');
     const userId = (await user.send('get', '/api/auth/session')).body.user.id;
-    const reset = (await root.send('post', `/api/platform/users/${userId}/reset-link`).expect(200)).body.url.split('/').at(-1);
+    const reset = (await root.send('post', `/api/platform/users/${userId}/reset-link`, { reason: 'Verified by phone call-back' }).expect(200)).body.url.split('/').at(-1);
     await user.capture(await user.send('post', '/api/auth/password', { currentPassword: PASSWORD, newPassword: 'owner chose a new one' }).expect(200));
     await new Browser(h).send('post', '/api/auth/reset', { token: reset, password: 'admin takeover attempt' }).expect(410);
   }, 30_000);
@@ -368,8 +369,8 @@ describe('security review regressions', () => {
   it('revokes the scanner keys a removed manager issued, and a disabled admin’s pending invitations', async () => {
     const { owner, manager, event } = await ownerAndManager();
     const managerId = (await manager.send('get', '/api/auth/session')).body.user.id;
-    const managerKey = (await manager.send('post', `/api/events/${event.id}/scanners`, { label: 'Manager phone' }).expect(201)).body.key;
-    const ownerKey = (await owner.send('post', `/api/events/${event.id}/scanners`, { label: 'Owner phone' }).expect(201)).body.key;
+    const managerKey = await enroll(h.app, (await manager.send('post', `/api/events/${event.id}/scanners`, { label: 'Manager phone' }).expect(201)).body);
+    const ownerKey = await enroll(h.app, (await owner.send('post', `/api/events/${event.id}/scanners`, { label: 'Owner phone' }).expect(201)).body);
     await owner.send('delete', `/api/events/${event.id}/members/${managerId}`).expect(204);
     await request(h.app).get('/api/scanner/session').set('Authorization', `Bearer ${managerKey}`).expect(401);
     await request(h.app).get('/api/scanner/session').set('Authorization', `Bearer ${ownerKey}`).expect(200);
@@ -391,7 +392,7 @@ describe('security review regressions', () => {
   it('refuses a requestId reused for a different pass instead of replaying the other pass’s verdict', async () => {
     const browser = await organizer('rid@example.com');
     const event = await browser.createEvent();
-    const { key } = (await browser.send('post', `/api/events/${event.id}/scanners`, { label: 'Door' }).expect(201)).body;
+    const key = await enroll(h.app, (await browser.send('post', `/api/events/${event.id}/scanners`, { label: 'Door' }).expect(201)).body);
     const [first, second] = (await browser.send('post', `/api/events/${event.id}/passes`, { count: 2 }).expect(201)).body;
     const redeem = (code: string) => request(h.app).post('/api/scanner/redeem').set('Authorization', `Bearer ${key}`).send({ code, requestId: 'one-attempt-01' });
     expect((await redeem(first.token).expect(200)).body.outcome).toBe('admitted');

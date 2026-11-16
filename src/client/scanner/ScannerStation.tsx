@@ -10,7 +10,7 @@ import { INSECURE_CAMERA_MESSAGE, cameraErrorMessage, listCameras, loadCameraCho
 import { REPLAYED_NOTE, VERDICT_HEADLINE, explain, explainFailure, formatEventClock, formatEventTime, isScanResult, reasonLabel, verdictOf, type Verdict } from './outcome';
 import { RepeatFilter } from './repeat';
 import { ResultOverlay, type ScanDisplay } from './ResultOverlay';
-import { PendingScans, isUnanswered } from './retry';
+import { PendingScans, isUnanswered, mayHaveBeenJudged } from './retry';
 
 /** How long a verdict stays up before scanning resumes; "Not verified" stays until staff act on it. */
 const RESULT_HOLD_MS: Record<Verdict, number | null> = { admit: 2500, warn: 4000, deny: 4000, error: null };
@@ -124,7 +124,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
       busy.current = true;
       setChecking(true);
       setSlow(false);
-      // Same code after an unanswered attempt: same requestId, so the server replays its original verdict.
+      // Same code after an attempt without a usable verdict: same requestId, so the server replays its original verdict.
       const requestId = pending.current.requestIdFor(code, Date.now());
       const sentAt = Date.now();
       try {
@@ -135,9 +135,9 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
           slowAfterMs: SLOW_CHECK_MS,
           onSlow: () => setSlow(true)
         });
-        pending.current.forget(code);
         setQuality(Date.now() - sentAt > SLOW_CHECK_MS ? 'slow' : 'good');
         if (!isScanResult(result)) throw new Error('Unexpected response');
+        pending.current.forget(code);
         show({
           id: `scan-${result.scanId}-${sentAt}`,
           at: result.checkedAt,
@@ -152,10 +152,8 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
         if (err instanceof ApiError && err.status === 401) return onUnauthorized();
         if (err instanceof ApiError && err.status === 429) blockedUntil.current = Date.now() + (err.retryAfter ?? 5) * 1000;
         const unanswered = isUnanswered(err);
-        if (unanswered) {
-          pending.current.remember(code, requestId, Date.now());
-          setQuality('slow');
-        }
+        if (mayHaveBeenJudged(err)) pending.current.remember(code, requestId, Date.now());
+        if (unanswered) setQuality('slow');
         // Presenting the same pass again must be checked again, not ignored as a repeat.
         repeat.current.reset();
         // Never imply admission on failure: the server is the only authority.
@@ -528,16 +526,27 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
   );
 }
 
-/** True while the browser reports a network connection; the server is still the only authority. */
+/** How often the connection state is re-read, in case the browser did not deliver an online/offline event. */
+const ONLINE_RECHECK_MS = 2_000;
+
+/**
+ * True while the browser reports a network connection; the server is still the only authority.
+ * Events give the change at once; the periodic re-read and the re-read on returning to the tab
+ * cover browsers that drop the event (a suspended tab, a slow network-state notifier).
+ */
 function useOnline(): boolean {
   const [online, setOnline] = useState(() => navigator.onLine);
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
     window.addEventListener('online', update);
     window.addEventListener('offline', update);
+    document.addEventListener('visibilitychange', update);
+    const timer = setInterval(update, ONLINE_RECHECK_MS);
     return () => {
       window.removeEventListener('online', update);
       window.removeEventListener('offline', update);
+      document.removeEventListener('visibilitychange', update);
+      clearInterval(timer);
     };
   }, []);
   return online;

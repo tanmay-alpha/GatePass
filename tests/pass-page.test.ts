@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderPassPage, type PassView } from '../src/server/pass-page';
+import { directionsUrl, renderPassPage, type PassView } from '../src/server/pass-page';
 import type { Pass } from '../src/shared/types';
 
 const design = {} as PassView['event']['design'];
@@ -84,6 +84,14 @@ describe('pass page', () => {
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).toContain('<title>&lt;script&gt;alert(&quot;name&quot;)&lt;/script&gt; · GatePass</title>');
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  it('links to directions for the venue without leaking the pass URL, and omits the link without a venue', () => {
+    const html = renderPassPage(view({ event: { venue: 'Hall A & B, 12 Quay St "North"' } }));
+    expect(directionsUrl('Hall A & B')).toBe('https://www.google.com/maps/search/?api=1&query=Hall%20A%20%26%20B');
+    expect(html).toContain('href="https://www.google.com/maps/search/?api=1&amp;query=Hall%20A%20%26%20B%2C%2012%20Quay%20St%20%22North%22"');
+    expect(html).toContain('target="_blank" rel="noopener noreferrer"');
+    expect(renderPassPage(view({ event: { venue: null } }))).not.toContain('class="directions"');
   });
 
   it('meets AA contrast for the light-mode warning colour and ships a print stylesheet', () => {

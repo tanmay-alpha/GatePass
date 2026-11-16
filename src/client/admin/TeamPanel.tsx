@@ -105,6 +105,19 @@ export function TeamPanel({ event, onChanged }: { event: EventSummary; onChanged
     }
   }
 
+  async function resend(invitation: Invitation) {
+    setPending(invitation.id);
+    setError('');
+    try {
+      setLink(await adminApi<InvitationLink>(`/api/invitations/${invitation.id}/resend`, { method: 'POST' }));
+      await invitations.reload();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setPending(null);
+    }
+  }
+
   return (
     <div className="stack-lg">
       <section className="card" aria-labelledby="members-title">
@@ -123,7 +136,7 @@ export function TeamPanel({ event, onChanged }: { event: EventSummary; onChanged
         </SectionHead>
         <ErrorNote message={error || members.error} />
         <div className="table-wrap">
-          <table aria-busy={members.loading}>
+          <table className="table-cards" aria-busy={members.loading}>
             <thead>
               <tr>
                 <th scope="col">Name</th>
@@ -139,22 +152,24 @@ export function TeamPanel({ event, onChanged }: { event: EventSummary; onChanged
             <tbody>
               {members.data?.map((member) => (
                 <tr key={member.userId}>
-                  <td>
+                  <td className="cell-primary">
                     <div className="strong">
                       {member.name}
                       {member.userId === me?.id ? <span className="muted"> (you)</span> : null}
                     </div>
                     <div className="muted small">{member.email}</div>
                   </td>
-                  <td>
+                  <td className="cell-badge">
                     <ToneBadge tone={member.role === 'owner' ? 'info' : 'muted'}>{ROLE_LABEL[member.role]}</ToneBadge>
                   </td>
-                  <td className="num muted nowrap">{formatShortInZone(member.createdAt, event.timeZone)}</td>
+                  <td className="num muted nowrap" data-label="Added">
+                    {formatShortInZone(member.createdAt, event.timeZone)}
+                  </td>
                   {manage ? (
                     <td className="row-actions">
                       {member.role === 'manager' ? (
                         <>
-                          <button className="btn btn-ghost btn-small" onClick={() => void transfer(member)} disabled={pending === member.userId} aria-label={`Make ${member.name} the owner`}>
+                          <button className="btn btn-ghost btn-small" onClick={() => void transfer(member)} disabled={pending === member.userId} aria-label={`Make owner: ${member.name}`}>
                             <Crown size={14} aria-hidden /> Make owner
                           </button>
                           <button className="btn btn-ghost btn-small danger" onClick={() => void remove(member)} disabled={pending === member.userId} aria-label={`Remove ${member.name}`}>
@@ -175,7 +190,11 @@ export function TeamPanel({ event, onChanged }: { event: EventSummary; onChanged
 
       {manage ? (
         <section className="card" aria-labelledby="invite-title">
-          <SectionHead id="invite-title" title="Invite a manager" description="Creates a one-time link for that email address. No email is sent; you share the link yourself." />
+          <SectionHead
+            id="invite-title"
+            title="Invite a manager"
+            description="Creates a one-time link for that email address. It is emailed when email is set up on this server; otherwise you share the link yourself. “New link” replaces a lost or expired one."
+          />
           <form className="inline-form" onSubmit={invite}>
             <label className="grow">
               Manager email
@@ -187,7 +206,13 @@ export function TeamPanel({ event, onChanged }: { event: EventSummary; onChanged
           </form>
           <ErrorNote message={invitations.error} />
           <h3 className="label">Invitations</h3>
-          <InvitationTable invitations={invitations.data} loading={invitations.data === null && !invitations.error} pending={pending} onRevoke={(invitation) => void revoke(invitation)} />
+          <InvitationTable
+            invitations={invitations.data}
+            loading={invitations.data === null && !invitations.error}
+            pending={pending}
+            onRevoke={(invitation) => void revoke(invitation)}
+            onResend={(invitation) => void resend(invitation)}
+          />
         </section>
       ) : null}
       {link ? <InvitationLinkDialog link={link} onClose={() => setLink(null)} /> : null}
