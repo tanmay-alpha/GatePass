@@ -309,6 +309,56 @@ const migrations: string[] = [
   -- Who holds the current link of an invitation: its creator, or whoever last
   -- renewed it. Disabling that account revokes the invitation.
   ALTER TABLE invitations ADD COLUMN issued_by TEXT;
+  `,
+  // 5 — attendee pass email outbox and organizer event templates
+  `
+  -- One row per requested pass email. The raw pass link is needed to compose
+  -- the message but passes store only token hashes, so the link is kept
+  -- sealed (AES-256-GCM, key from PASS_DELIVERY_KEY) and cleared as soon as
+  -- the row reaches a final state or its link expires. token_hash pins the
+  -- delivery to the token it carries: a reissued pass makes it stale.
+  -- 'accepted' means the provider accepted the request, not inbox delivery.
+  CREATE TABLE pass_deliveries (
+    id              TEXT PRIMARY KEY,
+    event_id        TEXT NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
+    pass_id         TEXT NOT NULL REFERENCES passes(id) ON DELETE RESTRICT,
+    recipient       TEXT NOT NULL CHECK (length(recipient) BETWEEN 3 AND 254),
+    token_hash      TEXT NOT NULL CHECK (length(token_hash) = 64),
+    status          TEXT NOT NULL CHECK (status IN ('queued', 'sending', 'accepted', 'failed', 'cancelled')),
+    attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at TEXT,
+    sealed_link     BLOB,
+    link_expires_at TEXT,
+    provider_id     TEXT,
+    last_error      TEXT CHECK (last_error IS NULL OR length(last_error) <= 300),
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    accepted_at     TEXT,
+    CHECK (status IN ('queued', 'sending') OR sealed_link IS NULL)
+  ) STRICT;
+  CREATE INDEX pass_deliveries_due_idx ON pass_deliveries(status, next_attempt_at);
+  CREATE INDEX pass_deliveries_event_idx ON pass_deliveries(event_id, created_at);
+  CREATE INDEX pass_deliveries_pass_idx ON pass_deliveries(pass_id);
+  -- At most one open delivery per pass: queuing twice cannot send twice.
+  CREATE UNIQUE INDEX pass_deliveries_open_idx ON pass_deliveries(pass_id) WHERE status IN ('queued', 'sending');
+  CREATE TRIGGER pass_deliveries_event_insert BEFORE INSERT ON pass_deliveries
+    WHEN (SELECT event_id FROM passes WHERE id = NEW.pass_id) IS NOT NEW.event_id
+    BEGIN SELECT RAISE(ABORT, 'delivery pass belongs to another event'); END;
+
+  -- Reusable event configurations saved by an organizer. config_json holds
+  -- event settings, gates and policy shapes only: never attendees, passes,
+  -- scanners or credentials.
+  CREATE TABLE event_templates (
+    id          TEXT PRIMARY KEY,
+    owner_id    TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    name        TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 100),
+    description TEXT CHECK (description IS NULL OR length(description) <= 300),
+    config_json TEXT NOT NULL CHECK (json_valid(config_json)),
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    UNIQUE (owner_id, name)
+  ) STRICT;
   `
 ];
 
