@@ -239,3 +239,54 @@ main.scanner .result-btn.result-retry:focus-visible { outline-color: var(--resul
     border: 1px solid var(--border); border-radius: 28px;
   }
 }
+
+/* Readiness checklist ------------------------------------------------------ */
+/* Shown when the station opens and from the header; each state has a word as well as an icon and colour. */
+main.scanner .readiness { display: flex; flex-direction: column; gap: var(--space-3); }
+main.scanner .readiness-title { margin: 0; font-size: var(--text-lg); font-weight: 650; letter-spacing: -0.01em; }
+main.scanner .readiness-shell { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin: 0; }
+main.scanner .readiness-shell > div { padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+main.scanner .readiness-shell dt { font-size: var(--text-xs); color: var(--muted); }
+main.scanner .readiness-shell dd { margin: 0; font-size: var(--text-sm); font-weight: 600; }
+main.scanner .readiness-shell .is-ok dd { color: var(--ok); }
+main.scanner .readiness-shell .is-fail { background: var(--bad-bg); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
+main.scanner .readiness-shell .is-fail dd { color: var(--bad); }
+main.scanner .readiness-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+main.scanner .readiness-item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-3); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+main.scanner .readiness-item:last-child { border-bottom: 0; }
+main.scanner .readiness-icon { margin-top: 1px; color: var(--muted); }
+main.scanner .readiness-item.is-ok .readiness-icon { color: var(--ok); }
+main.scanner .readiness-item.is-warn .readiness-icon { color: var(--warn); }
+main.scanner .readiness-item.is-fail .readiness-icon { color: var(--bad); }
+main.scanner .readiness-item.is-info .readiness-icon { color: var(--info); }
+main.scanner .readiness-label { display: flex; justify-content: space-between; gap: var(--space-2); font-weight: 600; }
+main.scanner .readiness-state { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); white-space: nowrap; }
+main.scanner .readiness-item.is-fail .readiness-state { color: var(--bad); }
+main.scanner .readiness-item.is-warn .readiness-state { color: var(--warn); }
+main.scanner .readiness-detail { font-size: var(--text-sm); overflow-wrap: anywhere; }
+main.scanner .readiness-guidance { margin: 4px 0 0; font-size: var(--text-sm); color: var(--muted); line-height: 1.4; }
+main.scanner .readiness-hint, main.scanner .scanner-notice {
+  margin: 0; padding: var(--space-2) var(--space-3); border-radius: 10px; background: var(--info-bg); color: var(--fg); font-size: var(--text-sm); line-height: 1.4;
+}
+main.scanner .readiness-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+main.scanner .readiness-actions .btn { min-height: var(--touch); border-radius: 10px; font-weight: 600; }
+main.scanner .readiness-actions .btn-primary { flex-basis: 100%; }
+main.scanner .viewfinder[hidden] { display: none; }
+main.scanner .scanner-offline-shell { font-weight: 450; }
+
+/* Find attendee ------------------------------------------------------------ */
+main.scanner .finder { display: flex; flex-direction: column; gap: var(--space-2); }
+main.scanner .finder-title { padding: 0; margin: 0; }
+main.scanner .finder-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+main.scanner .finder-match { display: flex; flex-direction: column; gap: 4px; padding: var(--space-3); border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+main.scanner .finder-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-2); }
+main.scanner .finder-name { font-weight: 600; overflow-wrap: anywhere; }
+main.scanner .finder-status { font-size: var(--text-sm); font-weight: 600; white-space: nowrap; color: var(--muted); }
+main.scanner .finder-status.is-active { color: var(--ok); }
+main.scanner .finder-status.is-redeemed { color: var(--warn); }
+main.scanner .finder-status.is-revoked, main.scanner .finder-status.is-expired { color: var(--bad); }
+main.scanner .finder-meta { display: flex; flex-wrap: wrap; gap: 4px var(--space-3); font-size: var(--text-xs); color: var(--muted); }
+main.scanner .finder-ref { font-family: var(--mono); letter-spacing: 0.04em; }
+main.scanner .finder-step { margin: 0; font-size: var(--text-sm); line-height: 1.4; }
+main.scanner .finder-admit { align-self: flex-start; min-height: var(--touch); border-radius: 10px; font-weight: 600; }
+main.scanner .finder .history-empty { padding: var(--space-2) 0; }
