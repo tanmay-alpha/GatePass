@@ -71,11 +71,21 @@ a second screen or prints it.
   capacity claims, policy and gate checks, scan row and feed entry as any scan.
   A second admit is `already_redeemed`.
 
-Assisted admissions are not marked as such in storage. Doing so would need a
-schema change (for example `scans.method TEXT CHECK (method IN ('camera',
-'manual', 'lookup'))`, passed as an optional `method` in the redeem body), which
-is out of scope here; the audit entry of the preceding search links the device
-and reference in time.
+### How a code reached the server: `scans.method`
+
+Migration 5 (unreleased when this was added, so no migration 6) adds
+`scans.method TEXT CHECK (method IS NULL OR method IN ('camera', 'manual',
+'lookup'))`. `POST /api/scanner/redeem` accepts an optional `method` with those
+values (anything else is 400; the schema stays strict). The scanner sends
+`camera` for decoded frames, `manual` for typed or pasted codes and `lookup` for
+"Find attendee" admits; a retry sends the method of the first attempt. The value
+is written on the scan row only and never reaches the admission decision. A
+replayed requestId returns the stored scan and keeps its original method. NULL
+means an older client or a direct API call. The scan feed shows it next to the
+device, the scans CSV export has a trailing `method` column, and the operations
+summary counts `assistedAdmissions` (admitted scans with `method = 'lookup'`).
+The method is self-reported by an authenticated device: it labels door work for
+the organiser and is not a security control.
 
 ### Installable scanner (PWA)
 
@@ -96,7 +106,7 @@ and reference in time.
 
 ## Consequences
 
-- No schema change, no new dependency.
+- One additive column (`scans.method`, in unreleased migration 5); no new dependency.
 - The checklist depends on browser support: the Permissions API does not report
   the camera state everywhere ("not allowed yet" until the camera test), and the
   camera test needs a second screen or paper.

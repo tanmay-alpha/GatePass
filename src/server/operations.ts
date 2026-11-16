@@ -138,6 +138,10 @@ export function operationsSummary(db: Database, access: AccessControl, event: Ev
     phase,
     attendance,
     recent: recentActivity(db, event.id, now),
+    // Seeks the admitted scans through scans_alerts_idx, then filters on method.
+    assistedAdmissions: Number(
+      (db.prepare("SELECT COUNT(*) AS n FROM scans WHERE event_id = ? AND outcome = 'admitted' AND method = 'lookup'").get(event.id) as Row).n
+    ),
     completion: phase === 'finished' ? completion(db, event.id, attendance, outcomes, gates) : null
   };
 }

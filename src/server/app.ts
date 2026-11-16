@@ -123,7 +123,12 @@ const policyFields = {
 };
 const createPolicySchema = z.strictObject(policyFields);
 const updatePolicySchema = z.strictObject({ ...policyFields, name: policyFields.name.optional() });
-const redeemSchema = z.strictObject({ code: z.string().min(1).max(2048), requestId: z.string().min(8).max(64).optional() });
+// `method` only labels the scan row (camera, typed, or a "Find attendee" lookup); it never affects admission.
+const redeemSchema = z.strictObject({
+  code: z.string().min(1).max(2048),
+  requestId: z.string().min(8).max(64).optional(),
+  method: z.enum(['camera', 'manual', 'lookup']).optional()
+});
 const qrSchema = z.object({
   data: z.string().min(1).max(1024),
   size: z.coerce.number().optional().default(300),
@@ -798,7 +803,7 @@ export function createApp({
   // Limited per device, not per IP: every gate at a venue often shares one NAT address.
   app.post('/api/scanner/redeem', requireScanner, limit(240, (_req, res) => `scanner:${scannerOf(res).id}`), (req, res) => {
     const input = redeemSchema.parse(req.body);
-    res.json(service.redeem(scannerOf(res), input.code, input.requestId));
+    res.json(service.redeem(scannerOf(res), input.code, input.requestId, input.method));
   });
 
   // Door assistance for a lost or unreadable QR code (src/server/assist.ts): own event only, masked emails,

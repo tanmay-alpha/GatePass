@@ -1,5 +1,6 @@
 import { Check, CircleAlert, CircleQuestionMark, RotateCcw, X, type LucideIcon } from 'lucide-react';
 import { useEffect, useRef, type KeyboardEvent } from 'react';
+import type { ScanMethod } from '../../shared/types';
 import { REPLAYED_NOTE, VERDICT_HEADLINE, type Verdict } from './outcome';
 
 /** One scan as shown to door staff, in the overlay and in the recent list. */
@@ -13,8 +14,8 @@ export interface ScanDisplay {
   explanation: string;
   /** The server's stored answer to an earlier request whose response was lost. */
   replayed: boolean;
-  /** Set when no answer arrived: the code to re-send with the same requestId. */
-  retryCode: string | null;
+  /** Set when no answer arrived: the code to re-send (same requestId) and how it was first entered. */
+  retry: { code: string; method: ScanMethod } | null;
 }
 
 const VERDICT_ICON: Record<Verdict, LucideIcon> = {

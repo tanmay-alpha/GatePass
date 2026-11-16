@@ -13,6 +13,7 @@ import type {
   OperationsSummary,
   Pass,
   PassStatus,
+  ScanMethod,
   ScanOutcome,
   ScanRecord,
   ScanResult,
@@ -575,8 +576,11 @@ export class GatePass {
    * `requestId` makes retries safe: a second request with the same id from
    * the same scanner returns the stored result of the first (`replayed`)
    * instead of a fresh judgement, which would say `already_redeemed`.
+   *
+   * `method` (camera, manual, lookup) is recorded on the scan row only; it never
+   * changes the decision. A replay keeps the method of the original attempt.
    */
-  redeem(scanner: AuthenticatedScanner, code: string, requestId?: string): ScanResult {
+  redeem(scanner: AuthenticatedScanner, code: string, requestId?: string, method?: ScanMethod): ScanResult {
     if (requestId !== undefined && !REQUEST_ID.test(requestId)) throw httpError(400, 'requestId must be 8-64 characters of A-Z, a-z, 0-9, _ or -');
     return transaction(this.db, () => {
       // The key was checked before the lock was taken; re-check under it so a revocation that committed in between wins.
@@ -636,8 +640,8 @@ export class GatePass {
       if (outcome === 'wrong_event') pass = null; // Never link or reveal a pass from another event.
 
       const scan = this.db
-        .prepare('INSERT INTO scans (event_id, scanner_id, gate_id, pass_id, outcome, created_at, request_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(scanner.eventId, scanner.id, scanner.gateId, pass?.id ?? null, outcome, checkedAt, requestId ?? null);
+        .prepare('INSERT INTO scans (event_id, scanner_id, gate_id, pass_id, outcome, created_at, request_id, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(scanner.eventId, scanner.id, scanner.gateId, pass?.id ?? null, outcome, checkedAt, requestId ?? null, method ?? null);
       this.db.prepare('UPDATE scanners SET last_used_at = ? WHERE id = ?').run(checkedAt, scanner.id);
 
       const reported: ScanOutcome = outcome === 'wrong_event' ? 'invalid' : outcome;
@@ -655,7 +659,7 @@ export class GatePass {
     this.getEvent(eventId);
     const rows = this.db
       .prepare(
-        `SELECT s.id, s.event_id, s.scanner_id, sc.label AS scanner_label, s.gate_id, g.name AS gate_name, s.pass_id, p.attendee_name, s.outcome, s.created_at
+        `SELECT s.id, s.event_id, s.scanner_id, sc.label AS scanner_label, s.gate_id, g.name AS gate_name, s.pass_id, p.attendee_name, s.outcome, s.created_at, s.method
          FROM scans s JOIN scanners sc ON sc.id = s.scanner_id LEFT JOIN gates g ON g.id = s.gate_id LEFT JOIN passes p ON p.id = s.pass_id
          WHERE s.event_id = ? AND s.id > ? ORDER BY s.id DESC LIMIT ?`
       )
@@ -670,7 +674,8 @@ export class GatePass {
       passId: (row.pass_id as string | null) ?? null,
       attendeeName: (row.attendee_name as string | null) ?? null,
       outcome: row.outcome as StoredScanOutcome,
-      createdAt: row.created_at as string
+      createdAt: row.created_at as string,
+      method: (row.method as ScanMethod | null) ?? null
     }));
   }
 
@@ -723,15 +728,24 @@ export class GatePass {
     this.getEvent(eventId);
     const rows = this.db
       .prepare(
-        `SELECT s.id, s.created_at, s.outcome, g.name AS gate, sc.label AS scanner, s.pass_id, p.attendee_name
+        `SELECT s.id, s.created_at, s.outcome, g.name AS gate, sc.label AS scanner, s.pass_id, p.attendee_name, s.method
          FROM scans s JOIN scanners sc ON sc.id = s.scanner_id LEFT JOIN gates g ON g.id = s.gate_id LEFT JOIN passes p ON p.id = s.pass_id
          WHERE s.event_id = ? ORDER BY s.id`
       )
       .all(eventId) as Row[];
     this.recordExport(eventId, actor, 'scans', rows.length);
     return toCsv(
-      ['scan_id', 'time_utc', 'outcome', 'gate', 'scanner', 'pass_reference', 'attendee_name'],
-      rows.map((row) => [row.id, row.created_at, row.outcome, row.gate, row.scanner, row.pass_id ? (row.pass_id as string).slice(0, 8).toUpperCase() : null, row.attendee_name])
+      ['scan_id', 'time_utc', 'outcome', 'gate', 'scanner', 'pass_reference', 'attendee_name', 'method'],
+      rows.map((row) => [
+        row.id,
+        row.created_at,
+        row.outcome,
+        row.gate,
+        row.scanner,
+        row.pass_id ? (row.pass_id as string).slice(0, 8).toUpperCase() : null,
+        row.attendee_name,
+        row.method
+      ])
     );
   }
 

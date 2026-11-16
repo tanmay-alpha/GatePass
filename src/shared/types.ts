@@ -287,6 +287,9 @@ export interface ScanResult {
   };
 }
 
+/** How the door got the code: camera, typed or pasted by hand, or the reference of a pass found with "Find attendee". */
+export type ScanMethod = 'camera' | 'manual' | 'lookup';
+
 export interface ScanRecord {
   id: number;
   eventId: string;
@@ -298,6 +301,8 @@ export interface ScanRecord {
   attendeeName: string | null;
   outcome: StoredScanOutcome;
   createdAt: string;
+  /** Null for scans from clients that did not say (older scanners, direct API calls). */
+  method: ScanMethod | null;
 }
 
 export interface AuditEntry {
@@ -410,6 +415,8 @@ export interface OperationsSummary {
   attendance: { expected: number; admitted: number; rate: number | null };
   /** The last hour in `bucketMinutes` buckets aligned to the clock, oldest first, zero-filled. */
   recent: { bucketMinutes: number; buckets: Array<{ bucketStart: string; admitted: number; denied: number }> };
+  /** Admissions made from a "Find attendee" lookup (lost or unreadable QR code) rather than a scanned or typed code. */
+  assistedAdmissions: number;
   /** Present once the event is finished. */
   completion: OperationsCompletion | null;
 }

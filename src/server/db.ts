@@ -369,6 +369,11 @@ const migrations: string[] = [
   -- emailed only reached the owner's mailbox, so using it is the owner's own
   -- reset (no security notice). NULL for links made before this column.
   ALTER TABLE password_resets ADD COLUMN delivery TEXT CHECK (delivery IS NULL OR delivery IN ('email', 'link'));
+
+  -- How the door got the code it checked: the camera, typed or pasted by hand,
+  -- or the reference of a pass found with "Find attendee". Informational only;
+  -- admission rules ignore it. NULL for older clients and rows.
+  ALTER TABLE scans ADD COLUMN method TEXT CHECK (method IS NULL OR method IN ('camera', 'manual', 'lookup'));
   `
 ];
 

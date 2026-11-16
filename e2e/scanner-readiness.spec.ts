@@ -56,8 +56,8 @@ async function openDoor(page: Page): Promise<Door> {
 }
 
 /** Every redeem body sent by any page or worker of the context. */
-function redeemBodies(context: BrowserContext): Array<{ code: string; requestId: string }> {
-  const bodies: Array<{ code: string; requestId: string }> = [];
+function redeemBodies(context: BrowserContext): Array<{ code: string; requestId: string; method?: string }> {
+  const bodies: Array<{ code: string; requestId: string; method?: string }> = [];
   context.on('request', (request) => {
     if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/scanner/redeem') bodies.push(request.postDataJSON());
   });
@@ -76,9 +76,9 @@ function testCodeRequests(context: BrowserContext): string[] {
 const check = (page: Page, id: string) => page.locator(`[data-check="${id}"]`);
 const verdict = (page: Page) => page.getByRole('alertdialog');
 
-async function scans(page: Page, eventId: string): Promise<Array<[string | null, string]>> {
-  const rows: Array<{ passId: string | null; outcome: string }> = await (await page.request.get(`/api/events/${eventId}/scans`)).json();
-  return rows.map((row) => [row.passId, row.outcome]);
+async function scans(page: Page, eventId: string): Promise<Array<[string | null, string, string | null]>> {
+  const rows: Array<{ passId: string | null; outcome: string; method: string | null }> = await (await page.request.get(`/api/events/${eventId}/scans`)).json();
+  return rows.map((row) => [row.passId, row.outcome, row.method]);
 }
 
 /** A 640x480 Y4M clip of the test code (white quiet zone, 10 px modules) for Chromium's fake camera. */
@@ -162,7 +162,7 @@ test('find attendee: admit by reference goes through redeem once; a second admit
   await page.getByRole('dialog', { name: 'Admit Grace Hopper?' }).getByRole('button', { name: 'Yes, admit' }).click();
   await expect(verdict(page)).toHaveAccessibleName('Admit');
   await expect(verdict(page)).toContainText('Grace Hopper');
-  expect(sent).toEqual([{ code: reference, requestId: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/) }]);
+  expect(sent).toEqual([{ code: reference, requestId: expect.stringMatching(/^[A-Za-z0-9_-]{8,64}$/), method: 'lookup' }]);
   // The list refreshes from the server: used, and no way to admit again.
   await expect(verdict(page)).toHaveCount(0);
   await expect(match(page)).toContainText('Used');
@@ -177,10 +177,10 @@ test('find attendee: admit by reference goes through redeem once; a second admit
   expect(sent[1].code).toBe(reference);
   expect(sent[1].requestId).not.toBe(sent[0].requestId);
 
-  // Both attempts are ordinary scans in the event's feed: one admission, one refusal.
+  // Both attempts are ordinary scans in the event's feed, marked as lookups: one admission, one refusal.
   expect(await scans(page, door.eventId)).toEqual([
-    [grace.id, 'already_redeemed'],
-    [grace.id, 'admitted']
+    [grace.id, 'already_redeemed', 'lookup'],
+    [grace.id, 'admitted', 'lookup']
   ]);
 });
 

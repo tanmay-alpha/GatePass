@@ -1,7 +1,7 @@
 import { Camera, CameraOff, Clock, Flashlight, FlashlightOff, ListChecks, LoaderCircle, LogOut, MapPin, RotateCcw, ScanLine, Smartphone, Volume2, VolumeX, WifiOff } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { isDiagnosticPayload, isValidDiagnosticCode } from '../../shared/diagnostic';
-import type { EventStatus, ScannerSession, ScanResult } from '../../shared/types';
+import type { EventStatus, ScanMethod, ScannerSession, ScanResult } from '../../shared/types';
 import { api, ApiError } from '../api';
 import { useConfirm } from '../dialog';
 import { createQrDetector, type DecoderPath, type QrDetector } from '../qr-detector';
@@ -174,7 +174,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
   );
 
   const submit = useCallback(
-    async (code: string) => {
+    async (code: string, method: ScanMethod) => {
       // Camera test codes are never sent for verification, whatever path they come from.
       if (isDiagnosticPayload(code)) return showNotice(DIAGNOSTIC_NOTICE);
       // One request at a time: a scan is never sent twice while its result is pending.
@@ -188,7 +188,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
       try {
         const result = await api<ScanResult | null>('/api/scanner/redeem', {
           bearer: scannerKey,
-          body: { code, requestId },
+          body: { code, requestId, method },
           timeoutMs: REDEEM_TIMEOUT_MS,
           slowAfterMs: SLOW_CHECK_MS,
           onSlow: () => setSlow(true)
@@ -204,7 +204,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
           name: result.pass?.attendeeName ?? null,
           explanation: explain(result, timeZone),
           replayed: result.replayed === true,
-          retryCode: null
+          retry: null
         });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) return onUnauthorized();
@@ -223,7 +223,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
           name: null,
           explanation: explainFailure(err),
           replayed: false,
-          retryCode: unanswered ? code : null
+          retry: unanswered ? { code, method } : null
         });
       } finally {
         busy.current = false;
@@ -282,7 +282,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
               const code = await detector.detect(video);
               // Test codes, and anything read while the checklist is open, stay on this device.
               if (code && !stopped && (readinessRef.current || isDiagnosticPayload(code))) readLocally(code);
-              else if (code && !stopped && !displayRef.current && onlineRef.current && repeat.current.accept(code, Date.now())) await submit(code);
+              else if (code && !stopped && !displayRef.current && onlineRef.current && repeat.current.accept(code, Date.now())) await submit(code, 'camera');
             } catch {
               // A single bad frame is not an error worth surfacing.
             }
@@ -429,7 +429,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
     e.preventDefault();
     const value = manual.trim();
     if (!online || busy.current || !value) return;
-    void submit(REFERENCE.test(value) ? value.toUpperCase() : value);
+    void submit(REFERENCE.test(value) ? value.toUpperCase() : value, 'manual');
     setManual('');
   }
 
@@ -475,8 +475,8 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
     : '';
   const cameraLive = started && cameraOn && !cameraError;
   const statusWarning = session.event.status === 'active' ? null : EVENT_STATUS_WARNING[session.event.status];
-  const retryCode = display?.retryCode ?? null;
-  const retry = retryCode ? { onRetry: () => void submit(retryCode), disabled: !online || checking, checking } : undefined;
+  const pendingRetry = display?.retry ?? null;
+  const retry = pendingRetry ? { onRetry: () => void submit(pendingRetry.code, pendingRetry.method), disabled: !online || checking, checking } : undefined;
   const readiness = readinessOpen
     ? readinessItems({
         session,
@@ -668,7 +668,14 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
             </p>
           </form>
 
-          <AttendeeFinder scannerKey={scannerKey} timeZone={timeZone} online={online} checking={checking} onAdmit={submit} onUnauthorized={onUnauthorized} />
+          <AttendeeFinder
+            scannerKey={scannerKey}
+            timeZone={timeZone}
+            online={online}
+            checking={checking}
+            onAdmit={(reference) => submit(reference, 'lookup')}
+            onUnauthorized={onUnauthorized}
+          />
 
           <section className="recent" aria-labelledby="recent-title">
             <h2 id="recent-title" className="recent-title">

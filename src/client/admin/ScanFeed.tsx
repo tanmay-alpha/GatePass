@@ -1,12 +1,14 @@
 import { RefreshCw } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
-import type { EventSummary, ScanRecord } from '../../shared/types';
+import type { EventSummary, ScanMethod, ScanRecord } from '../../shared/types';
 import { ErrorNote, OutcomeBadge, TableMessage, errorMessage } from '../ui';
 import { formatTimeInZone, zoneLabel } from '../time';
 import { LIVE_POLL_MS, usePolling } from './hooks';
 import { adminApi } from './http';
 
 const MAX_ROWS = 300;
+/** How the door got the code; "Find attendee" marks an assisted admission (lost or unreadable QR code). */
+const METHOD_LABEL: Record<ScanMethod, string> = { camera: 'Camera', manual: 'Typed', lookup: 'Find attendee' };
 
 /** Polls for scans newer than the last seen id; cheap thanks to the (event_id, id) index. */
 export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged: () => Promise<void> }) {
@@ -69,7 +71,10 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
                 </td>
                 <td className="strong cell-primary">{scan.passId ? scan.attendeeName || <code>{scan.passId.slice(0, 8)}</code> : <span className="muted">—</span>}</td>
                 <td className="cell-sub">{scan.gateName ?? <span className="muted">Any gate</span>}</td>
-                <td className="muted cell-sub">{scan.scannerLabel}</td>
+                <td className="muted cell-sub">
+                  {scan.scannerLabel}
+                  {scan.method ? ` · ${METHOD_LABEL[scan.method]}` : ''}
+                </td>
               </tr>
             ))}
             {scans === null && !error ? <TableMessage colSpan={5}>Loading scans…</TableMessage> : null}
