@@ -1,4 +1,4 @@
-import type { EventSummary, OperationsAlert, OperationsSummary, StoredScanOutcome } from '../shared/types';
+import type { EventSummary, OperationsAlert, OperationsCompletion, OperationsSummary, StoredScanOutcome } from '../shared/types';
 import type { Database } from './db';
 import type { AccessControl } from './policies';
 
@@ -13,6 +13,30 @@ export const ALERT_RULES = {
 } as const;
 
 const BUCKET_SQL = `strftime('%Y-%m-%dT%H:', created_at) || printf('%02d', (CAST(strftime('%M', created_at) AS INTEGER) / 15) * 15) || ':00.000Z'`;
+
+/** Recent-activity resolution: the last hour in 5-minute buckets. */
+const RECENT_BUCKET_MINUTES = 5;
+const RECENT_BUCKETS = 12;
+const RECENT_BUCKET_SQL = `(CAST(strftime('%s', created_at) AS INTEGER) / ${RECENT_BUCKET_MINUTES * 60}) * ${RECENT_BUCKET_MINUTES * 60}`;
+/**
+ * Every stored outcome. Naming them all lets a time-bounded query seek
+ * `scans_alerts_idx (event_id, outcome, created_at)` once per outcome instead
+ * of reading every scan of the event.
+ */
+const ALL_OUTCOMES: readonly StoredScanOutcome[] = [
+  'admitted',
+  'already_redeemed',
+  'expired',
+  'revoked',
+  'invalid',
+  'event_closed',
+  'wrong_event',
+  'too_early',
+  'too_late',
+  'wrong_gate',
+  'capacity_full'
+];
+const ALL_OUTCOMES_SQL = ALL_OUTCOMES.map((outcome) => `'${outcome}'`).join(', ');
 
 type Row = Record<string, unknown>;
 
@@ -92,6 +116,14 @@ export function operationsSummary(db: Database, access: AccessControl, event: Ev
     return { id: row.id as string, label: row.label as string, gateName: (row.gate_name as string | null) ?? null, lastUsedAt, revoked: revokedScanner, scansLast15m: Number(row.recent), state };
   });
 
+  // Doors can open before the event starts (early-entry policies) and stay open after it.
+  const doorsOpen = policies.reduce((earliest, policy) => (policy.opensAt < earliest ? policy.opensAt : earliest), event.startsAt);
+  const doorsClose = policies.reduce((latest, policy) => (policy.closesAt > latest ? policy.closesAt : latest), event.endsAt);
+  const phase: OperationsSummary['phase'] =
+    event.status === 'ended' || event.status === 'archived' || nowIso >= doorsClose ? 'finished' : nowIso < doorsOpen ? 'upcoming' : event.status === 'active' ? 'live' : 'paused';
+  const expected = issued - revoked;
+  const attendance = { expected, admitted: redeemed, rate: expected ? redeemed / expected : null };
+
   return {
     generatedAt: nowIso,
     totals: { scans, admitted, denied: scans - admitted },
@@ -102,15 +134,85 @@ export function operationsSummary(db: Database, access: AccessControl, event: Ev
     policies,
     scanners,
     timeline,
-    alerts: alerts(db, event.id, policies, now)
+    alerts: alerts(db, event.id, policies, phase === 'live' ? scanners : [], now),
+    phase,
+    attendance,
+    recent: recentActivity(db, event.id, now),
+    completion: phase === 'finished' ? completion(db, event.id, attendance, outcomes, gates) : null
   };
 }
 
 /** A device with no scan or heartbeat for this long is shown as idle. */
 export const SCANNER_IDLE_MINUTES = 10;
 
-function alerts(db: Database, eventId: string, policies: OperationsSummary['policies'], now: Date): OperationsAlert[] {
+/** The last hour in clock-aligned 5-minute buckets, zero-filled so the chart has a fixed width. */
+function recentActivity(db: Database, eventId: string, now: Date): OperationsSummary['recent'] {
+  const size = RECENT_BUCKET_MINUTES * 60_000;
+  const first = Math.floor(now.getTime() / size) * size - (RECENT_BUCKETS - 1) * size;
+  const rows = db
+    .prepare(
+      `SELECT ${RECENT_BUCKET_SQL} AS bucket, SUM(outcome = 'admitted') AS admitted, SUM(outcome <> 'admitted') AS denied
+       FROM scans WHERE event_id = ? AND outcome IN (${ALL_OUTCOMES_SQL}) AND created_at >= ? GROUP BY bucket`
+    )
+    .all(eventId, new Date(first).toISOString()) as Row[];
+  const byBucket = new Map(rows.map((row) => [Number(row.bucket) * 1000, row]));
+  const buckets = Array.from({ length: RECENT_BUCKETS }, (_, index) => {
+    const start = first + index * size;
+    const row = byBucket.get(start);
+    return { bucketStart: new Date(start).toISOString(), admitted: Number(row?.admitted ?? 0), denied: Number(row?.denied ?? 0) };
+  });
+  return { bucketMinutes: RECENT_BUCKET_MINUTES, buckets };
+}
+
+function completion(
+  db: Database,
+  eventId: string,
+  attendance: OperationsSummary['attendance'],
+  outcomes: OperationsSummary['outcomes'],
+  gates: OperationsSummary['gates']
+): OperationsCompletion {
+  const span = db.prepare("SELECT MIN(created_at) AS first_at, MAX(created_at) AS last_at FROM scans WHERE event_id = ? AND outcome = 'admitted'").get(eventId) as Row;
+  const peak = db
+    .prepare(`SELECT ${RECENT_BUCKET_SQL} AS bucket, COUNT(*) AS n FROM scans WHERE event_id = ? AND outcome = 'admitted' GROUP BY bucket ORDER BY n DESC, bucket LIMIT 1`)
+    .get(eventId) as Row | undefined;
+  const devices = db
+    .prepare('SELECT COUNT(*) AS n FROM scanners sc WHERE sc.event_id = ? AND EXISTS (SELECT 1 FROM scans s WHERE s.scanner_id = sc.id)')
+    .get(eventId) as Row;
+  const denials = (Object.entries(outcomes) as Array<[StoredScanOutcome, number]>).filter(([outcome]) => outcome !== 'admitted').sort((a, b) => b[1] - a[1]);
+  return {
+    expected: attendance.expected,
+    admitted: attendance.admitted,
+    noShows: Math.max(0, attendance.expected - attendance.admitted),
+    rate: attendance.rate,
+    firstAdmissionAt: (span.first_at as string | null) ?? null,
+    lastAdmissionAt: (span.last_at as string | null) ?? null,
+    peak: peak ? { bucketStart: new Date(Number(peak.bucket) * 1000).toISOString(), admitted: Number(peak.n) } : null,
+    denied: denials.reduce((sum, [, count]) => sum + count, 0),
+    topDenial: denials.length ? { outcome: denials[0][0], count: denials[0][1] } : null,
+    devicesUsed: Number(devices.n),
+    gatesUsed: gates.filter((gate) => gate.id !== null && gate.admitted + gate.denied > 0).length
+  };
+}
+
+/**
+ * `liveScanners` is empty unless the doors are open: silence only matters then. Only devices that were in
+ * contact and went quiet raise an alert; a device never set up is shown in the device list instead.
+ */
+function alerts(db: Database, eventId: string, policies: OperationsSummary['policies'], liveScanners: OperationsSummary['scanners'], now: Date): OperationsAlert[] {
   const result: OperationsAlert[] = [];
+
+  for (const scanner of liveScanners) {
+    if (scanner.state !== 'idle' || !scanner.lastUsedAt) continue;
+    const minutes = Math.floor((now.getTime() - Date.parse(scanner.lastUsedAt)) / 60_000);
+    result.push({
+      kind: 'device_idle',
+      severity: 'warning',
+      message: `${scanner.label}: no contact for ${minutes} min while the doors are open. Check the phone's connection and that the scanner page is open.`,
+      count: minutes,
+      lastAt: scanner.lastUsedAt,
+      scannerId: scanner.id
+    });
+  }
 
   for (const row of db
     .prepare(

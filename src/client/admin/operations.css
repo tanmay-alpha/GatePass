@@ -1,0 +1,22 @@
+/* Operations dashboard: refresh status bar, recent activity totals and the finished-event summary. */
+.ops-status {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.ops-status-problem { background: var(--warn-bg); border-color: var(--warn); }
+.ops-status-message { flex: 1 1 200px; min-width: 0; color: var(--warn); }
+.ops-status-message:empty { flex-basis: 0; }
+.ops-status .btn { margin-left: auto; }
+
+.ops-status .spin { animation: ops-spin 900ms linear infinite; }
+@keyframes ops-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .ops-status .spin { animation: none; }
+}
+
+.ops-recent-totals { margin: 0 0 var(--space-3); }
+
+.ops-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3) var(--space-5); margin: 0; }
+.ops-facts > div { display: grid; gap: 2px; min-width: 0; }
+.ops-facts dt { font-size: var(--text-sm); color: var(--muted); }
+.ops-facts dd { margin: 0; font-size: var(--text-md); font-weight: 600; overflow-wrap: anywhere; }

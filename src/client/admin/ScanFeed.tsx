@@ -1,3 +1,4 @@
+import { RefreshCw } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 import type { EventSummary, ScanRecord } from '../../shared/types';
 import { ErrorNote, OutcomeBadge, TableMessage, errorMessage } from '../ui';
@@ -14,8 +15,12 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
   const lastId = useRef(0);
   /** False until the first poll; that poll returns history, not new scans. */
   const loaded = useRef(false);
+  /** A manual retry must not overlap a scheduled poll: both would fetch after the same id and list scans twice. */
+  const inFlight = useRef(false);
 
   const poll = useCallback(async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     try {
       const fresh = await adminApi<ScanRecord[]>(`/api/events/${event.id}/scans?after=${lastId.current}&limit=100`);
       const isNew = loaded.current;
@@ -27,6 +32,8 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
       setError('');
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      inFlight.current = false;
     }
   }, [event.id, onChanged]);
 
@@ -34,7 +41,14 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
 
   return (
     <div className="stack-sm">
-      <ErrorNote message={error} />
+      {error ? (
+        <div className="actions">
+          <ErrorNote message={scans ? `The feed could not refresh: ${error} Older scans stay listed; it keeps retrying every ${LIVE_POLL_MS / 1000} s.` : error} />
+          <button type="button" className="btn btn-secondary btn-small" onClick={() => void poll()}>
+            <RefreshCw size={14} aria-hidden /> Retry now
+          </button>
+        </div>
+      ) : null}
       <div className="table-wrap">
         <table className="table-cards">
           <thead>
