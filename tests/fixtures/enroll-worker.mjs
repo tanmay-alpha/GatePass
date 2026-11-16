@@ -18,7 +18,7 @@ Atomics.wait(barrier, 0, 0);
 // The connection is closed before reporting, so no file handle outlives the test (Windows cleanup).
 let result;
 try {
-  const enrolled = service.enrollScanner(workerData.code);
+  const enrolled = service.enrollScanner(workerData.code, workerData.claim);
   result = enrolled ? { outcome: 'enrolled', key: enrolled.key, eventId: enrolled.session.event.id } : { outcome: 'refused' };
 } catch (error) {
   result = /database is locked/.test(String(error)) ? { outcome: 'busy' } : { error: String(error) };

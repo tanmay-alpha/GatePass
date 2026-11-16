@@ -11,7 +11,7 @@ import { hashPassword } from '../src/server/accounts';
 import { migrate, MIGRATIONS, openDatabase, SCHEMA_VERSION, schemaVersion, type Database } from '../src/server/db';
 import { ENROLLMENT_TTL_MS, GatePass } from '../src/server/gatepass';
 import { verifyDatabase } from '../src/server/integrity';
-import { hashToken } from '../src/server/tokens';
+import { generateToken, hashToken } from '../src/server/tokens';
 import { createHarness, enroll, EVENT_INPUT, scan, seedEvent, setupCode, type Harness } from './helpers';
 
 // Phase 2 audit of one-time scanner enrollment (ADR 0010, SEC-08): expiry
@@ -63,12 +63,12 @@ function browser(app: Express) {
 
 type EnrollOutcome = { outcome: 'enrolled' | 'refused' | 'busy'; key?: string; eventId?: string; error?: string };
 
-/** Claims `code` from `count` worker threads, each with its own SQLite connection, released at the same instant. */
-async function enrollInThreads(dbFile: string, code: string, count: number): Promise<EnrollOutcome[]> {
+/** Claims `code` from one worker thread per entry of `claims` (each with its own SQLite connection), released at the same instant. */
+async function enrollInThreads(dbFile: string, code: string, claims: Array<string | undefined>): Promise<EnrollOutcome[]> {
   const barrier = new SharedArrayBuffer(4);
   const ready: Promise<void>[] = [];
-  const results = Array.from({ length: count }, () => {
-    const worker = new Worker(new URL('./fixtures/enroll-worker.mjs', import.meta.url), { workerData: { dbFile, barrier, code } });
+  const results = claims.map((claim) => {
+    const worker = new Worker(new URL('./fixtures/enroll-worker.mjs', import.meta.url), { workerData: { dbFile, barrier, code, claim } });
     const isReady = Promise.withResolvers<void>();
     const done = Promise.withResolvers<EnrollOutcome>();
     let result: EnrollOutcome | undefined;
@@ -149,7 +149,7 @@ describe('one-time scanner enrollment', () => {
     h = createHarness();
     const event = await newEvent();
     const created = await newScanner(event.id);
-    const outcomes = await enrollInThreads(h.dbFile, setupCode(created), 6);
+    const outcomes = await enrollInThreads(h.dbFile, setupCode(created), Array.from({ length: 6 }, () => undefined));
     const winners = outcomes.filter((outcome) => outcome.outcome === 'enrolled');
     expect(winners).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.outcome !== 'enrolled').every((outcome) => outcome.outcome === 'refused' || outcome.outcome === 'busy')).toBe(true);
@@ -307,6 +307,103 @@ describe('one-time scanner enrollment', () => {
   });
 });
 
+describe('retry-safe enrollment with a claim secret (SA2-3)', () => {
+  const claimWith = (code: string, claim?: string) => request(h.app).post('/api/scanner/enroll').send(claim === undefined ? { code } : { code, claim });
+  const audits = (action: string) => Number((h.db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE action = ?').get(action) as { n: number }).n);
+
+  it('a lost answer: resending the same code and claim gets a working replacement key and the first key stops', async () => {
+    h = createHarness();
+    const event = await newEvent();
+    const created = await newScanner(event.id);
+    const claim = generateToken();
+    const lost = (await claimWith(setupCode(created), claim).expect(201)).body.key as string;
+    const retried = (await claimWith(setupCode(created), claim).expect(201)).body;
+    expect(retried.key).not.toBe(lost);
+    expect(retried.session.event.id).toBe(event.id);
+    await session(lost).expect(401);
+    await session(retried.key).expect(200);
+    // Several lost answers in a row are still recoverable while the link lasts.
+    const again = (await claimWith(setupCode(created), claim).expect(201)).body.key as string;
+    await session(retried.key).expect(401);
+    await session(again).expect(200);
+    expect([audits('scanner.enrolled'), audits('scanner.enroll_retried')]).toEqual([1, 2]);
+    expect(h.db.prepare('SELECT claim_hash FROM scanner_enrollments').get()).toEqual({ claim_hash: hashToken(claim) });
+    expect((await operator('get', `/api/events/${event.id}/scanners`).expect(200)).body[0]).toMatchObject({ setup: 'enrolled', revokedAt: null });
+  });
+
+  it('refuses a retry without the claim, with another claim, or after a first claim made without one; a malformed claim does not spend the code', async () => {
+    h = createHarness();
+    const event = await newEvent();
+    const created = await newScanner(event.id);
+    await claimWith(setupCode(created), 'not-a-claim').expect(410);
+    const claim = generateToken();
+    const key = (await claimWith(setupCode(created), claim).expect(201)).body.key as string;
+    await claimWith(setupCode(created)).expect(410);
+    await claimWith(setupCode(created), generateToken()).expect(410);
+    await session(key).expect(200);
+
+    const oldClient = await newScanner(event.id, { label: 'Old page' });
+    const oldKey = (await claimWith(setupCode(oldClient)).expect(201)).body.key as string;
+    await claimWith(setupCode(oldClient), generateToken()).expect(410);
+    await session(oldKey).expect(200);
+    expect(audits('scanner.enroll_retried')).toBe(0);
+  });
+
+  it('ends once the scanner is rotated or revoked, or the link expires', async () => {
+    h = createHarness();
+    const event = await newEvent();
+    const claim = generateToken();
+
+    const rotatedScanner = await newScanner(event.id, { label: 'Rotated' });
+    await claimWith(setupCode(rotatedScanner), claim).expect(201);
+    const rotated = (await operator('post', `/api/scanners/${rotatedScanner.scanner.id}/rotate`).expect(200)).body;
+    await claimWith(setupCode(rotatedScanner), claim).expect(410);
+    // Even after the new link has been claimed, at the same instant as the old one.
+    const current = await enroll(h.app, rotated);
+    await claimWith(setupCode(rotatedScanner), claim).expect(410);
+    await session(current).expect(200);
+
+    const revokedScanner = await newScanner(event.id, { label: 'Revoked' });
+    await claimWith(setupCode(revokedScanner), claim).expect(201);
+    await operator('post', `/api/scanners/${revokedScanner.scanner.id}/revoke`).expect(200);
+    await claimWith(setupCode(revokedScanner), claim).expect(410);
+
+    const expiringScanner = await newScanner(event.id, { label: 'Expiring' });
+    const kept = (await claimWith(setupCode(expiringScanner), claim).expect(201)).body.key as string;
+    h.clock.current = new Date(expiringScanner.enrollment.expiresAt);
+    await claimWith(setupCode(expiringScanner), claim).expect(410);
+    await session(kept).expect(200);
+    expect(audits('scanner.enroll_retried')).toBe(0);
+  });
+
+  it('races from many connections leave exactly one working key', async () => {
+    h = createHarness();
+    const event = await newEvent();
+    const working = async (outcomes: EnrollOutcome[]) => {
+      const keys = outcomes.filter((outcome) => outcome.outcome === 'enrolled').map((outcome) => outcome.key!);
+      const statuses = await Promise.all(keys.map(async (key) => (await session(key)).status));
+      return keys.filter((_, index) => statuses[index] === 200);
+    };
+
+    // Different devices (different claims): one wins, the others are refused.
+    const contested = await newScanner(event.id, { label: 'Contested' });
+    const devices = await enrollInThreads(h.dbFile, setupCode(contested), Array.from({ length: 6 }, () => generateToken()));
+    expect(devices.filter((outcome) => outcome.outcome === 'enrolled')).toHaveLength(1);
+    expect(await working(devices)).toHaveLength(1);
+
+    // One device whose claim and retries race each other: the last commit holds the only working key.
+    const retrying = await newScanner(event.id, { label: 'Retrying' });
+    const claim = generateToken();
+    const retries = await enrollInThreads(h.dbFile, setupCode(retrying), Array.from({ length: 6 }, () => claim));
+    expect(retries.every((outcome) => outcome.outcome === 'enrolled' || outcome.outcome === 'busy')).toBe(true);
+    const [only] = await working(retries);
+    expect(await working(retries)).toEqual([only]);
+    expect(storedKeyHash(retrying.scanner.id)).toBe(hashToken(only));
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'scanner.enrolled' AND entity_id = ?").get(retrying.scanner.id)).toEqual({ n: 1 });
+    expect(verifyDatabase(h.db).violations).toEqual([]);
+  });
+});
+
 describe('migration 4 from a populated schema-3 database', () => {
   const NOW = new Date('2030-06-01T18:30:00.000Z');
   const T = '2030-05-20T10:00:00.000Z';
@@ -382,6 +479,9 @@ describe('migration 4 from a populated schema-3 database', () => {
       { id: 's1', enrolled_at: null },
       { id: 's2', enrolled_at: null }
     ]);
+    // Migration 5 columns: links made before it carry no claim and no delivery (treated as handed to their creator).
+    expect(db.prepare('SELECT delivery FROM password_resets').all()).toEqual([{ delivery: null }]);
+    expect(db.prepare("SELECT name FROM pragma_table_info('scanner_enrollments') WHERE name = 'claim_hash'").all()).toEqual([{ name: 'claim_hash' }]);
 
     const service = new GatePass(db, { publicUrl: 'https://gate.example', now: () => new Date(NOW) });
     // The legacy key still authenticates and the admissions it recorded still stand.

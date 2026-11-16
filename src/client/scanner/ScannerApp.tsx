@@ -6,6 +6,8 @@ import { ScannerStation } from './ScannerStation';
 import './scanner.css';
 
 const KEY_STORAGE = 'gatepass.scannerKey';
+/** A setup code this phone has claimed but not yet received a key for, with the claim secret that makes resending it safe. */
+const PENDING_STORAGE = 'gatepass.pendingEnrollment';
 /** Long enough for the free demo backend to wake from sleep; then offer a retry. */
 const SESSION_TIMEOUT_MS = 60_000;
 const SETUP_CODE = /^[A-Za-z0-9_-]{43}$/;
@@ -31,13 +33,34 @@ function parseCredential(text: string): Credential | null {
   return null;
 }
 
+type PendingEnrollment = { code: string; claim: string };
+
+function readPendingEnrollment(): PendingEnrollment | null {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(PENDING_STORAGE) ?? 'null');
+    if (value && typeof value === 'object' && 'code' in value && 'claim' in value && typeof value.code === 'string' && typeof value.claim === 'string') {
+      if (SETUP_CODE.test(value.code) && SETUP_CODE.test(value.claim)) return { code: value.code, claim: value.claim };
+    }
+  } catch {
+    // A corrupt entry is treated as absent.
+  }
+  return null;
+}
+
+/** 32 random bytes, base64url (43 characters): the server keeps only its SHA-256. */
+function newClaim(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 export function ScannerApp() {
   const [initial] = useState(takeCredentialFromFragment);
   const [stored] = useState(() => localStorage.getItem(KEY_STORAGE) ?? '');
   // A link opened on a phone that is already a scanner must not silently re-point it at another
   // event or gate: staff confirm the replacement first.
   const [replacement, setReplacement] = useState<Credential | null>(stored && initial && initial.value !== stored ? initial : null);
-  const [code, setCode] = useState(!stored && initial?.kind === 'code' ? initial.value : '');
+  // Without a new link in the address bar, resume a claim whose answer never arrived (the page was reloaded or closed).
+  const [code, setCode] = useState(() => (initial ? (!stored && initial.kind === 'code' ? initial.value : '') : (readPendingEnrollment()?.code ?? '')));
   const [key, setKey] = useState(() => {
     if (stored || initial?.kind !== 'key') return stored;
     localStorage.setItem(KEY_STORAGE, initial.value);
@@ -69,10 +92,12 @@ export function ScannerApp() {
     setKey(credential.value);
   }, []);
 
-  // Claim a one-time setup code. The code works once: if the answer is lost,
-  // a retry gets "already used" and the organiser issues a new link. The
-  // request is kept in a ref so a re-run effect (React StrictMode, re-render)
-  // reuses it instead of spending the code twice.
+  // Claim a one-time setup code. The phone sends a claim secret with it and
+  // keeps both in localStorage until the server answers: if the answer is
+  // lost (timeout, proxy error, reload), resending the same code and secret
+  // gets a replacement key, while anyone else using the code is refused.
+  // The request is kept in a ref so a re-run effect (React StrictMode,
+  // re-render) reuses it instead of sending it twice.
   const enrollRequest = useRef<{ id: string; promise: Promise<ScannerEnrollResult> } | null>(null);
   useEffect(() => {
     if (!code) return;
@@ -81,12 +106,16 @@ export function ScannerApp() {
     setSlow(false);
     const id = `${code}:${attempt}`;
     if (enrollRequest.current?.id !== id) {
-      enrollRequest.current = { id, promise: api<ScannerEnrollResult>('/api/scanner/enroll', { body: { code }, timeoutMs: SESSION_TIMEOUT_MS, onSlow: () => setSlow(true) }) };
+      const pending = readPendingEnrollment();
+      const claim = pending?.code === code ? pending.claim : newClaim();
+      localStorage.setItem(PENDING_STORAGE, JSON.stringify({ code, claim } satisfies PendingEnrollment));
+      enrollRequest.current = { id, promise: api<ScannerEnrollResult>('/api/scanner/enroll', { body: { code, claim }, timeoutMs: SESSION_TIMEOUT_MS, onSlow: () => setSlow(true) }) };
     }
     enrollRequest.current.promise
       .then((result) => {
         if (!live) return;
         localStorage.setItem(KEY_STORAGE, result.key);
+        localStorage.removeItem(PENDING_STORAGE);
         setCode('');
         setKey(result.key);
         setSession(result.session);
@@ -94,10 +123,11 @@ export function ScannerApp() {
       .catch((err) => {
         if (!live) return;
         if (err instanceof ApiError && (err.status === 410 || err.status === 400)) {
+          localStorage.removeItem(PENDING_STORAGE);
           setCode('');
           if (localStorage.getItem(KEY_STORAGE)) setKept('That setup link is invalid, expired or already used, so this phone keeps its current setup. Ask the organiser for a new link if you meant to change it.');
           else setError('This setup link is invalid, expired or already used. Ask the organiser for a new setup link.');
-        } else if (err instanceof ApiError && err.status === 0) setError(`${err.message} If this keeps failing, ask the organiser for a new setup link.`);
+        } else if (err instanceof ApiError && err.status === 0) setError(`${err.message} Trying again is safe. If it keeps failing, ask the organiser for a new setup link.`);
         else setError(`Could not set up this device: ${errorMessage(err)}`);
       })
       .finally(() => {
@@ -184,6 +214,7 @@ export function ScannerApp() {
               <button
                 className="btn btn-secondary"
                 onClick={() => {
+                  localStorage.removeItem(PENDING_STORAGE);
                   setCode('');
                   setError('');
                 }}

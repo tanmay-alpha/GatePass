@@ -490,25 +490,44 @@ export class GatePass {
    * Claims a one-time setup code: exactly one device gets a fresh permanent
    * key, returned once. Unknown, used, expired or invalidated codes and
    * revoked scanners all return null (the caller answers 410).
+   *
+   * `claim` is a secret the device generates and keeps until it has its key.
+   * If the answer to the first claim was lost, the same code with the same
+   * claim (before the code expires, while no newer link exists for the
+   * scanner) gets a replacement key; the key minted before stops working.
+   * Without a claim a code works exactly once.
    */
-  enrollScanner(code: string): { key: string; session: ScannerSession } | null {
-    if (!isWellFormedToken(code)) return null;
+  enrollScanner(code: string, claim?: string): { key: string; session: ScannerSession } | null {
+    if (!isWellFormedToken(code) || (claim !== undefined && !isWellFormedToken(claim))) return null;
     const key = `gps_${this.newToken()}`;
+    const codeHash = hashToken(code);
+    const claimHash = claim === undefined ? null : hashToken(claim);
     // The session is built inside the claim: if building it fails, the code is not spent and the device can retry.
     return transaction(this.db, () => {
       const at = this.timestamp();
       const row = this.db
         .prepare(
-          `SELECT s.id, s.event_id, s.gate_id, s.label, e.created_by FROM scanner_enrollments e JOIN scanners s ON s.id = e.scanner_id
-           WHERE e.token_hash = ? AND e.used_at IS NULL AND e.invalidated_at IS NULL AND e.expires_at > ? AND s.revoked_at IS NULL`
+          `SELECT s.id, s.event_id, s.gate_id, s.label, s.enrolled_at, e.created_by, e.used_at, e.claim_hash,
+             EXISTS (SELECT 1 FROM scanner_enrollments n WHERE n.scanner_id = e.scanner_id AND n.rowid > e.rowid) AS superseded
+           FROM scanner_enrollments e JOIN scanners s ON s.id = e.scanner_id
+           WHERE e.token_hash = ? AND e.invalidated_at IS NULL AND e.expires_at > ? AND s.revoked_at IS NULL`
         )
-        .get(hashToken(code), at) as Row | undefined;
+        .get(codeHash, at) as Row | undefined;
       if (!row) return null;
-      this.db.prepare('UPDATE scanner_enrollments SET used_at = ? WHERE token_hash = ?').run(at, hashToken(code));
-      // The person who created the link stays the key's issuer: removing them from the team revokes it.
-      this.db.prepare('UPDATE scanners SET key_hash = ?, key_issued_by = ?, enrolled_at = ? WHERE id = ?').run(hashToken(key), row.created_by as string, at, row.id as string);
-      this.audit(row.event_id as string, `scanner:${row.id as string}`, 'scanner.enrolled', row.id as string, {});
-      return { key, session: this.scannerSession({ id: row.id as string, eventId: row.event_id as string, gateId: (row.gate_id as string | null) ?? null, label: row.label as string }) };
+      const scannerId = row.id as string;
+      if (row.used_at === null) {
+        this.db.prepare('UPDATE scanner_enrollments SET used_at = ?, claim_hash = ? WHERE token_hash = ?').run(at, claimHash, codeHash);
+        // The person who created the link stays the key's issuer: removing them from the team revokes it.
+        this.db.prepare('UPDATE scanners SET key_hash = ?, key_issued_by = ?, enrolled_at = ? WHERE id = ?').run(hashToken(key), row.created_by as string, at, scannerId);
+        this.audit(row.event_id as string, `scanner:${scannerId}`, 'scanner.enrolled', scannerId, {});
+      } else {
+        // A retry is only for the device that made the first claim, and only while that claim's key is still the scanner's
+        // current one: a rotation (newer link, enrolled_at cleared) ends it.
+        if (claimHash === null || row.claim_hash !== claimHash || Number(row.superseded) || row.enrolled_at === null) return null;
+        this.db.prepare('UPDATE scanners SET key_hash = ? WHERE id = ?').run(hashToken(key), scannerId);
+        this.audit(row.event_id as string, `scanner:${scannerId}`, 'scanner.enroll_retried', scannerId, {});
+      }
+      return { key, session: this.scannerSession({ id: scannerId, eventId: row.event_id as string, gateId: (row.gate_id as string | null) ?? null, label: row.label as string }) };
     });
   }
 

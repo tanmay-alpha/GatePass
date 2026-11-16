@@ -359,6 +359,16 @@ const migrations: string[] = [
     updated_at  TEXT NOT NULL,
     UNIQUE (owner_id, name)
   ) STRICT;
+
+  -- Retry-safe scanner setup: the device sends a secret with its first claim
+  -- of a setup code; only the SHA-256 is kept. If the answer was lost, the
+  -- same code with the same secret gets a replacement key (the lost one stops).
+  ALTER TABLE scanner_enrollments ADD COLUMN claim_hash TEXT CHECK (claim_hash IS NULL OR length(claim_hash) = 64);
+
+  -- How a reset link was handed out. An administrator-started link that was
+  -- emailed only reached the owner's mailbox, so using it is the owner's own
+  -- reset (no security notice). NULL for links made before this column.
+  ALTER TABLE password_resets ADD COLUMN delivery TEXT CHECK (delivery IS NULL OR delivery IN ('email', 'link'));
   `
 ];
 

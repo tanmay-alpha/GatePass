@@ -498,16 +498,19 @@ export class Accounts {
     await this.sendReset(user, token, `user:${user.id}`);
   }
 
-  /** `supersede`: cancel the account's earlier open links, so only this one works (links an administrator creates). */
-  private insertReset(userId: string, actor: string, details: Record<string, unknown>, supersede: boolean): { token: string; expiresAt: string } {
+  /**
+   * `supersede`: cancel the account's earlier open links, so only this one works (links an administrator creates).
+   * `details.delivery` is stored with the link: an emailed link reached only the owner's mailbox.
+   */
+  private insertReset(userId: string, actor: string, details: { delivery: 'email' | 'link'; [key: string]: unknown }, supersede: boolean): { token: string; expiresAt: string } {
     const token = this.newToken();
     const now = this.now();
     const expiresAt = new Date(now.getTime() + RESET_TTL_MS).toISOString();
     transaction(this.db, () => {
       if (supersede) this.db.prepare('UPDATE password_resets SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(now.toISOString(), userId);
       this.db
-        .prepare('INSERT INTO password_resets (token_hash, user_id, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)')
-        .run(hashToken(token), userId, actor, now.toISOString(), expiresAt);
+        .prepare('INSERT INTO password_resets (token_hash, user_id, created_by, created_at, expires_at, delivery) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(hashToken(token), userId, actor, now.toISOString(), expiresAt, details.delivery);
       this.audit(null, actor, 'user.password_reset_created', userId, details);
     });
     return { token, expiresAt };
@@ -569,7 +572,7 @@ export class Accounts {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw httpError(410, 'This reset link is invalid, expired or already used.');
     const row = this.db
       .prepare(
-        'SELECT r.user_id, r.created_by, u.email FROM password_resets r JOIN users u ON u.id = r.user_id WHERE r.token_hash = ? AND r.used_at IS NULL AND r.expires_at > ? AND u.disabled_at IS NULL'
+        'SELECT r.user_id, r.created_by, r.delivery, u.email FROM password_resets r JOIN users u ON u.id = r.user_id WHERE r.token_hash = ? AND r.used_at IS NULL AND r.expires_at > ? AND u.disabled_at IS NULL'
       )
       .get(hashToken(token), this.timestamp()) as Row | undefined;
     if (!row) throw httpError(410, 'This reset link is invalid, expired or already used.');
@@ -578,7 +581,9 @@ export class Accounts {
     const passwordHash = await hashPassword(password);
     const userId = row.user_id as string;
     const createdBy = row.created_by as string;
-    const byOwner = createdBy === `user:${userId}`;
+    // Only the owner's mailbox ever held an emailed link, even one an administrator asked for: using it is the owner's
+    // own reset (no notice). A link handed to someone else (`delivery = 'link'`, or NULL before migration 5) is not.
+    const byOwner = createdBy === `user:${userId}` || row.delivery === 'email';
     transaction(this.db, () => {
       const at = this.timestamp();
       const claimed = this.db.prepare('UPDATE password_resets SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').run(at, hashToken(token), at);

@@ -262,6 +262,42 @@ describe('administrator emergency reset', () => {
     // An organizer is not a platform administrator.
     await organizer.send('post', `/api/platform/users/${peer.id}/reset-link`, { reason: 'Not my business at all' }).expect(403);
   });
+
+  it('an emailed link an administrator asked for is the owner’s own reset: no notice, no “an administrator created” email, still audited (SA2-5)', async () => {
+    const mailer = new FakeMailer();
+    const { app, operator } = setup({ mailer });
+    await operator('post', '/api/platform/invitations').send({ email: 'root@example.com', role: 'platform_admin' }).expect(201);
+    const root = browser(app);
+    const rootId = root.capture(
+      await root.send('post', '/api/invitations/accept', { token: /#\/invite\/([A-Za-z0-9_-]{43})/.exec(mailer.sent.at(-1)!.text)![1], name: 'Root', password: PASSWORD }).expect(200)
+    ).body.user.id as string;
+    const owner = await register(app, 'owner@example.com');
+
+    // A link the operator took by hand still leaves the notice and tells the owner's mailbox.
+    const handed = (await operator('post', `/api/platform/users/${owner.id}/reset-link`).send({ delivery: 'link', reason: 'Owner lost the mailbox; checked ID in person' }).expect(200)).body;
+    await browser(app).send('post', '/api/auth/reset', { token: tokenOf(handed.url), password: 'set by the operator' }).expect(204);
+    await h.service.accounts.idle();
+    expect(h.service.accounts.securityNotice(owner.id)).toMatchObject({ by: 'operator' });
+    const before = mailer.sent.length;
+    expect(mailer.sent.at(-1)!.subject).toBe('Your GatePass password was changed');
+
+    // The administrator asks for an emailed link: only the owner's mailbox holds it.
+    expect((await root.send('post', `/api/platform/users/${owner.id}/reset-link`, {}).expect(200)).body).toMatchObject({ delivery: 'email' });
+    expect(mailer.sent).toHaveLength(before + 1);
+    await browser(app).send('post', '/api/auth/reset', { token: resetTokenIn(mailer.sent.at(-1)!), password: 'chosen by the owner' }).expect(204);
+    await h.service.accounts.idle();
+    expect(mailer.sent).toHaveLength(before + 1); // no "an administrator created" notice for the owner's own mailbox link
+    expect(h.service.accounts.securityNotice(owner.id)).toBeNull();
+    const after = browser(app);
+    expect(after.capture(await after.send('post', '/api/auth/login', { email: 'owner@example.com', password: 'chosen by the owner' }).expect(200)).body.securityNotice).toBeNull();
+
+    const audit = h.db.prepare("SELECT actor, action, details_json FROM audit_log WHERE action LIKE 'user.password_reset_%' ORDER BY id").all() as Array<{ actor: string; action: string; details_json: string }>;
+    expect(audit.slice(-2).map((row) => [row.actor, row.action, JSON.parse(row.details_json)])).toEqual([
+      [`user:${rootId}`, 'user.password_reset_created', { email: 'owner@example.com', delivery: 'email' }],
+      [`user:${owner.id}`, 'user.password_reset_used', { requestedBy: `user:${rootId}` }]
+    ]);
+    expect(h.db.prepare('SELECT delivery FROM password_resets ORDER BY created_at, delivery').all()).toEqual([{ delivery: 'email' }, { delivery: 'link' }]);
+  });
 });
 
 describe('after recovery', () => {

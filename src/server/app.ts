@@ -138,7 +138,8 @@ const resetSchema = z.strictObject({ token: z.string().min(1).max(100), password
 const forgotSchema = z.strictObject({ email: z.string().trim().min(1).max(254) });
 const resetLinkSchema = z.strictObject({ reason: z.string().trim().max(500).optional(), delivery: z.enum(['email', 'link']).optional() });
 const eventCreationSchema = z.strictObject({ allowed: z.boolean() });
-const enrollSchema = z.strictObject({ code: z.string().min(1).max(100) });
+// `claim`: the device's secret for retrying after a lost answer (optional, so older scanner pages keep working).
+const enrollSchema = z.strictObject({ code: z.string().min(1).max(100), claim: z.string().min(1).max(100).optional() });
 const managerInviteSchema = z.strictObject({ email });
 const platformInviteSchema = z.strictObject({ email, role: z.enum(['organizer', 'platform_admin']) });
 const ownerSchema = z.strictObject({ userId: id });
@@ -741,8 +742,8 @@ export function createApp({
   // throttled per address; the request limit leaves room for a venue setting
   // up many door phones on one network at once.
   app.post('/api/scanner/enroll', limit(60), (req, res) => {
-    const { code } = enrollSchema.parse(req.body);
-    const enrolled = service.enrollScanner(code);
+    const { code, claim } = enrollSchema.parse(req.body);
+    const enrolled = service.enrollScanner(code, claim);
     if (!enrolled) {
       const wait = rateLimits ? failures.fail(req.ip ?? 'unknown') : 0;
       if (wait > 0) {
