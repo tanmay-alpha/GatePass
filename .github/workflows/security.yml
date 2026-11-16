@@ -53,8 +53,12 @@ jobs:
   # Fails a pull request that adds a dependency with a known high or critical
   # advisory. Results go to the job summary: Dependabot pull requests get a
   # read-only token, so no PR comment is attempted.
+  # The action needs the repository's Dependency graph (Settings → Security →
+  # Advanced Security). That is the owner's setting: after enabling it, set
+  # the repository variable DEPENDENCY_REVIEW=true to switch this job on.
+  # Until then `npm audit --audit-level=high` in CI covers known advisories.
   dependency-review:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && vars.DEPENDENCY_REVIEW == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

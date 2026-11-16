@@ -1,0 +1,7 @@
+# Verified false positives, one fingerprint per line (commit:file:rule:line).
+# Add an entry only after checking that the flagged value is not a credential.
+#
+# Commit 621ab3c, tests/account-recovery.test.ts: the placeholder 're_0123456789' passed to
+# loadConfig() in the configuration test. Never a real key; replaced by a run-time placeholder since.
+621ab3c06d7114340b24c12967011d18e9162867:tests/account-recovery.test.ts:generic-api-key:332
+621ab3c06d7114340b24c12967011d18e9162867:tests/account-recovery.test.ts:generic-api-key:333

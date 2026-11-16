@@ -48,3 +48,4 @@ Baseline for this list: `main` at `4a6ba5c` (2026-11-15 audit) plus branch `feat
 1. Spend ≈ $7.25/month on Render Starter + 1 GB disk (or choose and operate the free single-VM Docker path) — unblocks INF-05, OPS-01, LOAD-01.
 2. A Resend account and a verified sending domain; set `RESEND_API_KEY` and `MAIL_FROM` on the backend — unblocks MAIL-01.
 3. Whether self-registration should stay open on the public demo (`ALLOW_SIGNUP=true` today).
+4. Enable the repository's Dependency graph (Settings → Security), then set the repository variable `DEPENDENCY_REVIEW=true` so the dependency-review job in `security.yml` runs on pull requests. Until then `npm audit` in CI covers known advisories.

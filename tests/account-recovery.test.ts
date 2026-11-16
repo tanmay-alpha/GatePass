@@ -327,10 +327,12 @@ describe('Resend adapter', () => {
 });
 
 describe('configuration', () => {
+  // Placeholders built at run time: a key-shaped literal next to RESEND_API_KEY trips the secret scanner.
   const base = { ADMIN_TOKEN: 'x'.repeat(32) };
+  const placeholderKey = 'k'.repeat(12);
   it('needs a sender address with a Resend key, and never fails start-up over the commit value', () => {
-    expect(() => loadConfig({ ...base, RESEND_API_KEY: 're_0123456789' })).toThrow(/MAIL_FROM/);
-    expect(loadConfig({ ...base, RESEND_API_KEY: 're_0123456789', MAIL_FROM: 'GatePass <no-reply@example.com>' }).MAIL_FROM).toBeDefined();
+    expect(() => loadConfig({ ...base, RESEND_API_KEY: placeholderKey })).toThrow(/MAIL_FROM/);
+    expect(loadConfig({ ...base, RESEND_API_KEY: placeholderKey, MAIL_FROM: 'GatePass <no-reply@example.com>' }).MAIL_FROM).toBeDefined();
     expect(buildCommit(loadConfig({ ...base, RENDER_GIT_COMMIT: '4A6BA5CB88FF2434F0A9045551FEF15382F8EFEB' }))).toBe('4a6ba5cb88ff2434f0a9045551fef15382f8efeb');
     expect(buildCommit(loadConfig({ ...base, GATEPASS_COMMIT: 'dev build' }))).toBeNull();
   });
