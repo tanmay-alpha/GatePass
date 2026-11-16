@@ -261,7 +261,8 @@ function report(results: Result[]): boolean {
 
   const summary = process.env.GITHUB_STEP_SUMMARY;
   if (summary) {
-    const escape = (text: string) => text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+    // Markdown table cell: backslashes first, so an escaped pipe cannot be un-escaped by the text.
+    const escape = (text: string) => text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
     const lines = [
       `### Release check ${failed.length ? 'failed' : 'passed'}`,
       '',

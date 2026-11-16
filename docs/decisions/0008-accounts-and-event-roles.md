@@ -1,6 +1,6 @@
 # 0008 — Accounts with cookie sessions and per-event roles
 
-Status: accepted
+Status: accepted; superseded in part by [ADR 0010](0010-enrollment-recovery-email.md): invitations and resets can be emailed (optional Resend), reset links are no longer always handed to an administrator, and rotating a scanner returns a one-time setup link instead of a key
 
 ## Context
 

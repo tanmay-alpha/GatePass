@@ -104,7 +104,7 @@ Each step has a button that takes you to the right place. Optional steps have **
 
 ![Setup checklist on a new draft event](screenshots/guide/05-setup-checklist.png)
 
-When the event is Active and has passes and at least one scanner, the checklist changes to **Ready for doors**. After the first scan it disappears.
+When the event is Active, has passes and at least one door device has opened its setup link, the checklist changes to **Ready for doors**. Adding a device is not enough: until a phone opens the link, the **Set up a scanner** step stays open. After the first scan the checklist disappears.
 
 ## 7. Gates and admission policies
 
@@ -206,7 +206,7 @@ Each door phone or tablet gets its own key, which only works for this event. The
 1. In the **Access** tab, under **Scanner devices**, enter a **Device label** (for example "North phone 1") and choose its **Gate** (or **Any gate**).
 2. Click **Add device**. A setup card appears with a QR code and a **Setup link**.
 3. On the door device, scan the setup QR code with the camera, or open the setup link. The link works once, on one device, and expires after an hour. The device then remembers its key; staff only do this once per device.
-4. Click **Done**. The setup link is shown only on this card.
+4. Click **Done**. The setup link is shown only on this card; the card closes by itself once the device has opened the link.
 
 ![Scanner setup card](screenshots/guide/12-scanner-setup.png)
 
@@ -219,7 +219,7 @@ The device table shows when each device was **Last used**.
 
 ### Open the event
 
-When gates, passes and devices are ready, open the **Settings** tab and click **Open the event**, then confirm. Only the owner can do this. The checklist then shows **Ready for doors**.
+When gates, passes and devices are ready, open the **Settings** tab and click **Open the event**, then confirm. Only the owner can do this. The checklist then shows **Ready for doors**, provided at least one door device has opened its setup link.
 
 ![Ready for doors](screenshots/guide/13-ready-for-doors.png)
 

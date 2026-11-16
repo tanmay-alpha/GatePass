@@ -297,7 +297,7 @@ describe('crash recovery of the server process', () => {
 
     const { code, signal } = await stop(server, 'SIGTERM');
     expect({ code, signal }).toEqual({ code: 0, signal: null });
-    expect(server.output.join('')).toContain('SIGTERM received');
+    expect(server.output.join('')).toContain('"msg":"shutting down","signal":"SIGTERM"');
     // Closing the last connection checkpoints and removes the WAL.
     expect(!existsSync(`${file}-wal`) || statSync(`${file}-wal`).size === 0).toBe(true);
 

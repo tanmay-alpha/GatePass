@@ -31,11 +31,10 @@ services:
     # deploys (a few seconds of downtime per deploy): do not deploy while doors are open.
     numInstances: 1
     healthCheckPath: /api/health # 503 when the database is not ready
-    # Deploy on every commit to main, like the frontend. Not `checksPass`: Render then waits for
-    # every GitHub check on the commit, including release-verify, which itself waits for this
-    # service to serve the commit and would never finish. CI gates the merge (pull requests);
-    # release-verify judges the release after both sides have deployed.
-    autoDeployTrigger: commit
+    # Deploy main only after the commit's GitHub checks pass, like the live demo service.
+    # Consequence: no check may wait for this service to serve the commit (it would never
+    # finish), which is why release-verify is started by hand after the deploy is live.
+    autoDeployTrigger: checksPass
     maxShutdownDelaySeconds: 30 # the server drains and closes SQLite on SIGTERM
     previews:
       generation: 'off' # quoted: bare off is a YAML boolean. Previews must never get production data or a copy of the disk

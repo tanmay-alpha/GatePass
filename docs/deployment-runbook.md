@@ -14,7 +14,7 @@ Rules that apply to every step:
 | Environment | What runs | Data | Purpose |
 | --- | --- | --- | --- |
 | Local | `npm run dev`, or `npm run build` + `node dist/server/index.js`; optionally Docker Compose (`docker compose up -d --build`) | `.local/data/gatepass.db` (or the `gatepass-data` volume) | Development, the `backup`/`verify`/`restore` and rollback rehearsals |
-| CI (GitHub Actions) | `ci.yml`: `check` (typecheck, unit/integration tests, build, QR smoke, `npm audit`), `e2e` (Playwright per browser project), `docker` (multi-arch build), `docker-run` (see gate 1). `security.yml`: gitleaks secret scan, dependency review on PRs. `codeql.yml`: CodeQL for JavaScript/TypeScript and the workflows | Temporary files and volumes | Release gate 1 |
+| CI (GitHub Actions) | `ci.yml`: `check` (typecheck, unit/integration tests, build, QR smoke, `npm audit`), `e2e` (Playwright per browser project), `docker` (multi-arch build), `docker-run` (see gate 1). `security.yml`: gitleaks secret scan, dependency review on PRs (only when the repository variable `DEPENDENCY_REVIEW=true`). `codeql.yml`: CodeQL for JavaScript/TypeScript and the workflows | Temporary files and volumes | Release gate 1 |
 | Staging | No hosted staging service. See [Staging strategy](#staging-strategy) | Synthetic only | Release gate 4 |
 | Vercel preview | Static SPA only. `/api/*` and `/p/*` answer 503 with `preview-no-backend.json` unless a separate `GATEPASS_PREVIEW_BACKEND_ORIGIN` is configured (none is today) | None | UI review. Previews never reach production (`vercel.mjs`, INF-01) |
 | Production (free demo) | Vercel project `gatepass` (team `tanmay-alphas-projects`) serves `https://gatepass-sandy.vercel.app` and proxies to Render service `gatepass-api` (`srv-dbng57u7bikc73cfc5bg`; Free plan, Docker, Singapore, 1 instance, no disk, health check `/api/health`, auto-deploy from `main`) | **Ephemeral**: the SQLite file is lost on every restart, deploy or idle spin-down | Public demo with `DEMO_MODE=true` |
@@ -59,7 +59,7 @@ All must be ticked before the change counts as released. Record the evidence (co
 
 - [ ] **1. All required GitHub checks pass** on the PR head commit: `gh pr checks <number>`.
   - `ci.yml`: `check`, `e2e`, `docker`, `docker-run`. `docker-run` boots the real image and requires: `/api/health` and `/version.json` report the built commit and a schema; a scanner enrolls with the one-time code from its setup link, and a second use of the code is refused; an admission survives `docker restart`; `verify` passes; an online `backup` verifies; after a graceful stop, `restore` in a one-off container on the same volume brings back the admitted pass and drops a pass issued after the backup; `verify` passes again; the operator token, scanner key, enrollment code and pass token never appear in the container log; every stop exits 0.
-  - `security.yml`: `secret scan (gitleaks)` (PR commits; full history on `main`, weekly and on demand) and `dependency-review` (fails on a new dependency with a high or critical advisory).
+  - `security.yml`: `secret scan (gitleaks)` (PR commits; full history on `main`, weekly and on demand) and `dependency-review` (fails on a new dependency with a high or critical advisory; the job is skipped unless the repository variable `DEPENDENCY_REVIEW=true`, which needs the repository's Dependency graph — off today, see [TODO.md](../TODO.md)).
   - `codeql.yml`: `analyze (javascript-typescript)`, `analyze (actions)`.
 - [ ] **2. Migration and backup verification passes.**
   - Locally: `npx vitest run tests/migration.test.ts tests/recovery.test.ts` (migration with row counts and hashes preserved, `.pre-vN.bak` written at the old version, backup → restore → `verify`, corrupt backup refused).
@@ -76,7 +76,7 @@ All must be ticked before the change counts as released. Record the evidence (co
   npx tsx scripts/release-check.ts          # or: node scripts/release-check.ts (Node ≥ 22.18)
   ```
   It waits (default up to 15 min, tolerant of the free instance's ~50 s cold start) until `/version.json`, the frontend's `/api/health` and the backend's `/api/health` all report `EXPECTED_COMMIT` with `ok: true` and a schema version. Then it runs nondestructive smoke checks: CSP, `nosniff` and HSTS on the SPA; `/api/health` `no-store`; unauthenticated `GET /api/events` → 401; `POST /api/scanner/redeem` without a key → 401; an unknown 43-character pass link → 404 page with its own CSP; the backend origin refuses unproxied API requests (401/403); with `PREVIEW_URL`, a preview does not reach a backend. Exit 0 = released; 1 = a check failed (the report says which); 2 = bad input. It uses no credentials and changes nothing.
-  - Automated: `release-verify.yml` runs it when Vercel reports a successful **Production** deployment (`deployment_status`), expecting that deployment's commit, and on demand (`workflow_dispatch`). The run summary shows the report.
+  - On GitHub: run `release-verify.yml` with `workflow_dispatch` once **both** deployments report the release live; the run summary shows the report. It is deliberately not triggered by the deployment: the Render service deploys only after every GitHub check on the commit has passed (`autoDeployTrigger: checksPass`, read from the Render API on 2026-11-16), so a check that waits for Render to serve that commit would keep Render waiting until it failed.
 - [ ] **7. Key application journeys pass.** See [Smoke journey](#smoke-journey).
 - [ ] **8. No unexpected errors in logs.** See [Monitoring](#monitoring). Expect no stack traces, 5xx lines, "database is locked" or `"ok":false` health answers since the deploy went live, beyond the smoke run's expected 4xx.
 - [ ] **9. Rollback procedure is documented and rehearsed.** The procedure is [Rollback](#rollback); the database part is rehearsed by `scripts/rollback-rehearsal.sh`. A Render rollback and a `vercel rollback` have **not** been exercised on the real providers; record that honestly unless an operator performs one.
@@ -100,7 +100,7 @@ There is no hosted staging service, and production data never leaves production.
 2. Vercel builds production from `main` automatically (`VERCEL_ENV=production`; the build fails if `GATEPASS_BACKEND_ORIGIN` is missing, which is intended).
 3. Render builds the Docker image from `main`. If it does not start, use Dashboard → Manual Deploy → "Deploy latest commit".
 4. Wait for the Render deploy to show `live`. A failed deploy keeps the **previous** instance and environment serving (production audit, finding 3).
-5. `release-verify.yml` starts when Vercel reports the Production deployment. Watch it (`gh run watch`) or run the release check by hand (gate 6). It fails if Render never reaches the commit within 20 minutes; then check the Render deploy and re-run the workflow with `workflow_dispatch`.
+5. Run the release check (gate 6): from a laptop, or `release-verify.yml` with `workflow_dispatch`. Do not start the workflow before Render shows `live`: while Render is still waiting for checks, a running or failed check on the commit holds the deploy back.
 6. Run gates 7–8.
 7. Bootstrap accounts on a new, empty database:
    - Sign up an organizer account in the UI (sign-up is open on the demo).
@@ -142,7 +142,7 @@ The first request after 15 idle minutes wakes the free instance and takes about 
 
 ## Monitoring
 
-- **Synthetic check:** `release-verify.yml` runs every 6 hours (`schedule`) without an expected commit: health, frontend/backend commit agreement and the smoke checks. A failed run emails the repository's watchers per their GitHub notification settings. GitHub disables scheduled workflows in a public repository after 60 days without repository activity; re-enable it on the Actions page.
+- **Synthetic check:** `release-verify.yml` runs every 6 hours (`schedule`) without an expected commit: health, frontend/backend commit agreement and the smoke checks. A failed run emails the repository's watchers per their GitHub notification settings. GitHub disables scheduled workflows in a public repository after 60 days without repository activity; re-enable it on the Actions page. Known edge: a scheduled run that starts while a release is deploying sees two different commits and fails; because Render waits for checks, that failure can hold the backend deploy back. If it happens, re-run the failed job once the frontend is live, or deploy manually in Render.
 - **Platform health check:** Render probes `/api/health` (503 when the database is not ready) and restarts or holds back an unhealthy deploy. The Docker image has its own `HEALTHCHECK` for Compose and CI.
 - **Structured logs:** the server writes one JSON line per request to stdout (method, route pattern, status, duration, request id; tokens are never logged) plus JSON error lines. Read them on Render's Logs page (or `docker compose logs gatepass` on a single host) and filter for `"status":5` or error entries. Vercel: `vercel logs https://gatepass-sandy.vercel.app`.
 - **Code and supply chain:** CodeQL and gitleaks run weekly as well as on every PR; Dependabot opens update PRs weekly.
@@ -265,7 +265,7 @@ The owner decided on 2026-11-10 to keep SQLite with a single writer on a persist
 
 **Cost.** As recorded in [ADR 0007](decisions/0007-hosting.md) from [render.com/pricing](https://render.com/pricing), checked 2026-11-07: Starter (0.5 CPU, 512 MB) $7/month plus $0.25 per GB per month of disk, so about $7.25/month for 1 GB, before bandwidth or build-minute overage. Re-check the pricing page before approving.
 
-`render.yaml` describes the target: service `gatepass-api-durable`, Docker, Singapore, `plan: starter`, one instance, 1 GB disk `gatepass-data` at `/data`, `DATABASE_FILE=/data/gatepass.db`, health check `/api/health`, deploy on every commit to `main` (not `checksPass`, which would wait for the release check that itself waits for this service), previews off, `DEMO_MODE=false`, `ALLOW_SIGNUP=false`, secrets as `sync: false`. It validates against Render's Blueprint JSON schema. Render ignores the file until a Blueprint is created from it, and its name differs from the live `gatepass-api`, so it never touches the demo.
+`render.yaml` describes the target: service `gatepass-api-durable`, Docker, Singapore, `plan: starter`, one instance, 1 GB disk `gatepass-data` at `/data`, `DATABASE_FILE=/data/gatepass.db`, health check `/api/health`, deploy after the commit's GitHub checks pass (`checksPass`, like the live service), previews off, `DEMO_MODE=false`, `ALLOW_SIGNUP=false`, secrets as `sync: false`. It validates against Render's Blueprint JSON schema. Render ignores the file until a Blueprint is created from it, and its name differs from the live `gatepass-api`, so it never touches the demo.
 
 **Once the owner approves**, choose one path:
 
@@ -295,8 +295,7 @@ Consequences to accept:
 
 Stated plainly so nobody mistakes a plan for evidence:
 
-- The new workflows (`security.yml`, `codeql.yml`, `release-verify.yml`) and the extended `docker-run` job have not run on GitHub yet. The `docker-run` script was run locally against an image of this branch (passed); the workflows were checked with a YAML parser and `actionlint`.
-- `release-verify.yml`'s `deployment_status` trigger assumes Vercel's GitHub integration creates deployments named `Production`. Not yet observed for this repository.
+- `release-verify.yml` has not run on GitHub yet (it has no pull-request trigger); `scripts/release-check.ts` itself was run locally and read-only against production. `security.yml`, `codeql.yml` and the extended `ci.yml` ran on pull request #14.
 - `VERCEL_GIT_COMMIT_SHA` being available to the Vercel build (it is a Vercel system variable) has not been observed in a real Vercel build of this branch; until it is, `/version.json` may fall back to `git rev-parse HEAD` or `null`, and the release check fails rather than passes.
 - The production release check has only been run against the pre-branch deployment (2026-11-15): it fails as expected because that build has no `/version.json` and no `build` field in `/api/health`; the smoke checks passed.
 - Render: a rollback, a disk, the Blueprint, and backups from the Render Shell have never been exercised. Vercel: `vercel rollback` has never been exercised.

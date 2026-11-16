@@ -26,7 +26,7 @@ flowchart LR
 | `admin/AdminApp.tsx` | Sign-in form, event sidebar and hash routing (`#/events/<id>/<tab>`). Any 401 signs the admin out. |
 | `admin/EventForm.tsx` | Create or edit an event's name, venue and time window. |
 | `admin/EventDetail.tsx` | Event header with stats and the tab bar: Operations, Passes, Access, Pass design, Settings, Audit log. |
-| Setup checklist | "Set up this event" card above the tabs: create event, add gates, configure admission, issue passes, set up a scanner, begin entry. Done states come from the counts in `EventSummary` (`gateCount`, `policyCount`, `passCount`, `scannerCount`, `scanCount`). |
+| Setup checklist | "Set up this event" card above the tabs: create event, add gates, configure admission, issue passes, set up a scanner, begin entry. Done states come from the counts in `EventSummary` (`gateCount`, `policyCount`, `passCount`, `readyScannerCount`, `scanCount`); "set up a scanner" is done only when a device has claimed its setup link, not when a device was merely added (`scannerCount`). |
 | `admin/OperationsPanel.tsx` + `ScanFeed.tsx` | Live totals, alerts, timeline, per-gate and per-policy numbers, and the scan feed. Polls every 5 s (`LIVE_POLL_MS`) only while the page is visible. |
 | `admin/PassesPanel.tsx` | Pass list with status filter and search; revoke, reissue, change policy. |
 | `admin/IssueForm.tsx` | Issue passes from a list of attendees or by count, optionally under a policy. |
@@ -72,7 +72,7 @@ flowchart LR
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/health` | public | Liveness (`SELECT 1`); adds `demo: true` in demo mode. Exempt from the origin secret. |
+| GET | `/api/health` | public | Readiness: 200 only when the database is open, at this build's schema version and answers a read, otherwise 503 `{ok:false}`. Reports `signup`, `email`, `build: { commit, schema }` and `demo: true` in demo mode. Exempt from the origin secret. |
 | GET | `/p/:token` | public (60/min per IP) | Attendee pass page with QR. Read-only: opening it never redeems. |
 | GET, POST | `/api/qr/custom` | admin (120/min) | Render a QR (svg/png/pdf/eps) for design previews and setup links. |
 | POST | `/api/auth/register`, `/api/auth/login`, `/api/auth/logout`, `/api/auth/password`, `/api/auth/reset` | public / account | Accounts and cookie sessions. Register is refused with 403 unless `ALLOW_SIGNUP=true`. |
@@ -89,8 +89,10 @@ flowchart LR
 | PATCH | `/api/passes/:passId` | admin | Move an unused pass to another policy (or `null` = default). |
 | POST | `/api/passes/:passId/revoke` | admin | Revoke a pass. |
 | POST | `/api/passes/:passId/reissue` | admin | New token for the same pass; the old QR stops working. |
-| GET, POST | `/api/events/:eventId/scanners` | admin | List or create scanner devices (key returned once). |
+| GET, POST | `/api/events/:eventId/scanners` | admin | List or create scanner devices (create returns a one-time setup link, not a key). |
 | POST | `/api/scanners/:scannerId/revoke` | admin | Revoke a device. |
+| POST | `/api/scanners/:scannerId/rotate` | admin | Stop the device's key at once and return a new one-time setup link. |
+| POST | `/api/scanner/enroll` | public (60/min per IP) | Claim a one-time setup code; returns the device key once. |
 | GET | `/api/events/:eventId/scans` | admin | Scan feed, cursor `?after=<id>`. |
 | GET | `/api/events/:eventId/audit` | admin | Audit log. |
 | GET | `/api/scanner/session` | scanner (60/min per device) | Scanner label, gate and event. |
@@ -100,7 +102,7 @@ All other `/api/*` paths return 404 JSON. All `/api/*` routes except `/api/scann
 
 ## 5. Database
 
-One SQLite file, schema in `db.ts` as an append-only migration list tracked by `PRAGMA user_version` (currently version 3, which added `users`, `sessions`, `event_members`, `invitations`, `password_resets` and the event columns `status` (`draft`/`active`/`ended`/`archived`), `time_zone` and `capacity`). Every table is `STRICT` (column types are enforced), foreign keys are on and use `ON DELETE RESTRICT`. Pragmas: `journal_mode = WAL` (readers do not block the writer), `busy_timeout = 5000` (a second connection waits up to 5 s for the write lock instead of failing at once), `synchronous = FULL` (a committed redemption survives power loss).
+One SQLite file, schema in `db.ts` as an append-only migration list tracked by `PRAGMA user_version` (currently version 4. Version 3 added `users`, `sessions`, `event_members`, `invitations`, `password_resets` and the event columns `status` (`draft`/`active`/`ended`/`archived`), `time_zone` and `capacity`; version 4 added `scanner_enrollments` for one-time scanner setup links and the event-creation right `users.can_create_events`). Every table is `STRICT` (column types are enforced), foreign keys are on and use `ON DELETE RESTRICT`. Pragmas: `journal_mode = WAL` (readers do not block the writer), `busy_timeout = 5000` (a second connection waits up to 5 s for the write lock instead of failing at once), `synchronous = FULL` (a committed redemption survives power loss).
 
 ```mermaid
 erDiagram
@@ -197,7 +199,7 @@ Constraints that matter:
 
 | Control | How | Where |
 | --- | --- | --- |
-| Hashed tokens, shown once | Pass tokens and scanner keys are 32 random bytes (base64url); only `sha256` is stored. Raw values appear only in the issue/reissue/create response. | `tokens.ts`, `gatepass.ts` |
+| Hashed tokens, shown once | Pass tokens and scanner keys are 32 random bytes (base64url); only `sha256` is stored. Raw pass tokens appear only in the issue/reissue response; a scanner key is returned once, to the device that claims its one-time setup link (`POST /api/scanner/enroll`). | `tokens.ts`, `gatepass.ts` |
 | Constant-time compare | Admin token and origin secret go through `safeEqual` (SHA-256 both sides, then `timingSafeEqual`). | `tokens.ts`, `app.ts` |
 | Rate limits per device | Scanner session 60/min and redeem 240/min keyed by **scanner id**, so many gates behind one venue NAT do not share a bucket. Other API 600/min per IP, `/p` 60/min, QR 120/min. | `app.ts`, `http.ts` |
 | Failure throttle | Failed admin/scanner auth counted per client IP: after 60 failures in 5 minutes → 429 with `Retry-After`. Valid credentials are never refused. | `http.ts` `FailureThrottle` |
@@ -215,7 +217,7 @@ The `Dockerfile` is multi-stage on `node:22-bookworm-slim` (amd64 and arm64): bu
 
 **Limitation:** the live demo backend runs on Render's free tier, which has an ephemeral filesystem and cannot attach a disk. The SQLite file is lost on every redeploy, restart or idle spin-down (after 15 idle minutes), and the first request after idling takes about 50 s ([deployment-live.md](deployment-live.md)). The client copes with the cold start: after 3 s it shows "Waking up the server…", and admin sign-in waits up to 70 s.
 
-To be honest about it in the product, setting `DEMO_MODE=true` makes `/api/health` return `{ ok: true, service: 'gatepass', demo: true }`, and the admin UI then shows a dismissible banner: "Demo environment — data is erased whenever the server restarts. Do not use for a real event."
+To be honest about it in the product, setting `DEMO_MODE=true` makes `/api/health` include `demo: true`, and the admin UI then shows a dismissible banner: "Demo environment — data is erased whenever the server restarts. Do not use for a real event."
 
 Persistent options ([ADR 0007](decisions/0007-hosting.md)):
 

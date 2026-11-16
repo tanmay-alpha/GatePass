@@ -13,7 +13,7 @@ Two ways to make the data durable were compared:
 
 ## Decision
 
-**Option A.** SQLite through `node:sqlite`, exactly one process and one writer, the database file on a persistent volume mounted at `/data` (`DATABASE_FILE=/data/gatepass.db` in the image). The owner chose this on 2026-11-10 and decided not to spend money yet. On Render this means the Starter instance plus a 1 GB disk; the steps are in [deployment-runbook.md](../deployment-runbook.md#owner-approval-path-durable-storage). On the single-host path of ADR 0007 it is the `gatepass-data` Docker volume.
+**Option A.** SQLite through `node:sqlite`, exactly one process and one writer, the database file on a persistent volume mounted at `/data` (`DATABASE_FILE=/data/gatepass.db` in the image). The owner chose this on 2026-11-10 and decided not to spend money yet. On Render this means the Starter instance plus a 1 GB disk; the steps are in [deployment-runbook.md](../deployment-runbook.md#durable-switch-over). On the single-host path of ADR 0007 it is the `gatepass-data` Docker volume.
 
 What makes Option A durable in the code:
 

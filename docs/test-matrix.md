@@ -271,7 +271,7 @@ Full host details for the load tests (OS build, disk model, database pragmas, ba
 ## Not verified
 
 - **Physical devices.** Camera scanning on a real iPhone or Android phone has not been tried (no devices available). The decoder tests (`tests/scanner-detector.test.ts`) and camera tests (`tests/scanner-camera.test.ts`) use fakes and a generated frame; Playwright enters codes by hand. Use the [manual checklist](#manual-real-device-acceptance-checklist) below.
-- **GitHub-hosted runs of the new workflows.** `security.yml`, `codeql.yml` and `release-verify.yml` are new on this branch and have not run on GitHub; neither has the changed `ci.yml`. Until the PR runs, nothing here is evidence for those runners. The gitleaks scan (run S) and the release check (run RC) were run locally only.
+- **`release-verify.yml` on GitHub.** It has no pull-request trigger, so it has not run on GitHub; the release check (run RC) was run locally. `security.yml`, `codeql.yml` and the changed `ci.yml` ran on pull request #14; their results are recorded in the PR, not here.
 - **Docker on the final state.** Run D was recorded on 2026-11-15 on an earlier state of this branch; it has not been repeated on the final state.
 - **Live email delivery.** No Resend key or sending domain was available. The email paths are tested against a fake provider (`tests/account-recovery.test.ts`); no message has been sent through Resend.
 - **Durable hosting target.** The intended target (a Render instance with a persistent disk, or a VM) has never been exercised. Production still runs `4a6ba5c` (run RC).

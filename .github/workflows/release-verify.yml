@@ -2,13 +2,17 @@ name: Release verify
 # A release is complete only when scripts/release-check.ts passes against
 # production (docs/deployment-runbook.md, "Release gates").
 #
-# - deployment_status: Vercel reports a successful Production deployment; the
-#   check waits (bounded) until the frontend and the Render backend both serve
-#   that commit, then runs the nondestructive smoke checks.
-# - workflow_dispatch: the same, on demand (expected commit defaults to the
-#   head of the chosen branch).
+# - workflow_dispatch: run it once BOTH deployments report the release live
+#   (expected commit defaults to the head of the chosen branch); it waits a
+#   few minutes for a cold start, then runs the nondestructive smoke checks.
 # - schedule: synthetic check every 6 hours: health, frontend/backend commit
 #   agreement and the smoke checks, without an expected commit.
+#
+# Deliberately NOT triggered by the deployment itself: the Render service
+# deploys only after every GitHub check on the commit has passed
+# (`autoDeployTrigger: checksPass`), and a check that waits for Render to
+# serve that commit would keep Render waiting until it failed. The same
+# release check can be run from a laptop: `npx tsx scripts/release-check.ts`.
 #
 # Read-only against production: GET requests plus one unauthenticated POST
 # that the server refuses. No credentials are used.
@@ -17,7 +21,6 @@ name: Release verify
 #   GATEPASS_FRONTEND_URL  default https://gatepass-sandy.vercel.app
 #   GATEPASS_BACKEND_URL   default https://gatepass-api-mvle.onrender.com
 on:
-  deployment_status:
   workflow_dispatch:
     inputs:
       expected_commit:
@@ -38,11 +41,6 @@ permissions:
   contents: read
 jobs:
   release-check:
-    # Vercel creates GitHub deployments named "Production" and "Preview"; only
-    # successful Production deployments are checked here.
-    if: >-
-      github.event_name != 'deployment_status' ||
-      (github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -57,13 +55,11 @@ jobs:
           FRONTEND_URL: ${{ inputs.frontend_url || vars.GATEPASS_FRONTEND_URL || 'https://gatepass-sandy.vercel.app' }}
           BACKEND_URL: ${{ inputs.backend_url || vars.GATEPASS_BACKEND_URL || 'https://gatepass-api-mvle.onrender.com' }}
           EVENT_NAME: ${{ github.event_name }}
-          DEPLOYMENT_SHA: ${{ github.event.deployment.sha }}
           INPUT_COMMIT: ${{ inputs.expected_commit }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
-            deployment_status) export EXPECTED_COMMIT="$DEPLOYMENT_SHA" RELEASE_CHECK_TIMEOUT=1200 ;;
-            workflow_dispatch) export EXPECTED_COMMIT="${INPUT_COMMIT:-$GITHUB_SHA}" RELEASE_CHECK_TIMEOUT=1200 ;;
+            workflow_dispatch) export EXPECTED_COMMIT="${INPUT_COMMIT:-$GITHUB_SHA}" RELEASE_CHECK_TIMEOUT=300 ;;
             *) export RELEASE_CHECK_TIMEOUT=300 ;; # synthetic: no expected commit, allow a cold start
           esac
           # Node 24 runs the TypeScript file directly (type stripping); no npm install needed.

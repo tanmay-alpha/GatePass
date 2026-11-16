@@ -8,7 +8,7 @@ Please include the affected route or file, steps to reproduce, and the impact. O
 
 ## Threat model summary
 
-GatePass runs as a single instance. Organizers sign in with individual accounts and work on events through event roles (owner, manager); platform admins manage accounts; an operator break-glass token exists for API-only recovery. The full threat model, with the role matrix, mitigations, tests, the security review findings and outstanding risks, is in [docs/security-and-threat-model.md](docs/security-and-threat-model.md); the user-facing summary is [README.md#security-model](README.md#security-model). In short:
+GatePass runs as a single instance. Organizers sign in with individual accounts and work on events through event roles (owner, manager); platform admins manage accounts; an operator break-glass token exists for API-only recovery. The full threat model, with the role matrix, mitigations, tests, the security review findings and outstanding risks, is in [docs/security-and-threat-model.md](docs/security-and-threat-model.md); the README lists the [known limitations](README.md#known-limitations). In short:
 
 | Asset | Protection |
 | --- | --- |
