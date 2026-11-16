@@ -33,7 +33,7 @@ import { SCHEMA_VERSION, schemaVersion, transaction, type Database } from './db'
 import { PassDeliveries } from './deliveries';
 import { httpError } from './http';
 import type { Mailer } from './mailer';
-import { operationsSummary } from './operations';
+import { OperationsMemo, operationsSummary } from './operations';
 import { ROLE_PERMISSIONS, type Principal } from './permissions';
 import { AccessControl } from './policies';
 import { EventTemplates } from './templates';
@@ -127,6 +127,7 @@ export class GatePass {
   readonly templates: EventTemplates;
   readonly assist: AttendeeAssist;
   readonly deliveries: PassDeliveries;
+  private readonly operationsMemo: OperationsMemo;
   private readonly now: () => Date;
   private readonly newToken: () => string;
   private readonly publicUrl: string;
@@ -141,6 +142,7 @@ export class GatePass {
     this.access = new AccessControl(db, () => this.timestamp());
     this.accounts = new Accounts(db, { now: this.now, publicUrl: this.publicUrl, generateToken: this.newToken, mailer: options.mailer });
     this.templates = new EventTemplates(db, { access: this.access, accounts: this.accounts, now: this.now, getEvent: (id) => this.getEvent(id) });
+    this.operationsMemo = new OperationsMemo(db);
     this.assist = new AttendeeAssist(db, this.access, this.now);
     this.deliveries = new PassDeliveries(db, {
       now: this.now,
@@ -701,8 +703,10 @@ export class GatePass {
     }));
   }
 
+  /** Served from a ≤2 s per-event memo (see `OperationsMemo`); the caller has already authorized the event. */
   operations(eventId: string): OperationsSummary {
-    return operationsSummary(this.db, this.access, this.getEvent(eventId), this.now());
+    const now = this.now();
+    return this.operationsMemo.get(eventId, now, () => operationsSummary(this.db, this.access, this.getEvent(eventId), now));
   }
 
   listAudit(eventId: string, query: AuditQuery = {}): AuditEntry[] {

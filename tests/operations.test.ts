@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { transaction } from '../src/server/db';
-import { operationsSummary } from '../src/server/operations';
+import { ALERT_RULES, OPERATIONS_MEMO_MS, operationsSummary } from '../src/server/operations';
 import { hashToken } from '../src/server/tokens';
 import type { OperationsSummary } from '../src/shared/types';
 import { createHarness, enroll, EVENT_INPUT, scan, type Harness } from './helpers';
@@ -101,6 +101,8 @@ describe('operations dashboard aggregates', () => {
     h.clock.advance(61 * MINUTE);
     const later = await ops(event.id);
     expect(later.alerts.some((alert) => alert.kind === 'invalid_burst')).toBe(false);
+    // VIP 1's two gates (18:30) are older than the 60-minute pattern window now.
+    expect(later.alerts.some((alert) => alert.kind === 'multi_gate')).toBe(false);
     expect(later.recent.buckets.every((b) => b.admitted + b.denied === 0)).toBe(true);
   });
 
@@ -158,6 +160,58 @@ describe('operations dashboard aggregates', () => {
     expect(empty.recent.buckets).toHaveLength(12);
     expect(empty.completion).toBeNull();
   });
+
+  it('reports repeated duplicates and multi-gate passes for scans inside the pattern window only', async () => {
+    const { event, n, s } = await scenario();
+    // VIP 0: admitted at North at 18:30 and never scanned again.
+    const { pass_id: vip0 } = h.db
+      .prepare("SELECT pass_id FROM scans WHERE scanner_id = ? AND outcome = 'admitted' AND pass_id NOT IN (SELECT pass_id FROM scans WHERE outcome <> 'admitted' AND pass_id IS NOT NULL)")
+      .get(n.id) as { pass_id: string };
+    // Presented twice more at South at 18:49 and 18:50.
+    const duplicate = h.db.prepare(
+      "INSERT INTO scans (event_id, scanner_id, gate_id, pass_id, outcome, created_at) VALUES (?, ?, (SELECT gate_id FROM scanners WHERE id = ?), ?, 'already_redeemed', ?)"
+    );
+    for (const at of ['2030-06-01T18:49:00.000Z', '2030-06-01T18:50:00.000Z']) duplicate.run(event.id, s.id, s.id, vip0, at);
+    const alertsFor = (iso: string) =>
+      operationsSummary(h.db, h.service.access, h.service.getEvent(event.id), new Date(iso))
+        .alerts.filter((alert) => alert.passId === vip0)
+        .map((alert) => [alert.kind, alert.count]);
+
+    expect(alertsFor('2030-06-01T18:50:00.000Z').sort()).toEqual([
+      ['multi_gate', 2],
+      ['repeated_duplicate', 2]
+    ]);
+    // 19:30 still includes 18:30 (the window is inclusive); at 19:31 the North admission has left it, both South duplicates have not.
+    expect(alertsFor('2030-06-01T19:30:00.000Z').sort()).toEqual([
+      ['multi_gate', 2],
+      ['repeated_duplicate', 2]
+    ]);
+    expect(alertsFor('2030-06-01T19:31:00.000Z')).toEqual([['repeated_duplicate', 2]]);
+    // 19:49:30: only the 18:50 duplicate is inside, and one is not a pattern.
+    expect(alertsFor('2030-06-01T19:49:30.000Z')).toEqual([]);
+    expect(ALERT_RULES.patternWindowMinutes).toBe(60);
+  });
+
+  it('memoizes the summary per event for up to 2 s, but recomputes at once after an admin change', async () => {
+    const { event, n } = await scenario();
+    const first = await ops(event.id);
+    // Issuing passes writes an audit row for the event: recomputed immediately.
+    const extra = await post(`/api/events/${event.id}/passes`, { count: 1 });
+    const afterIssue = await ops(event.id);
+    expect(afterIssue.passes.issued).toBe(first.passes.issued + 1);
+    // A scan does not invalidate: the same summary (same generatedAt) is served until the memo expires.
+    await scan(h, n.key, extra[0].token).expect(200);
+    expect(await ops(event.id)).toEqual(afterIssue);
+    h.clock.advance(OPERATIONS_MEMO_MS - 1);
+    expect((await ops(event.id)).generatedAt).toBe(afterIssue.generatedAt);
+    h.clock.advance(1);
+    const fresh = await ops(event.id);
+    expect(fresh.generatedAt).not.toBe(afterIssue.generatedAt);
+    expect(fresh.totals.admitted).toBe(afterIssue.totals.admitted + 1);
+    // A lifecycle change shows at once, without waiting for the memo.
+    await h.admin(api().patch(`/api/events/${event.id}`)).send({ status: 'ended' }).expect(200);
+    expect((await ops(event.id)).phase).toBe('finished');
+  });
 });
 
 describe('operations dashboard at scale', () => {
@@ -197,19 +251,23 @@ describe('operations dashboard at scale', () => {
     const event = h.service.getEvent(created.id);
 
     // Capture every statement the dashboard runs, with its parameters, while live (20:30) and once finished (23:30).
-    const statements: Array<{ sql: string; params: unknown[] }> = [];
+    const statements: Array<{ sql: string; params: unknown[]; ms: number; at: 'live' | 'finished' }> = [];
+    let phase: 'live' | 'finished' = 'live';
     const prepare = h.db.prepare.bind(h.db);
     h.db.prepare = ((sql: string) => {
       const statement = prepare(sql);
       const record =
         (method: 'all' | 'get') =>
         (...params: never[]) => {
-          statements.push({ sql, params });
-          return method === 'all' ? statement.all(...params) : statement.get(...params);
+          const started = performance.now();
+          const result = method === 'all' ? statement.all(...params) : statement.get(...params);
+          statements.push({ sql, params, ms: performance.now() - started, at: phase });
+          return result;
         };
       return { all: record('all'), get: record('get') };
     }) as typeof h.db.prepare;
     const live = operationsSummary(h.db, h.service.access, event, new Date('2030-06-01T20:30:00.000Z'));
+    phase = 'finished';
     const finished = operationsSummary(h.db, h.service.access, event, new Date('2030-06-01T23:30:00.000Z'));
     h.db.prepare = prepare;
 
@@ -230,20 +288,34 @@ describe('operations dashboard at scale', () => {
     }
     const recent = plans.find((entry) => entry.sql.includes("strftime('%s'"))!;
     expect(recent.plan.join('\n')).toMatch(/SEARCH scans USING (COVERING )?INDEX scans_alerts_idx \(event_id=\? AND outcome=\? AND created_at>\?\)/);
+    const slowest = statements
+      .filter((entry) => entry.at === 'live')
+      .sort((a, b) => b.ms - a.ms)
+      .slice(0, 6)
+      .map((entry) => ({ ms: Math.round(entry.ms * 10) / 10, sql: entry.sql.replace(/\s+/g, ' ').slice(0, 70) }));
+    console.info(JSON.stringify({ msg: 'operations statements (live, first run)', slowest }));
 
-    const median = (at: string) => {
+    /** Median of 5 calls through the service; `fresh` moves the clock past the memo each time, so every call recomputes. */
+    const median = (at: string, fresh: boolean) => {
       h.clock.current = new Date(at);
+      h.service.operations(created.id);
       const runs: number[] = [];
       for (let i = 0; i < 5; i += 1) {
+        if (fresh) h.clock.advance(OPERATIONS_MEMO_MS);
         const started = performance.now();
         h.service.operations(created.id);
         runs.push(performance.now() - started);
       }
-      return Math.round(runs.sort((a, b) => a - b)[2] * 10) / 10;
+      return Math.round(runs.sort((a, b) => a - b)[2] * 100) / 100;
     };
-    const timings = { liveMedianMs: median('2030-06-01T20:30:00.000Z'), finishedMedianMs: median('2030-06-01T23:30:00.000Z') };
+    const timings = {
+      liveMedianMs: median('2030-06-01T20:30:00.000Z', true),
+      finishedMedianMs: median('2030-06-01T23:30:00.000Z', true),
+      memoHitMedianMs: median('2030-06-01T20:30:00.000Z', false)
+    };
     console.info(JSON.stringify({ msg: 'operations timing', passes: 10_000, scans: 10_000, ...timings }));
-    // Generous ceiling for slow CI machines; the dashboard polls every 5 s.
+    // Generous ceilings for slow CI machines; the dashboard polls every 5 s.
     expect(Math.max(timings.liveMedianMs, timings.finishedMedianMs)).toBeLessThan(1_000);
+    expect(timings.memoHitMedianMs).toBeLessThan(timings.liveMedianMs);
   });
 });

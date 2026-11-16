@@ -30,7 +30,9 @@ During an event the operations tab showed totals, a 15-minute timeline and suspi
 - `completion` once finished: attendance, no-shows, first and last admission, busiest 5 minutes, denials with the top reason, devices and gates used.
 - `device_idle` alerts: a device that was in contact and has been silent (no scan, no heartbeat) for `SCANNER_IDLE_MINUTES` (10) **while the doors are open**. A device never set up is shown in the device list, not raised as an alert.
 
-Invalid-code bursts keep the existing rule (5 invalid or wrong-event codes from one device within 10 minutes).
+Invalid-code bursts keep the existing rule (5 invalid or wrong-event codes from one device within 10 minutes). Repeated duplicates and passes seen at several gates are reported for scans in the last 60 minutes (`ALERT_RULES.patternWindowMinutes`), so their cost follows recent traffic instead of the event's whole scan history; both group the windowed scans before looking up attendee names.
+
+The summary is memoized per event for 2 s (`OperationsMemo`, `OPERATIONS_MEMO_MS`). Scans do not invalidate it (that is the load it absorbs when several dashboards poll a busy door); any admin write does, because every one writes an audit row and the newest audit id per event is one seek on `audit_event_idx`. `generatedAt` is the time the summary was computed, so the client's stale indicator stays truthful.
 
 Every query reads the existing indexes; no index was added. The recent-activity query names every stored outcome so SQLite seeks `scans_alerts_idx (event_id, outcome, created_at)` once per outcome instead of reading the event's whole scan history. `tests/operations.test.ts` asserts with `EXPLAIN QUERY PLAN` that no dashboard statement scans `scans`, `passes`, `redemptions` or `audit_log` without an index on a synthetic event with 10 000 passes and 10 000 scans, and records the timing.
 
@@ -41,7 +43,7 @@ The admin panel keeps the 5-second visible-tab polling and adds a status bar: do
 - Templates add no attack surface for credentials: the schema cannot carry them and the save path never reads them. Isolation is by `owner_id` in every query, tested for list, use, delete and save.
 - A template saved by a manager belongs to the manager, not to the event owner.
 - Built-ins change with the code; saved templates are versioned (`version: 1`) so a later format can migrate or refuse them explicitly.
-- The dashboard does more work per poll (four more small queries; three more once finished). Measured median on the 10k-pass synthetic event: see the test output (`operations timing`).
+- The dashboard does more work per computed poll (four more small queries; three more once finished), and at most one computation per event every 2 s while only scans change. On the 10k-pass synthetic event (`tests/operations.test.ts`, `operations timing`, this laptop): computed summary through the service 55–67 ms before the alert bounds, 47–53 ms after (multi-gate alert 12–14 ms → 4.7–5.8 ms; repeated-duplicate 2.4–3.3 ms → under 1.6 ms); a memo hit costs 0.01–0.02 ms.
 
 ## Alternatives considered
 

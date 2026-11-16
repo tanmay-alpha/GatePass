@@ -6,11 +6,45 @@ import type { AccessControl } from './policies';
 export const ALERT_RULES = {
   /** A pass rejected as already used this many times suggests a shared screenshot. */
   repeatedDuplicates: 2,
+  /** Repeated duplicates and passes seen at several gates are reported for scans in this window. */
+  patternWindowMinutes: 60,
   /** Invalid codes from one device within the window suggest probing or a broken printout. */
   invalidBurst: { count: 5, windowMinutes: 10 },
   /** Capacity usage ratio that raises a warning. */
   capacityNear: 0.9
 } as const;
+
+/** How long a computed summary is served again: dashboards poll every 5 s, so ≤2 s old data is still fresh. */
+export const OPERATIONS_MEMO_MS = 2_000;
+
+/**
+ * Per-event memo of the dashboard summary. Several dashboards polling one
+ * busy event would otherwise each rerun every aggregate while the door is
+ * redeeming. Scans never invalidate it (that is the load it absorbs: admissions
+ * show within `OPERATIONS_MEMO_MS`), but every admin write to the event does,
+ * because each one writes an audit row: the newest audit id for the event is
+ * one seek on `audit_event_idx`. `generatedAt` stays the time the summary was
+ * computed, so the client's stale indicator remains truthful.
+ */
+export class OperationsMemo {
+  private readonly entries = new Map<string, { at: number; auditId: number; summary: OperationsSummary }>();
+
+  constructor(
+    private readonly db: Database,
+    private readonly ttlMs = OPERATIONS_MEMO_MS
+  ) {}
+
+  get(eventId: string, now: Date, compute: () => OperationsSummary): OperationsSummary {
+    const auditId = Number((this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_log WHERE event_id = ?').get(eventId) as Row).id);
+    const at = now.getTime();
+    const cached = this.entries.get(eventId);
+    if (cached && cached.auditId === auditId && at >= cached.at && at - cached.at < this.ttlMs) return cached.summary;
+    const summary = compute();
+    for (const [id, entry] of this.entries) if (at - entry.at >= this.ttlMs) this.entries.delete(id);
+    this.entries.set(eventId, { at, auditId, summary });
+    return summary;
+  }
+}
 
 const BUCKET_SQL = `strftime('%Y-%m-%dT%H:', created_at) || printf('%02d', (CAST(strftime('%M', created_at) AS INTEGER) / 15) * 15) || ':00.000Z'`;
 
@@ -204,6 +238,9 @@ function completion(
  */
 function alerts(db: Database, eventId: string, policies: OperationsSummary['policies'], liveScanners: OperationsSummary['scanners'], now: Date): OperationsAlert[] {
   const result: OperationsAlert[] = [];
+  // Bounded by time so the cost follows recent traffic, not the event's whole scan history.
+  const patternSince = new Date(now.getTime() - ALERT_RULES.patternWindowMinutes * 60_000).toISOString();
+  const patternWindow = `in the last ${ALERT_RULES.patternWindowMinutes} minutes`;
 
   for (const scanner of liveScanners) {
     if (scanner.state !== 'idle' || !scanner.lastUsedAt) continue;
@@ -218,38 +255,42 @@ function alerts(db: Database, eventId: string, policies: OperationsSummary['poli
     });
   }
 
+  // Group the windowed scans first and look up names only for the (few) passes that form a pattern.
   for (const row of db
     .prepare(
-      `SELECT s.pass_id, p.attendee_name, COUNT(*) AS n, MAX(s.created_at) AS last_at
-       FROM scans s JOIN passes p ON p.id = s.pass_id
-       WHERE s.event_id = ? AND s.outcome = 'already_redeemed'
-       GROUP BY s.pass_id HAVING n >= ? ORDER BY n DESC LIMIT 20`
+      `SELECT d.pass_id, p.attendee_name, d.n, d.last_at
+       FROM (SELECT pass_id, COUNT(*) AS n, MAX(created_at) AS last_at FROM scans
+             WHERE event_id = ? AND outcome = 'already_redeemed' AND created_at >= ? AND pass_id IS NOT NULL
+             GROUP BY pass_id HAVING n >= ? ORDER BY n DESC LIMIT 20) d
+       JOIN passes p ON p.id = d.pass_id ORDER BY d.n DESC`
     )
-    .all(eventId, ALERT_RULES.repeatedDuplicates) as Row[]) {
+    .all(eventId, patternSince, ALERT_RULES.repeatedDuplicates) as Row[]) {
     const who = (row.attendee_name as string | null) ?? `pass ${(row.pass_id as string).slice(0, 8)}`;
     result.push({
       kind: 'repeated_duplicate',
       severity: 'warning',
-      message: `${who}: presented ${row.n} more times after entry (possible shared screenshot)`,
+      message: `${who}: presented ${row.n} more times after entry ${patternWindow} (possible shared screenshot)`,
       count: Number(row.n),
       lastAt: row.last_at as string,
       passId: row.pass_id as string
     });
   }
 
+  // Naming every outcome lets the time bound seek scans_alerts_idx once per outcome.
   for (const row of db
     .prepare(
-      `SELECT s.pass_id, p.attendee_name, COUNT(DISTINCT s.gate_id) AS gates, COUNT(*) AS n, MAX(s.created_at) AS last_at
-       FROM scans s JOIN passes p ON p.id = s.pass_id
-       WHERE s.event_id = ? AND s.gate_id IS NOT NULL
-       GROUP BY s.pass_id HAVING gates >= 2 ORDER BY last_at DESC LIMIT 20`
+      `SELECT m.pass_id, p.attendee_name, m.gates, m.n, m.last_at
+       FROM (SELECT pass_id, COUNT(DISTINCT gate_id) AS gates, COUNT(*) AS n, MAX(created_at) AS last_at FROM scans
+             WHERE event_id = ? AND outcome IN (${ALL_OUTCOMES_SQL}) AND created_at >= ? AND gate_id IS NOT NULL AND pass_id IS NOT NULL
+             GROUP BY pass_id HAVING gates >= 2 ORDER BY last_at DESC LIMIT 20) m
+       JOIN passes p ON p.id = m.pass_id ORDER BY m.last_at DESC`
     )
-    .all(eventId) as Row[]) {
+    .all(eventId, patternSince) as Row[]) {
     const who = (row.attendee_name as string | null) ?? `pass ${(row.pass_id as string).slice(0, 8)}`;
     result.push({
       kind: 'multi_gate',
       severity: 'info',
-      message: `${who}: scanned at ${row.gates} different gates`,
+      message: `${who}: scanned at ${row.gates} different gates ${patternWindow}`,
       count: Number(row.gates),
       lastAt: row.last_at as string,
       passId: row.pass_id as string
