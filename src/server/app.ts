@@ -855,7 +855,7 @@ export function createApp({
         }
       })
     );
-    app.get('/{*path}', (_req, res) => res.sendFile(path.join(root, 'index.html')));
+    app.get('/{*path}', limit(600), (_req, res) => res.sendFile(path.join(root, 'index.html')));
   }
 
   app.use(errorHandler);

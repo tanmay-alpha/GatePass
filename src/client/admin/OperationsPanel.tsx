@@ -473,7 +473,7 @@ function Gates({ gates, zone }: { gates: OperationsSummary['gates']; zone: strin
   return (
     <section className="card" aria-labelledby="gates-ops-title">
       <SectionHead id="gates-ops-title" title="Admissions by gate" />
-      <div className="table-wrap">
+      <div className="table-wrap" tabIndex={0} role="region" aria-labelledby="gates-ops-title">
         <table>
           <thead>
             <tr>
