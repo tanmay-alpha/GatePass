@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ScannerEnrollResult, ScannerSession } from '../../shared/types';
 import { api, ApiError, WAKING_MESSAGE } from '../api';
 import { ErrorNote, errorMessage } from '../ui';
+import { registerScannerWorker } from './pwa';
 import { ScannerStation } from './ScannerStation';
 import './scanner.css';
 
@@ -138,11 +139,16 @@ export function ScannerApp() {
     };
   }, [code, attempt]);
 
+  useEffect(registerScannerWorker, []);
+
+  /** The app is running but the server did not answer: no pass can be verified. */
+  const [unreachable, setUnreachable] = useState(false);
   useEffect(() => {
     if (!key || code || session) return;
     let live = true;
     setError('');
     setSlow(false);
+    setUnreachable(false);
     api<ScannerSession>('/api/scanner/session', { bearer: key, timeoutMs: SESSION_TIMEOUT_MS, onSlow: () => live && setSlow(true) })
       .then((value) => {
         if (live) setSession(value);
@@ -152,8 +158,10 @@ export function ScannerApp() {
         if (err instanceof ApiError && err.status === 401) {
           signOut();
           setError('This scanner key is not valid or has been revoked. Ask the organiser for a new setup link.');
-        } else if (err instanceof ApiError && err.status === 0) setError(err.message);
-        else setError(`Could not reach the server: ${errorMessage(err)}`);
+        } else if (err instanceof ApiError && err.status === 0) {
+          setError(err.message);
+          setUnreachable(true);
+        } else setError(`Could not reach the server: ${errorMessage(err)}`);
       })
       .finally(() => {
         if (live) setSlow(false);
@@ -207,6 +215,11 @@ export function ScannerApp() {
         {error ? (
           <div className="card login-card">
             <ErrorNote message={error} />
+            {unreachable && !code ? (
+              <p className="muted small" role="status">
+                {navigator.onLine ? 'App loaded' : 'App loaded (offline copy)'}. Server verification unavailable: scanning starts when the server answers. Do not admit anyone meanwhile.
+              </p>
+            ) : null}
             <button className="btn btn-primary" onClick={() => setAttempt((n) => n + 1)}>
               Try again
             </button>

@@ -22,8 +22,10 @@ import type {
   ScannerSetupLink,
   StoredScanOutcome
 } from '../shared/types';
+import { isDiagnosticPayload } from '../shared/diagnostic';
 import { Accounts } from './accounts';
 import { evaluateAdmission } from './admission';
+import { AttendeeAssist } from './assist';
 import { listAudit, recordAudit } from './audit';
 import { toCsv } from './csv';
 import { SCHEMA_VERSION, schemaVersion, transaction, type Database } from './db';
@@ -115,6 +117,7 @@ export class GatePass {
   readonly access: AccessControl;
   readonly accounts: Accounts;
   readonly templates: EventTemplates;
+  readonly assist: AttendeeAssist;
   private readonly now: () => Date;
   private readonly newToken: () => string;
   private readonly publicUrl: string;
@@ -129,6 +132,7 @@ export class GatePass {
     this.access = new AccessControl(db, () => this.timestamp());
     this.accounts = new Accounts(db, { now: this.now, publicUrl: this.publicUrl, generateToken: this.newToken, mailer: options.mailer });
     this.templates = new EventTemplates(db, { access: this.access, accounts: this.accounts, now: this.now, getEvent: (id) => this.getEvent(id) });
+    this.assist = new AttendeeAssist(db, this.access, this.now);
   }
 
   passUrl(token: string): string {
@@ -553,7 +557,8 @@ export class GatePass {
     return {
       scanner: { id: scanner.id, label: scanner.label },
       gate,
-      event: { id: event.id, name: event.name, venue: event.venue, timeZone: event.timeZone, startsAt: event.startsAt, endsAt: event.endsAt, status: event.status }
+      event: { id: event.id, name: event.name, venue: event.venue, timeZone: event.timeZone, startsAt: event.startsAt, endsAt: event.endsAt, status: event.status },
+      serverTime: now
     };
   }
 
@@ -754,8 +759,12 @@ export class GatePass {
 
   // ---------------------------------------------------------------- internals
 
-  /** Pass for a scanned value: full URL or token (any event), or an 8-character reference resolved only within the scanner's event. */
+  /**
+   * Pass for a scanned value: full URL or token (any event), or an 8-character reference resolved only within the scanner's event.
+   * A camera test code (`gatepass:diagnostic:…`) is never a pass, whatever follows the prefix.
+   */
   private findScannedPass(eventId: string, code: string): Row | undefined {
+    if (isDiagnosticPayload(code)) return undefined;
     const token = extractPassToken(code);
     if (token) return this.db.prepare(`SELECT ${PASS_COLUMNS} ${PASS_FROM} WHERE p.token_hash = ?`).get(hashToken(token)) as Row | undefined;
     const reference = code.trim();

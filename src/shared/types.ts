@@ -326,6 +326,31 @@ export interface ScannerSession {
   scanner: { id: string; label: string };
   gate: { id: string; name: string } | null;
   event: { id: string; name: string; venue: string | null; timeZone: string; startsAt: string; endsAt: string; status: EventStatus };
+  /** Server clock when the session was read; the readiness check judges the entry window and device clock skew against it. */
+  serverTime: string;
+}
+
+/** One pass found by the door's attendee search (`GET /api/scanner/attendees`). Never carries a token or a full email address. */
+export interface AttendeeMatch {
+  /** The 8-character reference printed under the QR code; "Admit" sends it through the normal redeem endpoint. */
+  reference: string;
+  attendeeName: string | null;
+  /** Masked email (`a***@e***.com`) to tell namesakes apart. */
+  emailHint: string | null;
+  status: PassStatus;
+  redeemedAt: string | null;
+  redeemedAtGate: string | null;
+  policyName: string | null;
+  /** What a scan at this device would say right now. Advisory only: the redeem answer is authoritative. */
+  check: { admit: true } | { admit: false; outcome: ScanOutcome; detail?: ScanResult['detail'] };
+  /** Another pass of this event shares the reference, so it cannot be admitted by reference: scan the QR or open the pass link. */
+  ambiguous: boolean;
+}
+
+export interface AttendeeSearch {
+  matches: AttendeeMatch[];
+  /** More passes matched than are shown: refine the search. */
+  more: boolean;
 }
 
 /** `device_idle`: an unrevoked scanner has been silent (no scan or heartbeat) while the event is live. */

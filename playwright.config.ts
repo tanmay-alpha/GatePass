@@ -33,14 +33,18 @@ export default defineConfig({
   // A deployed instance adds network and cold-start latency (e.g. a free Render instance).
   expect: { timeout: deployed ? 20_000 : 5_000 },
   use: {
-    baseURL: BASE_URL
+    baseURL: BASE_URL,
+    // The scanner registers a service worker (public/sw.js). page.route cannot see requests from
+    // pages it controls in every browser (WebKit), so specs that inject network failures run without
+    // it; e2e/scanner-readiness.spec.ts allows it to test the offline app shell.
+    serviceWorkers: 'block'
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'], ...from('10.64.0.1') } },
     { name: 'firefox', use: { ...devices['Desktop Firefox'], ...from('10.64.0.2') } },
     { name: 'webkit', use: { ...devices['Desktop Safari'], ...from('10.64.0.3') } },
-    // Phone-sized admin: the guided first-event flow must work at phone width.
-    { name: 'mobile-chrome', use: { ...devices['Pixel 7'], ...from('10.64.0.4') }, testMatch: /onboarding\.spec\.ts$/ }
+    // Phone-sized admin: the guided first-event flow must work at phone width; the door scanner's readiness check and attendee help on a phone.
+    { name: 'mobile-chrome', use: { ...devices['Pixel 7'], ...from('10.64.0.4') }, testMatch: /(onboarding|scanner-readiness)\.spec\.ts$/ }
   ],
   webServer: deployed
     ? undefined

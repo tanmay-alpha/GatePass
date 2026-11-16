@@ -8,6 +8,7 @@ import { CopyField } from './CopyField';
 import { LIVE_POLL_MS, usePolling, useResource } from './hooks';
 import { adminApi, adminQrUrl } from './http';
 import { can } from './model';
+import { ScannerTestCode } from './ScannerTestCode';
 import { useToast } from './toast';
 
 interface Setup {
@@ -214,6 +215,7 @@ export function ScannersSection({ event, gates, onChanged }: { event: EventSumma
             </tbody>
           </table>
         </div>
+        <ScannerTestCode />
         {dialog}
       </section>
       {setup ? <ScannerSetup {...setup} onClose={() => setSetup(null)} /> : null}

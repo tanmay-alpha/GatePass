@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { renderQr } from '../qr/renderer';
 import type { AccountUser, DesignConfig, EventPermission, SessionInfo } from '../shared/types';
 import { SESSION_ABSOLUTE_MS } from './accounts';
+import { attendeeQuerySchema } from './assist';
 import type { AuthenticatedScanner, GatePass } from './gatepass';
 import { bearerToken, errorHandler, FailureThrottle, httpError, type Middleware, rateLimit } from './http';
 import { renderPassPage } from './pass-page';
@@ -800,6 +801,12 @@ export function createApp({
     res.json(service.redeem(scannerOf(res), input.code, input.requestId));
   });
 
+  // Door assistance for a lost or unreadable QR code (src/server/assist.ts): own event only, masked emails,
+  // never tokens. Admitting goes through /api/scanner/redeem with the reference. Limited per device.
+  app.get('/api/scanner/attendees', requireScanner, limit(30, (_req, res) => `scanner-assist:${scannerOf(res).id}`), (req, res) => {
+    res.json(service.assist.search(scannerOf(res), attendeeQuerySchema.parse(req.query).q));
+  });
+
   app.use('/api', (_req, _res, next) => next(httpError(404, 'Not found')));
 
   // ------------------------------------------------------------ SPA
@@ -807,7 +814,17 @@ export function createApp({
   if (clientDir && existsSync(path.join(clientDir, 'index.html'))) {
     const root = path.resolve(clientDir);
     // version.json names the deployed commit for release checks; it must never be served from a cache.
-    app.use(express.static(root, { index: false, setHeaders: (res, file) => path.basename(file) === 'version.json' && res.setHeader('Cache-Control', 'no-store') }));
+    // The scanner's service worker and manifest are revalidated on every load, so a fixed release reaches door phones at once.
+    const fresh: Record<string, string> = { 'version.json': 'no-store', 'sw.js': 'no-cache', 'manifest.webmanifest': 'no-cache' };
+    app.use(
+      express.static(root, {
+        index: false,
+        setHeaders: (res, file) => {
+          const policy = path.dirname(file) === root ? fresh[path.basename(file)] : undefined;
+          if (policy) res.setHeader('Cache-Control', policy);
+        }
+      })
+    );
     app.get('/{*path}', (_req, res) => res.sendFile(path.join(root, 'index.html')));
   }
 
