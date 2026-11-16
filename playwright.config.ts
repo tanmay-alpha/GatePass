@@ -43,8 +43,8 @@ export default defineConfig({
     { name: 'chromium', use: { ...devices['Desktop Chrome'], ...from('10.64.0.1') } },
     { name: 'firefox', use: { ...devices['Desktop Firefox'], ...from('10.64.0.2') } },
     { name: 'webkit', use: { ...devices['Desktop Safari'], ...from('10.64.0.3') } },
-    // Phone-sized admin: the guided first-event flow must work at phone width; the door scanner's readiness check and attendee help on a phone.
-    { name: 'mobile-chrome', use: { ...devices['Pixel 7'], ...from('10.64.0.4') }, testMatch: /(onboarding|scanner-readiness)\.spec\.ts$/ }
+    // Phone-sized admin: the guided first-event flow must work at phone width; the door scanner's readiness check, setup retry and attendee help on a phone.
+    { name: 'mobile-chrome', use: { ...devices['Pixel 7'], ...from('10.64.0.4') }, testMatch: /(onboarding|scanner-readiness|enroll-retry)\.spec\.ts$/ }
   ],
   webServer: deployed
     ? undefined

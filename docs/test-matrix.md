@@ -292,7 +292,7 @@ Full host details for the load tests (OS build, disk model, database pragmas, ba
 - **Durable hosting target.** A Render instance with a persistent disk, or a VM, has never been exercised; the container rehearsal (D4) used a local Docker volume. Production still runs the free demo (`demo: true`, RC4).
 - **Load on a hosted instance.** All performance numbers are from the laptop. No hosted instance has been load-tested.
 - **SIGTERM on Windows.** Windows has no catchable SIGTERM for a child process, so the graceful-stop tests are skipped there; they run on Linux (R4, CI).
-- **Client path of the setup retry (SA2-3).** The server side is tested; the scanner's `pendingEnrollment` resend has no automated browser test.
+- **Client path of the setup retry (SA2-3)** is covered by `e2e/enroll-retry.spec.ts` (4 tests × chromium, firefox, webkit, mobile-chrome: 16/16, twice) in emulation only.
 
 ## Manual real-device acceptance checklist
 
