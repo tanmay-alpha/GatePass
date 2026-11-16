@@ -205,3 +205,64 @@ describe('diagnostic test codes', () => {
     expect(session.event).toMatchObject({ status: 'active', startsAt: '2030-06-01T18:00:00.000Z' });
   });
 });
+
+describe('scan method (camera, manual, lookup)', () => {
+  const redeem = (key: string, body: Record<string, unknown>) => request(h.app).post('/api/scanner/redeem').set('Authorization', `Bearer ${key}`).send(body);
+  const feed = async (eventId: string) =>
+    ((await h.admin(request(h.app).get(`/api/events/${eventId}/scans`)).expect(200)).body as Array<{ passId: string; outcome: string; method: string | null }>).map((s) => [
+      s.passId,
+      s.outcome,
+      s.method
+    ]);
+
+  it('is stored on the scan row, listed in the feed and exported; absent means null', async () => {
+    const { event, scannerKey, passes } = await seedEvent(h, 4);
+    await redeem(scannerKey, { code: passes[0].passUrl, method: 'camera' }).expect(200);
+    await redeem(scannerKey, { code: passes[1].token, method: 'manual' }).expect(200);
+    await redeem(scannerKey, { code: reference(passes[2]), method: 'lookup' }).expect(200);
+    await redeem(scannerKey, { code: passes[3].passUrl }).expect(200);
+    expect(await feed(event.id)).toEqual([
+      [passes[3].id, 'admitted', null],
+      [passes[2].id, 'admitted', 'lookup'],
+      [passes[1].id, 'admitted', 'manual'],
+      [passes[0].id, 'admitted', 'camera']
+    ]);
+    const csv = (await h.admin(request(h.app).get(`/api/events/${event.id}/exports/scans.csv`)).expect(200)).text.trim().split(/\r?\n/);
+    expect(csv[0].split(',').at(-1)).toBe('method');
+    expect(csv.slice(1).map((line) => line.split(',').at(-1))).toEqual(['camera', 'manual', 'lookup', '']);
+  });
+
+  it('rejects an unknown method with 400 and records nothing', async () => {
+    const { event, scannerKey, passes } = await seedEvent(h, 1);
+    for (const method of ['override', 'LOOKUP', '', 1, null]) {
+      expect((await redeem(scannerKey, { code: passes[0].passUrl, method }).expect(400)).body.error).toMatch(/^method: /);
+    }
+    expect(await feed(event.id)).toEqual([]);
+    // The database refuses it too, for callers that skip the route's validation.
+    const scanner = h.service.authenticateScanner(scannerKey)!;
+    expect(() => h.service.redeem(scanner, passes[0].passUrl, undefined, 'override' as never)).toThrow(/CHECK constraint/);
+    expect((await h.admin(request(h.app).get(`/api/events/${event.id}`)).expect(200)).body.redeemedCount).toBe(0);
+  });
+
+  it('a replayed request keeps the method of the first attempt', async () => {
+    const { event, scannerKey, passes } = await seedEvent(h, 1);
+    const first = (await redeem(scannerKey, { code: passes[0].passUrl, requestId: 'retry-0001', method: 'camera' }).expect(200)).body;
+    const again = (await redeem(scannerKey, { code: passes[0].passUrl, requestId: 'retry-0001', method: 'manual' }).expect(200)).body;
+    expect(again).toMatchObject({ outcome: 'admitted', replayed: true, scanId: first.scanId });
+    expect(await feed(event.id)).toEqual([[passes[0].id, 'admitted', 'camera']]);
+  });
+
+  it('changes nothing about admission: lookup admits are refused on duplicates and full capacity, and counted only when admitted', async () => {
+    const { event, scannerKey, passes } = await seedEvent(h, 2);
+    await h.admin(request(h.app).patch(`/api/events/${event.id}`)).send({ capacity: 1 }).expect(200);
+    expect((await redeem(scannerKey, { code: reference(passes[0]), method: 'lookup' }).expect(200)).body.outcome).toBe('admitted');
+    expect((await redeem(scannerKey, { code: reference(passes[0]), method: 'lookup' }).expect(200)).body.outcome).toBe('already_redeemed');
+    expect((await redeem(scannerKey, { code: reference(passes[1]), method: 'lookup' }).expect(200)).body.outcome).toBe('capacity_full');
+    expect((await redeem(scannerKey, { code: passes[1].passUrl, method: 'camera' }).expect(200)).body.outcome).toBe('capacity_full');
+    const summary = (await h.admin(request(h.app).get(`/api/events/${event.id}`)).expect(200)).body;
+    expect(summary).toMatchObject({ redeemedCount: 1 });
+    const operations = (await h.admin(request(h.app).get(`/api/events/${event.id}/operations`)).expect(200)).body;
+    expect(operations.assistedAdmissions).toBe(1);
+    expect(operations.totals).toMatchObject({ scans: 4, admitted: 1 });
+  });
+});
