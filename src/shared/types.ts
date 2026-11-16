@@ -328,7 +328,8 @@ export interface ScannerSession {
   event: { id: string; name: string; venue: string | null; timeZone: string; startsAt: string; endsAt: string; status: EventStatus };
 }
 
-export type AlertKind = 'repeated_duplicate' | 'multi_gate' | 'invalid_burst' | 'capacity_near';
+/** `device_idle`: an unrevoked scanner has been silent (no scan or heartbeat) while the event is live. */
+export type AlertKind = 'repeated_duplicate' | 'multi_gate' | 'invalid_burst' | 'capacity_near' | 'device_idle';
 
 export interface OperationsAlert {
   kind: AlertKind;
@@ -375,6 +376,35 @@ export interface OperationsSummary {
   /** 15-minute buckets covering the event's scans, oldest first, at most 96. */
   timeline: Array<{ bucketStart: string; admitted: number; denied: number }>;
   alerts: OperationsAlert[];
+  /**
+   * Entry window = the event window widened by any policy window. upcoming: before it opens. live: active and
+   * inside it. paused: inside it but not active (draft). finished: past it, ended or archived.
+   */
+  phase: 'upcoming' | 'live' | 'paused' | 'finished';
+  /** Admitted against the passes expected at the door (issued minus revoked before entry); `rate` is null with none expected. */
+  attendance: { expected: number; admitted: number; rate: number | null };
+  /** The last hour in `bucketMinutes` buckets aligned to the clock, oldest first, zero-filled. */
+  recent: { bucketMinutes: number; buckets: Array<{ bucketStart: string; admitted: number; denied: number }> };
+  /** Present once the event is finished. */
+  completion: OperationsCompletion | null;
+}
+
+/** Wrap-up figures for a finished event. */
+export interface OperationsCompletion {
+  expected: number;
+  admitted: number;
+  /** Expected passes never admitted. */
+  noShows: number;
+  rate: number | null;
+  firstAdmissionAt: string | null;
+  lastAdmissionAt: string | null;
+  /** Busiest 5-minute window of admissions. */
+  peak: { bucketStart: string; admitted: number } | null;
+  denied: number;
+  topDenial: { outcome: StoredScanOutcome; count: number } | null;
+  /** Scanner devices and gates that recorded at least one scan. */
+  devicesUsed: number;
+  gatesUsed: number;
 }
 
 /** POST /api/events/:eventId/passes/import */
@@ -386,4 +416,45 @@ export interface ImportReport {
   rejected: Array<{ row: number; reason: 'invalid_email' | 'too_long' | 'empty' | 'duplicate_in_file' | 'already_has_pass'; detail: string }>;
   /** Present when `dryRun` is false. Tokens are returned only here, once. */
   issued?: IssuedPass[];
+}
+
+/**
+ * A policy shape in an event template. Times are minutes from the event start
+ * (negative = before it); null = the event start (opens) or end (closes).
+ */
+export interface EventTemplatePolicy {
+  name: string;
+  opensOffsetMinutes: number | null;
+  closesOffsetMinutes: number | null;
+  capacity: number | null;
+  /** Gate names from the template's `gates`; empty = any gate. */
+  gates: string[];
+}
+
+/** Event settings, gates and policy shapes only: never passes, attendees, scanners, team or credentials. */
+export interface EventTemplateConfig {
+  version: 1;
+  durationMinutes: number;
+  /** null: the organizer's own (browser) time zone. */
+  timeZone: string | null;
+  venue: string | null;
+  /** Suggested event-wide capacity; null = no limit. */
+  capacity: number | null;
+  /** Name of a built-in pass design (`src/qr/design.ts` templates); used when `design` is null. */
+  designPreset: string | null;
+  design: DesignConfig | null;
+  gates: string[];
+  policies: EventTemplatePolicy[];
+}
+
+/** GET /api/templates: built-in templates plus the caller's own saved templates. */
+export interface EventTemplate {
+  /** `builtin:<slug>` for built-ins, a UUID for saved templates. */
+  id: string;
+  kind: 'builtin' | 'saved';
+  name: string;
+  description: string | null;
+  config: EventTemplateConfig;
+  createdAt: string | null;
+  updatedAt: string | null;
 }

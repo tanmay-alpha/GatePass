@@ -32,8 +32,9 @@ import type { Mailer } from './mailer';
 import { operationsSummary } from './operations';
 import { ROLE_PERMISSIONS, type Principal } from './permissions';
 import { AccessControl } from './policies';
+import { EventTemplates } from './templates';
 import { extractPassToken, generateToken, hashToken, isWellFormedToken } from './tokens';
-import { isoDate } from './values';
+import { assertTimeZone, assertWindow, isoDate } from './values';
 
 export interface GatePassOptions {
   /** Base URL encoded into pass QR codes, without trailing slash. */
@@ -113,6 +114,7 @@ const REQUEST_ID = /^[A-Za-z0-9_-]{8,64}$/;
 export class GatePass {
   readonly access: AccessControl;
   readonly accounts: Accounts;
+  readonly templates: EventTemplates;
   private readonly now: () => Date;
   private readonly newToken: () => string;
   private readonly publicUrl: string;
@@ -126,6 +128,7 @@ export class GatePass {
     this.publicUrl = options.publicUrl.replace(/\/+$/, '');
     this.access = new AccessControl(db, () => this.timestamp());
     this.accounts = new Accounts(db, { now: this.now, publicUrl: this.publicUrl, generateToken: this.newToken, mailer: options.mailer });
+    this.templates = new EventTemplates(db, { access: this.access, accounts: this.accounts, now: this.now, getEvent: (id) => this.getEvent(id) });
   }
 
   passUrl(token: string): string {
@@ -944,18 +947,4 @@ function toScanner(row: Row, now: string): Scanner {
     setup: pending ? 'pending' : enrolledAt ? 'enrolled' : Number(row.has_enrollments) ? 'expired' : 'legacy',
     setupExpiresAt: pending ? pendingUntil : null
   };
-}
-
-function assertWindow(startsAt: string, endsAt: string): void {
-  if (endsAt <= startsAt) throw httpError(400, 'The event must end after it starts.');
-}
-
-/** IANA zone names only; Intl rejects anything else with a RangeError. */
-function assertTimeZone(timeZone: string): string {
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone });
-    return timeZone;
-  } catch {
-    throw httpError(400, `Unknown time zone: ${timeZone}`);
-  }
 }

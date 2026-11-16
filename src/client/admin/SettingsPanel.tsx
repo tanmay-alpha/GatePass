@@ -6,6 +6,7 @@ import { ErrorNote, FieldError, SectionHead, ToneBadge, errorMessage, focusFirst
 import { fromZoneInput, toZoneInput, zoneLabel } from '../time';
 import { EventForm } from './EventForm';
 import { adminApi } from './http';
+import { SaveTemplateSection } from './SaveTemplateSection';
 import { ARCHIVED_NOTE, STATUS_META, TRANSITIONS, can } from './model';
 import { useToast } from './toast';
 
@@ -36,6 +37,7 @@ export function SettingsPanel({ event, onChanged, onOpenEvent }: Props) {
         )}
       </section>
       {editable ? <CloneSection event={event} onOpenEvent={onOpenEvent} /> : null}
+      {editable ? <SaveTemplateSection event={event} /> : null}
     </div>
   );
 }

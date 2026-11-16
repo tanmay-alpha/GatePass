@@ -14,5 +14,6 @@ Each record states the context, the decision, its consequences and the alternati
 | [0008](0008-accounts-and-event-roles.md) | Accounts with cookie sessions and per-event roles; operator token as break glass | accepted; reset and invitation delivery superseded by 0010 |
 | [0009](0009-durable-storage.md) | Durable storage: SQLite single writer on a persistent disk (not PostgreSQL) | accepted; durable hosting awaits owner approval |
 | [0010](0010-enrollment-recovery-email.md) | One-time scanner enrollment, account recovery without impersonation, optional transactional email | accepted |
+| [0011](0011-event-templates.md) | Event templates (built-in and private saved) and the live operations dashboard | accepted |
 
 Related: [architecture.md](../architecture.md), [threat-model.md](../threat-model.md), [testing.md](../testing.md).

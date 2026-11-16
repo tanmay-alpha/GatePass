@@ -143,6 +143,20 @@ const enrollSchema = z.strictObject({ code: z.string().min(1).max(100), claim: z
 const managerInviteSchema = z.strictObject({ email });
 const platformInviteSchema = z.strictObject({ email, role: z.enum(['organizer', 'platform_admin']) });
 const ownerSchema = z.strictObject({ userId: id });
+const templateNameFields = { name: z.string().trim().min(1).max(100), description: z.string().trim().max(300).nullish() };
+// `config` is validated by templates.ts (strict schema, size cap) on write and again on read.
+const templateSchema = z.strictObject({ ...templateNameFields, config: z.unknown() });
+const saveTemplateSchema = z.strictObject(templateNameFields);
+// The design comes from the template; everything else may override its suggestions.
+const templateEventSchema = z.strictObject({
+  name: eventFields.name,
+  venue: eventFields.venue,
+  timeZone: eventFields.timeZone,
+  startsAt: isoDateTime,
+  endsAt: isoDateTime.optional(),
+  capacity: eventFields.capacity,
+  status: z.enum(['draft', 'active']).optional()
+});
 
 const passThrough: Middleware = (_req, _res, next) => next();
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -618,6 +632,25 @@ export function createApp({
   app.post('/api/events/:eventId/clone', requireAccount, requireEventCreation, requireEvent('edit'), (req, res) => {
     const event = service.cloneEvent(req.params.eventId, cloneSchema.parse(req.body), actor(res), ownerIdOf(res));
     res.status(201).json(service.getEvent(event.id, principalOf(res)));
+  });
+
+  // Event templates: built-ins plus the caller's own saved templates (docs/decisions/0011-event-templates.md).
+  app.get('/api/templates', requireAccount, (_req, res) => {
+    res.json(service.templates.list(ownerIdOf(res)));
+  });
+  app.post('/api/templates', requireAccount, (req, res) => {
+    res.status(201).json(service.templates.create(ownerIdOf(res), templateSchema.parse(req.body), actor(res)));
+  });
+  app.delete('/api/templates/:templateId', requireAccount, (req, res) => {
+    service.templates.remove(req.params.templateId, ownerIdOf(res), actor(res));
+    res.status(204).end();
+  });
+  app.post('/api/templates/:templateId/events', requireAccount, requireEventCreation, (req, res) => {
+    const event = service.templates.createEvent(req.params.templateId, templateEventSchema.parse(req.body), { ownerId: ownerIdOf(res), actor: actor(res) });
+    res.status(201).json(service.getEvent(event.id, principalOf(res)));
+  });
+  app.post('/api/events/:eventId/save-template', requireAccount, requireEvent('edit'), (req, res) => {
+    res.status(201).json(service.templates.saveFromEvent(req.params.eventId, ownerIdOf(res), saveTemplateSchema.parse(req.body), actor(res)));
   });
 
   // Team

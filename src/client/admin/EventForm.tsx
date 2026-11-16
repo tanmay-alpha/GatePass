@@ -1,8 +1,9 @@
 import { useId, useMemo, useState, type FormEvent } from 'react';
-import type { EventSummary } from '../../shared/types';
+import type { EventSummary, EventTemplate } from '../../shared/types';
 import { ErrorNote, FieldError, errorMessage, focusFirstInvalid } from '../ui';
 import { browserTimeZone, fromZoneInput, listTimeZones, toZoneInput, zoneLabel } from '../time';
 import { adminApi } from './http';
+import { TemplatePicker } from './TemplatePicker';
 
 interface Props {
   event?: EventSummary;
@@ -46,6 +47,7 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
   const [endsAt, setEndsAt] = useState(toZoneInput(event?.endsAt ?? defaults.endsAt, timeZone));
   const [capacity, setCapacity] = useState(event?.capacity ? String(event.capacity) : '');
   const [status, setStatus] = useState<'draft' | 'active'>('draft');
+  const [template, setTemplate] = useState<EventTemplate | null>(null);
   const [showErrors, setShowErrors] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -56,6 +58,19 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
   const endIso = fromZoneInput(endsAt, timeZone);
   const errors = showErrors ? validate(name, startIso, endIso, capacity, admitted) : {};
   const zoneHint = startIso ? `${zoneLabel(timeZone, startIso)}. Start and end are times on a clock in this zone.` : 'Start and end are times on a clock in this zone.';
+
+  /** Pre-fills from the template (keeping the chosen start on the wall clock); "Start from scratch" leaves the form as it is. */
+  function applyTemplate(next: EventTemplate | null) {
+    setTemplate(next);
+    if (!next) return;
+    const zone = next.config.timeZone ?? browserTimeZone();
+    const start = fromZoneInput(startsAt, zone) ?? defaults.startsAt;
+    setTimeZone(zone);
+    setStartsAt(toZoneInput(start, zone));
+    setEndsAt(toZoneInput(new Date(Date.parse(start) + next.config.durationMinutes * 60_000).toISOString(), zone));
+    setCapacity(next.config.capacity ? String(next.config.capacity) : '');
+    if (next.config.venue) setVenue(next.config.venue);
+  }
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -77,7 +92,9 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
       };
       const saved = event
         ? await adminApi<EventSummary>(`/api/events/${event.id}`, { method: 'PATCH', body })
-        : await adminApi<EventSummary>('/api/events', { body: { ...body, status } });
+        : template
+          ? await adminApi<EventSummary>(`/api/templates/${encodeURIComponent(template.id)}/events`, { body: { ...body, status } })
+          : await adminApi<EventSummary>('/api/events', { body: { ...body, status } });
       setShowErrors(false);
       await onSaved(saved);
     } catch (err) {
@@ -89,6 +106,7 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
 
   return (
     <form className="form-grid" onSubmit={submit} noValidate>
+      {event ? null : <TemplatePicker selected={template} onSelect={applyTemplate} />}
       <fieldset className="form-grid span-2" disabled={readOnly}>
         <label className="span-2">
           Name
