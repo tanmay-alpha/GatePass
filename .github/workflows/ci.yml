@@ -9,6 +9,10 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Every action in these workflows is pinned to a full commit SHA with the
+# release in a trailing comment; Dependabot (github-actions ecosystem) updates
+# both. Resolve a new pin with `gh api repos/OWNER/REPO/git/ref/tags/vX.Y.Z`
+# (dereference annotated tags via git/tags/<sha>).
 permissions:
   contents: read
 jobs:
@@ -23,8 +27,10 @@ jobs:
           - os: windows-latest
             node: 24
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -53,8 +59,10 @@ jobs:
             browser: chromium
     name: e2e (${{ matrix.project }})
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -66,8 +74,9 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      # Third-party actions are pinned to a commit; Dependabot updates the hash and the version comment.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build linux/amd64 and linux/arm64 images
@@ -89,7 +98,9 @@ jobs:
       CONTAINER: gatepass-ci
       VOLUME: gatepass-ci-data
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build linux/amd64 image
         run: docker build --build-arg GATEPASS_COMMIT="$GITHUB_SHA" -t gatepass:ci .
       - name: Persistence, backup/restore, verify and graceful stop

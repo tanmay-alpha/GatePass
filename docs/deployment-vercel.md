@@ -112,6 +112,7 @@ Run these verification steps to ensure the split configuration is functioning:
 
 - **No-store on dynamic routes:** GatePass sets `Cache-Control: no-store` on all `/api/*` and `/p/*` responses (`src/server/app.ts`). Because Vercel honours upstream caching headers on external rewrites, dynamic API responses and attendee pass pages are not cached at the edge.
 - **Static asset security headers:** `vercel.mjs` configures the same Content Security Policy (CSP), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Permissions-Policy` headers on Vercel-served static assets as the Node.js server sends directly.
+- **Build commit and scanner app files:** `/version.json` is served `no-store` (release checks must never read a cached commit). The scanner's service worker `/sw.js` (registered with scope `/scan`) and `/manifest.webmanifest` are served `Cache-Control: no-cache` with explicit `text/javascript` / `application/manifest+json` types, so every update check revalidates them and a fixed scanner build reaches door devices. No `Service-Worker-Allowed` header is sent: a worker at the root already covers `/scan`. `tests/vercel-config.test.ts` pins these routes ahead of the filesystem phase.
 
 ## CORS
 
