@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '../src/client/api';
 import { explain, explainFailure, formatEventTime, isScanResult, verdictOf } from '../src/client/scanner/outcome';
 import { REPEAT_SUPPRESS_MS, RepeatFilter } from '../src/client/scanner/repeat';
-import { PendingScans, RETRY_WINDOW_MS, isUnanswered, newRequestId } from '../src/client/scanner/retry';
+import { PendingScans, RETRY_WINDOW_MS, isUnanswered, mayHaveBeenJudged, newRequestId } from '../src/client/scanner/retry';
 import type { ScanOutcome, ScanResult } from '../src/shared/types';
 
 const CODE = 'https://gatepass.example/p/' + 'A'.repeat(43);
@@ -20,6 +20,17 @@ describe('scan requestIds', () => {
     expect(isUnanswered(new ApiError(500, 'Server error'))).toBe(false);
     expect(isUnanswered(new ApiError(429, 'Too many', 5))).toBe(false);
     expect(isUnanswered(new TypeError('Failed to fetch'))).toBe(false);
+  });
+
+  it('keeps the requestId whenever the server may have judged the scan: no answer, any 5xx, or a 2xx that is not a verdict', () => {
+    expect(mayHaveBeenJudged(new ApiError(0, 'timeout', null, 'timeout'))).toBe(true);
+    expect(mayHaveBeenJudged(new ApiError(502, 'Bad gateway'))).toBe(true); // a proxy can fail after the admission committed
+    expect(mayHaveBeenJudged(new ApiError(504, 'Gateway timeout'))).toBe(true);
+    expect(mayHaveBeenJudged(new Error('Unexpected response'))).toBe(true);
+    // Refused before any judgement: a fresh attempt gets a fresh id.
+    expect(mayHaveBeenJudged(new ApiError(400, 'Bad request'))).toBe(false);
+    expect(mayHaveBeenJudged(new ApiError(409, 'requestId reused'))).toBe(false);
+    expect(mayHaveBeenJudged(new ApiError(429, 'Too many', 5))).toBe(false);
   });
 });
 

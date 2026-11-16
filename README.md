@@ -2,32 +2,32 @@
 
 GatePass is an event admission system. Organizers set up events, gates and admission rules, issue QR passes, and hand door staff scanner devices. Each pass is admitted **at most once**, only by an authorized scanner of the same event, only where and when its rules allow, and never beyond capacity — enforced inside one database transaction and backed by database constraints, not just application code.
 
-Live demo: https://gatepass-sandy.vercel.app — **demo only**: the free backend has no persistent disk, so data is erased whenever it restarts. See [Hosting status](#hosting-status).
+Live demo: https://gatepass-sandy.vercel.app — **demo only, not production**: the free backend has no persistent disk, so data is erased whenever it restarts or redeploys. See [Production readiness](#production-readiness).
 
-Docs: [user guide](docs/USER_GUIDE.md) · [engineering audit & tracker](docs/engineering-audit.md) · [roadmap](docs/implementation-roadmap.md) · [security & threat model](docs/security-and-threat-model.md) · [test matrix](docs/test-matrix.md) · [performance](docs/performance.md) · [deployment runbook](docs/deployment-runbook.md) · [architecture](docs/architecture.md) · [decisions](docs/decisions/README.md)
+Docs: [user guide](docs/USER_GUIDE.md) · [TODO](TODO.md) · [engineering audit & tracker](docs/engineering-audit.md) · [roadmap](docs/implementation-roadmap.md) · [security & threat model](docs/security-and-threat-model.md) · [test matrix](docs/test-matrix.md) · [performance](docs/performance.md) · [deployment runbook](docs/deployment-runbook.md) · [architecture](docs/architecture.md) · [decisions](docs/decisions/README.md)
 
 ## What it does
 
 **Organizers (accounts with per-event roles)**
-- Sign up or accept an invitation; sign in with an HTTP-only session cookie. Passwords are hashed with scrypt; sessions end after 24 h idle or 7 days.
+- Sign up or accept an invitation; sign in with an HTTP-only session cookie. Passwords are hashed with scrypt; sessions end after 24 h idle or 7 days. "Forgot your password?" emails a one-time link when email is configured.
 - Events with a lifecycle — **draft → active → ended → archived** — an IANA time zone (all times shown in the event's zone), venue, optional event-wide capacity, and pass design. Clone an event's configuration (gates, policies with shifted windows) into a new draft.
-- Team per event: the **owner** invites **managers** by one-time link. Managers run day-to-day operations; only owners change the lifecycle, manage the team, or export attendee data. People who are not on an event get `404` for it — even platform administrators.
+- Team per event: the **owner** invites **managers** by one-time link (emailed when email is configured, otherwise shown once to share by hand; "New link" replaces a lost one). Managers run day-to-day operations; only owners change the lifecycle, manage the team, or export attendee data. People who are not on an event get `404` for it — even platform administrators.
 - Gates and admission policies (entry window, gates allowed, capacity). A guided setup checklist shows what is still missing before doors open.
 - Attendees: issue named or unnamed passes, import a CSV with a validation and duplicate preview before anything is issued, page/search/filter the list, revoke (one or many), reissue a lost code, print passes.
 - Live operations: issued vs admitted, capacity remaining, admissions and denials by gate and reason, scanner device health, a 15-minute timeline and alerts (shared screenshots, invalid-code bursts, capacity nearly full).
 - Exports (owner only, each download audited): attendance, scan history and audit log as CSV with spreadsheet formula injection neutralised. Searchable audit log of every administrative and security action.
 
 **Door staff (scanner devices)**
-- A scanner key bound to one event and optionally one gate, set up from a link; rotate or revoke it at any time.
+- Each door device is set up from a **one-time setup link** (single use, expires after an hour) and receives its own key, bound to one event and optionally one gate; the permanent key never travels in a link. Rotate or revoke a device at any time.
 - Camera scanning with the native `BarcodeDetector` or a self-hosted ZXing WebAssembly decoder, camera choice, torch, and manual entry of the link, token or the 8-character reference printed on the pass.
 - Clear **Admit / Already used / Denied / Not verified** results (text, colour, sound, haptics on Android), announced to screen readers.
 - **Fails closed**: no answer from the server means *Not verified — do not admit*. A retry after a dropped connection reuses the same request id, so the server returns the original verdict instead of a false "already used".
 
 **Attendees**
-- A read-only pass page at `/p/<token>` with the QR code, event time in the event's zone, and admission details. Opening it never checks anyone in.
+- A read-only pass page at `/p/<token>` with the QR code, event time in the event's zone, admission details, a directions link for the venue and a print layout. Opening it never checks anyone in.
 
 **Platform administrators**
-- Manage accounts (disable, one-time password-reset links) and organizer invitations. No access to event data unless added to an event's team.
+- Manage accounts (disable, password resets, whether an invited account may create events) and organizer invitations. No access to event data unless added to an event's team. With email configured, a reset link goes only to the account's own address; without email, the administrator must give a reason (audited) and the account shows a notice at sign-in until it is acknowledged.
 
 ## How admission stays correct
 
@@ -54,15 +54,15 @@ sequenceDiagram
 
 ## Screenshots
 
-Captured from the current build with synthetic data (`docs/screenshots/`).
+Captured from the current build with synthetic data (`docs/screenshots/`), 2026-11-15.
 
-![Operations dashboard: issued vs admitted, capacity, scanner health, alerts, live feed](docs/screenshots/v2-operations.png)
+![Operations dashboard: issued vs admitted, capacity, scanner health, alerts, live feed](docs/screenshots/v3-operations.png)
 
 | Scanner: admit | Scanner: already used | Attendee pass |
 | --- | --- | --- |
-| ![Admit](docs/screenshots/v2-scanner-admit.png) | ![Already used](docs/screenshots/v2-scanner-already-used.png) | ![Pass page](docs/screenshots/v2-pass-page.png) |
+| ![Admit](docs/screenshots/v3-scanner-admit.png) | ![Already used](docs/screenshots/v3-scanner-already-used.png) | ![Pass page](docs/screenshots/v3-pass-page.png) |
 
-More: [passes](docs/screenshots/v2-passes.png) · [access](docs/screenshots/v2-access.png) · [team](docs/screenshots/v2-team.png) · [audit log](docs/screenshots/v2-audit.png) · [sign-in](docs/screenshots/v2-sign-in.png) · [operations on a phone](docs/screenshots/v2-operations-mobile.png)
+More: [events](docs/screenshots/v3-events.png) · [setup checklist](docs/screenshots/v3-setup-checklist.png) · [passes](docs/screenshots/v3-passes.png) · [passes on a phone](docs/screenshots/v3-passes-mobile.png) · [CSV import preview](docs/screenshots/v3-import-preview.png) · [access](docs/screenshots/v3-access.png) · [audit log](docs/screenshots/v3-audit.png) · [sign-in](docs/screenshots/v3-sign-in.png) · [operations on a phone](docs/screenshots/v3-operations-mobile.png) · [scanner ready](docs/screenshots/v3-scanner-ready.png)
 
 ## Architecture
 
@@ -70,24 +70,26 @@ More: [passes](docs/screenshots/v2-passes.png) · [access](docs/screenshots/v2-a
 flowchart LR
   subgraph Browsers
     Admin["Organizer SPA (React)"]
-    Scanner["Scanner SPA /scan"]
+    Scanner["Scanner SPA /scan<br/>device key in localStorage"]
     Phone["Attendee /p/&lt;token&gt;"]
   end
   subgraph Vercel["Vercel (static + proxy)"]
-    Edge["dist/client · security headers<br/>/api, /p → origin + X-Origin-Secret"]
+    Edge["dist/client + version.json · security headers<br/>/api, /p → origin + X-Origin-Secret"]
   end
   subgraph Server["Node.js process (Express 5)"]
-    MW["helmet CSP · rate limits · zod · CSRF header<br/>session cookie / scanner key / operator token"]
+    MW["request id + JSON logs · helmet CSP · rate limits · zod · CSRF header<br/>session cookie / scanner key / one-time setup code / operator token"]
     Svc["GatePass service · Accounts · AccessControl"]
+    Mail["Mailer (Resend, optional)"]
   end
-  DB[("SQLite file (WAL)")]
+  DB[("SQLite file (WAL, synchronous=FULL)<br/>on a persistent volume in production")]
   Admin --> Edge
   Scanner --> Edge
   Phone --> Edge
   Edge --> MW --> Svc --> DB
+  Svc -. invitations, resets .-> Mail
 ```
 
-One Node.js process and one SQLite file (single writer, by design — [ADR 0001](docs/decisions/0001-sqlite-single-process.md)). The same process can serve the SPA itself; Vercel is an optional static front. More in [docs/architecture.md](docs/architecture.md).
+One Node.js process and one SQLite file (single writer, by design — [ADR 0001](docs/decisions/0001-sqlite-single-process.md)). The same process can serve the SPA itself; Vercel is an optional static front. `GET /api/health` is a readiness probe (database answers with the expected schema) and reports the build commit, which the release check compares with the frontend's `/version.json`. More in [docs/architecture.md](docs/architecture.md).
 
 ## Run it locally
 
@@ -100,35 +102,51 @@ npm run dev               # API on http://127.0.0.1:3000
 npm run dev:web           # UI on http://localhost:5173 (proxies /api)
 ```
 
-Create an account at http://localhost:5173, create an event, add a scanner and open its setup link. The camera needs HTTPS or `localhost`. Production build: `npm run build && npm start`.
+Then, in the browser:
+
+1. **Create an account** at http://localhost:5173 ("Create an account").
+2. **Create an event**: "New event", a name, the time window and zone; choose *Active* so scanners admit straight away. The setup checklist shows what is left.
+3. **Configure the doors** (optional): *Access* → add gates (e.g. North, South) and an admission policy with an entry window, allowed gates and a capacity.
+4. **Issue a pass**: *Passes* → "Issue passes" (named or unnamed), or "Import CSV" with a preview. Open a pass link to see the attendee page.
+5. **Set up a scanner**: *Access* → "Add device" (optionally bound to a gate). Open the one-time setup link on the door phone (or in another browser tab) — it works once and expires after an hour.
+6. **Scan**: allow the camera and point it at the QR code, or type the pass link or the 8-character reference into manual entry. The first scan shows **Admit**; a second scan of the same pass shows **Already used**.
+
+The camera needs HTTPS or `localhost`. Production build: `npm run build && npm start`.
 
 `ADMIN_TOKEN` is a break-glass **operator** credential for the API (scripts, recovery, assigning an owner to an event created before accounts existed). The UI never asks for it. Configuration reference: [.env.example](.env.example) and [docs/local-development.md](docs/local-development.md).
 
 ## Tests
 
 ```sh
-npm run typecheck && npm test        # Vitest: unit, API, roles, concurrency, migration, recovery
-npm run build && npm run test:e2e    # Playwright (Chromium, Firefox, WebKit) against the built server
+npm run typecheck && npm test        # Vitest: unit, API, roles, concurrency, migration, recovery, journey
+npm run build && npm run test:e2e    # Playwright (Chromium, Firefox, WebKit, Pixel 7) against the built server
 npx tsx scripts/load-test.ts         # HTTP load test with persisted-invariant checks
+OLD_IMAGE=gatepass:old NEW_IMAGE=gatepass:new bash scripts/rollback-rehearsal.sh   # Docker: upgrade, then roll back on the pre-migration backup
 ```
 
 What each suite covers and the latest results — including what has **not** been verified, such as camera scanning on physical phones — are in [docs/test-matrix.md](docs/test-matrix.md).
 
-## Hosting status
+## Production readiness
 
-| | State |
+**Status: not production-ready — blocked on durable hosting (owner approval).** The application and its tests are in place; the live deployment is a labelled demo.
+
+| | State (checked 2026-11-15) |
 | --- | --- |
-| Frontend | Vercel project `gatepass`, production deploys from `main`. Preview deployments build the static UI only and never reach the production API ([runbook](docs/deployment-runbook.md)). |
-| Backend | Render web service `gatepass-api`, **free plan, no persistent disk**, `DEMO_MODE=true` (the UI warns that data resets). Sleeps after 15 idle minutes; the first request can take ~50 s. |
-| Durable production | Chosen design: the same container on a persistent disk (Render paid instance + 1 GB disk, ≈ $7.25/month per [ADR 0007](docs/decisions/0007-hosting.md), or a free single VM). **Not enabled — needs the owner's approval.** Until then, do not run a real event on the demo. |
+| Frontend | Vercel project `gatepass`, production deploys from `main`; previews build the static UI only and never reach the production API. Serves `/version.json` (build commit). |
+| Backend | Render web service `gatepass-api`: **free plan, no persistent disk** (Render API: `plan: free`, `disk: null`), `DEMO_MODE=true` (the UI warns that data resets). Sleeps after 15 idle minutes; the first request took 14 s on 2026-11-15. |
+| Durable production | Deployment-ready but **not enabled**: `render.yaml` (Render Starter + 1 GB disk at `/data`, ≈ $7.25/month) or `docker-compose.yml` on a single host; comparison in [ADR 0009](docs/decisions/0009-durable-storage.md). Needs the owner's approval. Do not run a real event on the demo. |
+| Email | Resend integration built and tested against a fake provider; **live delivery not verified** (no API key or verified domain). Without it, links are shared by hand. |
+| Physical phones | Camera scanning on a real iPhone/Android **not verified** — [manual checklist](docs/test-matrix.md#manual-real-device-acceptance-checklist). |
+| Release check | `scripts/release-check.ts` (CI: `release-verify.yml`) passes only when frontend `/version.json`, backend `build.commit` and the expected commit agree and the nondestructive smoke checks pass. |
+
+Open items with acceptance criteria: [TODO.md](TODO.md).
 
 ## Known limitations
 
 - Single process, single instance (SQLite single writer; in-memory rate limits). Do not run replicas against one database file.
-- No email delivery: invitation and reset links are shown once and shared manually. No MFA.
+- Email is optional; without it, invitation and reset links are shown once and shared manually. No MFA.
 - No offline admission: if the scanner cannot reach the server, nobody is admitted.
-- Camera scanning on physical iPhone/Android devices has not been verified in this repository; use the manual checklist in the test matrix before an event.
-- Throughput numbers come from a laptop ([performance](docs/performance.md)); the free Render instance has not been load-tested.
+- Throughput numbers come from a laptop ([performance](docs/performance.md)); no hosted instance has been load-tested.
 - `node:sqlite` is still marked experimental in Node.js.
 
 ## Attribution

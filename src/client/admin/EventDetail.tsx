@@ -117,7 +117,7 @@ export function EventDetail({ event, tab: requestedTab, onTab, onChanged, onOpen
           </p>
           {event.status === 'active' ? null : <p className="muted small event-status-note">{status.summary}</p>}
         </div>
-        <div className="stats">
+        <div className="stats stats-strip">
           <Stat label="Passes issued" value={event.passCount} />
           <Stat label="Named attendees" value={event.attendeeCount} />
           <Stat label="Checked in" value={event.redeemedCount} />

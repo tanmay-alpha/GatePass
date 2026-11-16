@@ -13,7 +13,7 @@ Two ways to make the data durable were compared:
 
 ## Decision
 
-**Option A.** SQLite through `node:sqlite`, exactly one process and one writer, the database file on a persistent volume mounted at `/data` (`DATABASE_FILE=/data/gatepass.db` in the image). The owner chose this on 2026-11-10 and decided not to spend money yet. On Render this means the Starter instance plus a 1 GB disk; the steps are in [deployment-runbook.md](../deployment-runbook.md#owner-approval-path-durable-storage). On the single-host path of ADR 0007 it is the `gatepass-data` Docker volume.
+**Option A.** SQLite through `node:sqlite`, exactly one process and one writer, the database file on a persistent volume mounted at `/data` (`DATABASE_FILE=/data/gatepass.db` in the image). The owner chose this on 2026-11-10 and decided not to spend money yet. On Render this means the Starter instance plus a 1 GB disk; the steps are in [deployment-runbook.md](../deployment-runbook.md#durable-switch-over). On the single-host path of ADR 0007 it is the `gatepass-data` Docker volume.
 
 What makes Option A durable in the code:
 
@@ -44,6 +44,22 @@ PostgreSQL under its default READ COMMITTED isolation uses MVCC: two transaction
 **Concurrent scanners.** Many scanner devices talk to the one process. Its database calls are synchronous on one connection, so their redemptions run one after another; nothing has to be retried. With 100 separate connections in `tests/concurrency.test.ts` (not the deployed model) some attempts on the test laptop waited longer than `busy_timeout` (5 s) and failed closed with `SQLITE_BUSY`, which the HTTP layer answers with 503 and `Retry-After` (`src/server/http.ts`); none was admitted and nothing was written, so scanning again is judged afresh. A scan whose response never arrived is re-sent by the scanner with the same `requestId` (kept for 2 minutes), and the server returns its stored result instead of judging it a second time.
 
 **Maintenance burden.** Option A: run `backup` before and after each event and copy the file off the host; run `verify` on backups; restore only with doors closed, because a restore drops every admission made after the backup ([deployment-runbook.md](../deployment-runbook.md#backup-verify-and-restore)). Upgrades of Node.js need care because `node:sqlite` is still experimental (ADR 0001). Option B adds database upgrades, credential rotation and the provider's backup tooling on top of the application's own.
+
+## Where the disk lives: Render disk or a single Docker host
+
+Both run the same image with the database on a volume at `/data`; the code path is identical. They differ in who operates what (reviewed 2026-11-15; prices as in ADR 0007, not re-checked):
+
+| | Render Starter + persistent disk (`render.yaml`) | Single host, Docker Compose + Caddy (`docker-compose.yml`) |
+| --- | --- | --- |
+| Cost | About $7.25/month (instance + 1 GB disk) | $0 on an Oracle Always Free A1 VM; a small paid VPS otherwise |
+| TLS, OS patching, Docker runtime | Managed by Render | The owner (Caddy automates certificates; OS updates are manual) |
+| Deploys | Automatic from `main`; a disk disables zero-downtime deploys, so each deploy is a short outage | Manual `docker compose up -d --build`; also a short outage |
+| Backups | `backup` CLI over Render shell/SSH; Render's disk snapshots are not a database backup (Render advises against restoring them for databases); an off-host copy needs a scheduled job | `scripts/offsite-backup.sh` from cron: backup, `verify`, copy off the host |
+| Logs and alerts | Render log stream and metrics; JSON log lines are searchable | `docker logs`; anything more is set up by the owner |
+| Failure domain | One instance, one disk, one region | One VM; Always Free instances can be reclaimed when idle for 7 days |
+| Rollback | Redeploy the previous commit; schema rollback still means restoring the `.pre-vN.bak` (runbook) | Same, with the previous image tag |
+
+**Recommendation:** Render Starter with a disk when the owner accepts about $7.25/month, because it removes OS, TLS and runtime maintenance, which is the larger operational risk for a single maintainer. The single Docker host is the zero-cost path and is already exercised in CI (`docker-run`: restart persistence, backup, verify, restore). Either way: back up before and after every event and copy the file off the host. Neither target has been run for a real event in this repository; until one is approved and verified, production readiness stays **blocked** and the demo stays labelled.
 
 ## Consequences
 

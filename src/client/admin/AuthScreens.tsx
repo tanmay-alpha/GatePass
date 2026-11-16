@@ -90,11 +90,13 @@ export function newPasswordErrors(password: string, confirm: string): { password
 interface SignInProps {
   demo: boolean;
   signupAllowed: boolean;
+  /** The server can email reset links (self-service recovery). */
+  emailEnabled: boolean;
   notice?: string;
   onSignedIn: (session: SessionInfo) => void;
 }
 
-export function SignIn({ demo, signupAllowed, notice, onSignedIn }: SignInProps) {
+export function SignIn({ demo, signupAllowed, emailEnabled, notice, onSignedIn }: SignInProps) {
   return (
     <AuthLayout title="Sign in to GatePass" intro="Organizers and event managers sign in with their own account." demo={demo}>
       {notice ? (
@@ -111,7 +113,15 @@ export function SignIn({ demo, signupAllowed, notice, onSignedIn }: SignInProps)
         ) : (
           <p>New accounts are by invitation. Ask your GatePass administrator for an invitation link.</p>
         )}
-        <p>Forgot your password? Ask your GatePass administrator for a reset link.</p>
+        {emailEnabled ? (
+          <p>
+            <a className="link-target" href="#/forgot">
+              Forgot your password?
+            </a>
+          </p>
+        ) : (
+          <p>Forgot your password? Ask your GatePass administrator to reset it.</p>
+        )}
         <p>
           Door staff: open <a href="/scan">the scanner</a> instead.
         </p>
@@ -257,7 +267,7 @@ export function ResetPassword({ demo, token, onReset }: { demo: boolean; token: 
       await api('/api/auth/reset', { body: { token, password }, timeoutMs: WAKE_TIMEOUT_MS });
       onReset();
     } catch (err) {
-      if (err instanceof ApiError && (err.status === 410 || err.status === 404)) setError('This reset link is no longer valid. It may have expired or already been used. Ask your GatePass administrator for a new one.');
+      if (err instanceof ApiError && (err.status === 410 || err.status === 404)) setError('This reset link is no longer valid. It may have expired, been replaced by a newer one, or already been used. Request a new one.');
       else setError(authError(err));
       setBusy(false);
     }
@@ -274,7 +284,67 @@ export function ResetPassword({ demo, token, onReset }: { demo: boolean; token: 
         </button>
       </form>
       <p className="login-foot muted small">
-        <a href="#/">Back to sign in</a>
+        <a className="link-target" href="#/">
+          Back to sign in
+        </a>
+      </p>
+    </AuthLayout>
+  );
+}
+
+/**
+ * Self-service recovery: the server emails a one-time link to the address if
+ * it belongs to an active account. The answer is the same either way, so the
+ * page never says whether an account exists.
+ */
+export function ForgotPassword({ demo, emailEnabled }: { demo: boolean; emailEnabled: boolean }) {
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!EMAIL_PATTERN.test(email.trim())) {
+      setError('Enter a valid email address.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await api('/api/auth/forgot', { body: { email: email.trim() }, timeoutMs: WAKE_TIMEOUT_MS });
+      setSent(true);
+    } catch (err) {
+      setError(authError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <AuthLayout title="Reset your password" intro={emailEnabled ? 'We email a one-time link that lets you choose a new password.' : undefined} demo={demo}>
+      {!emailEnabled ? (
+        <p className="notice">Email is not set up on this server. Ask your GatePass administrator to reset your password.</p>
+      ) : sent ? (
+        <p className="notice" role="status">
+          If {email.trim()} belongs to an active account, a reset link is on its way. It works once and expires in an hour. Check your spam folder if it does not arrive.
+        </p>
+      ) : (
+        <form className="stack" onSubmit={submit} noValidate>
+          <label>
+            Email
+            <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          </label>
+          <ErrorNote message={error} />
+          <button className="btn btn-primary btn-block" disabled={busy || !email.trim()}>
+            {busy ? 'Sending…' : 'Email me a reset link'}
+          </button>
+        </form>
+      )}
+      <p className="login-foot muted small">
+        <a className="link-target" href="#/">
+          Back to sign in
+        </a>
       </p>
     </AuthLayout>
   );

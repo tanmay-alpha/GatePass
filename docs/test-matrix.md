@@ -6,23 +6,30 @@ Results are copied from the recorded runs listed under [Recorded runs](#recorded
 
 ## Recorded runs
 
-All runs on 2026-11-10/11 on the host described under [Host configuration](#host-configuration).
+Runs of 2026-11-15/16 on branch `feat/production-readiness` (schema 4), on the host described under [Host configuration](#host-configuration), unless a row gives another date. Rows dated 2026-11-10/11 were recorded before this branch's changes.
 
 | Key | Run | Result |
 | --- | --- | --- |
-| **V** | `npx vitest run` (full suite) | 21 files, 256 passed, 1 skipped, 41.8 s, after the security-review fixes and their regression tests (`tests/accounts-api.test.ts`, "security review regressions", including R8 and R10). The skipped test is the graceful SIGTERM test in `tests/recovery.test.ts` (Windows). Three full runs have been green since `openDatabase` was changed to set `busy_timeout` before `journal_mode`. |
-| **T** | `npx tsc --noEmit -p .` | 0 errors. |
-| **C** | `tests/concurrency.test.ts` alone | 9 passed, 49.7 s. |
-| **R** | `tests/migration.test.ts` + `tests/recovery.test.ts` | Windows, twice: 9 passed + 1 skipped (10.4 s, 13.3 s). Linux in Docker `node:24-bookworm-slim`, twice: 10/10 (10.3 s, 13.7 s). |
-| **VC** | `tests/vercel-config.test.ts`; `node --check vercel.mjs` | 9/9; ok. |
-| **E** | `npm run build && npx playwright test` | chromium 6/6 (39.3 s); firefox, webkit and mobile-chrome together 13/13 (55.6 s). |
-| **D** | `docker build`, then the steps of the CI `docker-run` job executed locally (inside an Alpine container with bash) | Build 49.85 s. Healthy → admitted → `docker restart` → pass still redeemed, re-scan `already_redeemed` → `verify` ok (schemaVersion 3, 0 violations) → `docker stop` exit code 0 with "SIGTERM received, shutting down". |
-| **L** | `npx tsx --disable-warning=ExperimentalWarning scripts/load-test.ts --repeat 3` | 27 runs, 0 HTTP or network errors, persisted-state checks held after every run; `onepass` (500 attempts on one pass) admitted exactly 1 in each run. Details: [performance.md](performance.md). |
-| **P** | Vercel preview deployment `gatepass-34awy9su7` (branch push); `vercel curl /api/health` | Ready. `/api/health` → 503 `{"error":"This preview deployment has no backend. Previews never connect to production data.","preview":true}`. Unauthenticated access returns 302 (Vercel deployment protection). |
+| **T** | `npm run typecheck` (TypeScript 7.0.2) | 0 errors. |
+| **V** | `npx vitest run` (full suite, Vitest 5.1.0) | 24 files, 298 passed, 1 skipped. The skipped test is the graceful SIGTERM test in `tests/recovery.test.ts` (Windows). |
+| **B** | `npm run build`; `npm run smoke:qr`; `npm audit`; `node --check vercel.mjs` | Build ok, `dist/client/version.json` present; QR smoke ok; 0 vulnerabilities; ok. |
+| **E** | 2026-11-16, final branch state: `npm run build && npx playwright test` (all four projects in one run, local built server) | 46 passed, 0 failed, 54.4 s: chromium, firefox and webkit 15 each, mobile-chrome 1. Two earlier all-project runs on this state failed and were fixed, not retried: (1) 10 of 43 failed because all projects shared one client address and hit the limit of 20 sign-ups a minute (429); `playwright.config.ts` now sets `TRUST_PROXY=loopback` and a distinct `X-Forwarded-For` per project (the limits stay on). (2) 1 of 46 failed in WebKit: after `setOffline(true)` the browser did not deliver the `offline` event, so the scanner kept showing "Online"; the scanner now also re-reads `navigator.onLine` every 2 s and when the tab becomes visible. |
+| **D** | Docker, recorded 2026-11-15 on an earlier state of this branch: the script of the CI `docker-run` job run locally; `scripts/rollback-rehearsal.sh` | `docker-run` script passed, including scanner enrollment, restart persistence, backup, restore and graceful stop. Rollback rehearsal with old = `4a6ba5c` (schema 3) and new = this branch (schema 4): 9/9 checks. |
+| **RC** | `scripts/release-check.ts` | Against a local built server: 9/9 passed; with a wrong expected commit: exit 1. Against production, read-only: exit 1, as expected, because production still runs `4a6ba5c`, which has neither `/version.json` nor `build` in `/api/health`; the smoke checks passed. |
+| **A** | Accessibility: axe-core 4 | 21 screens at 320, 375, 768 and 1280 px, light and dark: zero serious or critical violations after fixes. Follow-up run on Access, Team, Platform, the reset dialog, Forgot password and Sign in at 320, 375, 768 and 1280 px: no page overflow, no axe violations. |
+| **S** | gitleaks 8.30.1 over all commits, locally | No leaks. |
+| **C** | 2026-11-10/11: `tests/concurrency.test.ts` alone | 9 passed, 49.7 s. |
+| **R** | 2026-11-10/11: `tests/migration.test.ts` + `tests/recovery.test.ts` | Windows, twice: 9 passed + 1 skipped (10.4 s, 13.3 s). Linux in Docker `node:24-bookworm-slim`, twice: 10/10 (10.3 s, 13.7 s). |
+| **L** | 2026-11-10: `npx tsx --disable-warning=ExperimentalWarning scripts/load-test.ts --repeat 3` | 27 runs, 0 HTTP or network errors, persisted-state checks held after every run; `onepass` (500 attempts on one pass) admitted exactly 1 in each run. Details: [performance.md](performance.md). |
+| **P** | 2026-11-10: Vercel preview deployment `gatepass-34awy9su7` (branch push); `vercel curl /api/health` | Ready. `/api/health` → 503 `{"error":"This preview deployment has no backend. Previews never connect to production data.","preview":true}`. Unauthenticated access returns 302 (Vercel deployment protection). |
 
-GitHub Actions is running on this branch; no result is recorded yet (see [Not verified](#not-verified)).
+Rows marked C or R below point to those dedicated runs for their detail; the same files also ran in V on the current state (all passed, SIGTERM test skipped).
+
+PR CI results are recorded in the PR. The last recorded CI run on `main` is PR #13's run (all 11 jobs passed, 2026-11-14).
 
 Test types: **unit** (pure function, no database or HTTP); **API** (Express app in process via supertest, file-backed SQLite); **concurrency** (worker threads, one SQLite connection each, released together); **process recovery** (real server child processes killed and restarted); **e2e** (Playwright against the built server); **docker** (production image); **load** (`scripts/load-test.ts`); **manual**.
+
+Scanner keys in the API and process tests come from the one-time enrollment route (`POST /api/scanner/enroll`), through `enroll` in `tests/helpers.ts`.
 
 ## Data-integrity acceptance tests
 
@@ -31,6 +38,7 @@ Test types: **unit** (pure function, no database or HTTP); **API** (Express app 
 | A pass admits at most once | `tests/redemption.test.ts`: "admits a valid pass once, then reports the original redemption" | API | V |
 | | `tests/database.test.ts`: "allows at most one redemption row per pass" | unit (schema) | V |
 | | `tests/database.test.ts`: "admits a pass once when a second connection redeems it too" | API (two connections) | V |
+| | `tests/invariants.test.ts`: "makes an admission permanent: UPDATE and DELETE on redemptions abort and leave the row as it was" (DB-04) | unit (schema) | V |
 | | `e2e/admission.spec.ts`: "organiser configures gates and a capped policy; door staff see admit, duplicate, wrong gate and full" | e2e | E |
 | Simultaneous scans of one pass | `tests/concurrency.test.ts`: "%i simultaneous redemptions of one pass" › "admits exactly once, persists one redemption, and yields a linearizable history" (2, 25 and 100 threads) | concurrency | C. At 100 threads some attempts exceeded `busy_timeout` and failed closed (`busy`, HTTP 503 at the API); none admitted. |
 | | `tests/database.test.ts`: "admits exactly one of 8 simultaneous redemptions of one pass" | concurrency | V |
@@ -45,41 +53,53 @@ Test types: **unit** (pure function, no database or HTTP); **API** (Express app 
 | | `tests/product-api.test.ts`: "enforces an event-wide capacity across policies and refuses lowering it below admissions" | API | V |
 | | `tests/admission.test.ts`: "reports a full policy with its capacity"; "enforces the event-wide capacity at the equality boundary, after the policy limit" | unit | V |
 | | `e2e/admission.spec.ts`: "organiser configures gates and a capped policy; door staff see admit, duplicate, wrong gate and full" | e2e | E |
+| | `tests/invariants.test.ts`: "a redeem transaction that fails after claiming capacity" › "fails closed when %s fails: 5xx, never admitted, no counter or row changed" (three injected failures; policy and event counters stay as they were) | API | V |
 | Scanner of another event cannot admit | `tests/redemption.test.ts`: "does not admit or reveal a pass from another event" | API | V |
 | | `tests/concurrency.test.ts`: "keeps overlapping events isolated: each event admits only its own passes" | concurrency | C |
 | | `tests/product-api.test.ts`: "accepts the 8-character reference only within the scanner’s own event" | API | V |
 | | `tests/policies-api.test.ts`: "never reveals policy details for another event’s pass"; "refuses cross-event gates, policies and scanner bindings (IDOR)" | API | V |
 | | `tests/database.test.ts`: "rejects cross-event references through triggers" | unit (schema) | V |
 | | `tests/admission.test.ts`: "applies identity and pass-state rules before time, gate and capacity" (`wrong_event`) | unit | V |
+| | `tests/invariants.test.ts`: "refuses a redemption row whose scanner, gate or policy belongs to another event"; "refuses re-pointing a policy gate at another event's gate or policy (UPDATE policy_gates)" (DB-04) | unit (schema) | V |
+| Entry windows and gates at the exact boundary | `tests/invariants.test.ts`: "opensAt is inclusive, closesAt exclusive, time is judged before the gate, and an open-ended policy closes with the event" | API | V |
 | Revocation | `tests/redemption.test.ts`: "rejects revoked passes" | API | V |
 | | `tests/events-api.test.ts`: "revokes passes idempotently and records the action in the audit log" | API | V |
 | | `tests/product-api.test.ts`: "bulk-revokes only unused passes of the same event" | API | V |
 | | `tests/concurrency.test.ts`: "revocation racing redemption: either the pass is admitted and stays unrevoked, or it is revoked and never admitted" | concurrency | C |
 | | `tests/security-api.test.ts`: "rejects a scanner key immediately after revocation" | API | V |
+| | `tests/invariants.test.ts`: "refuses a redemption with a scanner identity that was revoked after the key check: 401, nothing written"; "answers 401 over HTTP when the revocation commits between the key check and the redeem transaction" (DB-05) | API | V |
+| | `tests/invariants.test.ts`: "a revocation racing redemptions on other connections: no admission or scan by the device after its revocation" (DB-05) | concurrency | V |
 | | `e2e/admission.spec.ts`: "revoked passes and revoked scanner devices are refused at the door" | e2e | E |
+| | `e2e/scanner-failclosed.spec.ts`: "a device revoked mid-session is signed out at its next server answer (401), without admitting" | e2e | E |
 | A revoked or reissued token is never valid again | `tests/events-api.test.ts`: "reissue invalidates the old token and keeps the same pass" | API | V |
 | | `tests/product-api.test.ts`: "rotates a scanner key: the old key stops at once, history and gate are kept" | API | V |
 | | `tests/redemption.test.ts`: "rejects revoked passes" | API | V |
 | A failed transaction never returns `admitted` | `tests/concurrency.test.ts`: "%i simultaneous redemptions of one pass" › "admits exactly once, …" (`busy` attempts are never admitted and leave no scan row) | concurrency | C |
 | | `tests/recovery.test.ts`: "admits a pass exactly once across processes; contention answers 503, never a second admission" (a 503 leaves nothing behind) | process recovery | R |
 | | `tests/concurrency.test.ts`: "a transaction holding the write lock for 400 ms delays redemptions but never splits a pass" | concurrency | C |
+| | `tests/invariants.test.ts`: "answers 503 with Retry-After while another connection holds the write lock; the same requestId then admits exactly once" (DB-06) | API (two connections) | V |
+| | `tests/invariants.test.ts`: "fails closed when %s fails: 5xx, never admitted, no counter or row changed" (failure injected after the capacity claim: 500, no admission, the retry admits once) | API | V |
 | | `tests/database.test.ts`: "rolls back a failed batch issuance completely and keeps serving" | API | V |
 | | `tests/security-api.test.ts`: "returns a generic 500 without SQL or stack details and keeps serving" | API | V |
-| | `tests/scanner-retry.test.ts`: "only an explicit admitted outcome is Admit"; "rejects malformed responses so they become Not verified"; "only timeouts and network failures count as unanswered" | unit (client) | V |
+| | `tests/scanner-retry.test.ts`: "only an explicit admitted outcome is Admit"; "rejects malformed responses so they become Not verified"; "only timeouts and network failures count as unanswered"; "failures never read as admission" | unit (client) | V |
+| | `e2e/scanner-failclosed.spec.ts`: "an aborted request is Not verified, never Admit; Retry verification reuses the requestId and admits once"; "a request that outlasts the 12 s deadline shows the slow notice, then Not verified"; "a 503 from a busy server is Not verified and offers no retry of the stored verdict; the next scan is judged normally"; "offline, scanning pauses: manual entry cannot submit and nothing is sent; back online the same code is checked" | e2e | E |
 | Failed or repeated requests create no duplicate records | `tests/product-api.test.ts`: "returns the stored result for a retried request instead of judging it again"; "keeps request ids per device: another scanner reusing an id gets its own judgement" | API | V |
 | | `tests/concurrency.test.ts`: "the same request id sent from 10 threads at once yields one judgement and one scan row" | concurrency | C |
 | | `tests/recovery.test.ts`: "persists every admission acknowledged before a SIGKILL that lands mid-burst (50 passes)" (an unacknowledged but committed admission is returned through `requestId` replay) | process recovery | R |
-| | `tests/scanner-retry.test.ts`: "reuses the requestId of an unanswered scan of the same code, then starts fresh once answered"; "forgets unanswered scans after two minutes" | unit (client) | V |
+| | `tests/scanner-retry.test.ts`: "reuses the requestId of an unanswered scan of the same code, then starts fresh once answered"; "forgets unanswered scans after two minutes"; "keeps the requestId whenever the server may have judged the scan: no answer, any 5xx, or a 2xx that is not a verdict" | unit (client) | V |
+| | `e2e/scanner-failclosed.spec.ts`: "after a lost response, entering the same code again replays the stored verdict: Admit, confirmed after reconnect"; "a gateway error after the server admitted is Not verified; the next scan of that code confirms the admission instead of "Already used"" (a 504 after the commit keeps the requestId) | e2e | E |
 | | `scripts/load-test.ts` pattern `dup10` | load | L |
 | | `tests/accounts-api.test.ts`: "refuses a requestId reused for a different pass instead of replaying the other pass’s verdict" (security review R10: 409) | API | V |
 | A restart keeps admissions | `tests/recovery.test.ts`: "keeps an acknowledged admission across SIGKILL and restart; retries and re-scans are answered correctly" | process recovery | R |
 | | `tests/recovery.test.ts`: "persists every admission acknowledged before a SIGKILL that lands mid-burst (50 passes)" | process recovery | R |
 | | `tests/recovery.test.ts`: "stops gracefully on SIGTERM: exit code 0 and the WAL checkpointed into the main file" | process recovery | R on Linux only; skipped on Windows |
 | | `tests/database.test.ts`: "keeps data across reopen without re-running migrations" | API | V |
-| | CI job `docker-run` (`.github/workflows/ci.yml`): admit, `docker restart`, pass still redeemed, re-scan `already_redeemed` | docker | D (executed locally; not yet on GitHub Actions) |
+| | `tests/journey.test.ts`: "runs the full admission journey, survives SIGKILL, and leaves a verifiable, consistent file" (real server process, organizer sign-up to door, SIGKILL and restart) | process recovery | V |
+| | CI job `docker-run` (`.github/workflows/ci.yml`): enroll a scanner, admit, `docker restart`, pass still redeemed, backup, restore, graceful stop | docker | D (script run locally) |
 | A restored backup is consistent with its audit log | `tests/recovery.test.ts`: "backs up while serving, restores to exactly the backup point and keeps the replaced files" (redemptions, scans, audit rows and revocations equal the backup point; later admissions gone, as documented) | process recovery | R |
 | | `tests/recovery.test.ts`: "refuses a corrupt or non-database backup and leaves the current database untouched" | process recovery | R |
 | | `tests/database.test.ts`: "backs up a live database, verifies it, and restores it" | API | V |
+| | CI job `docker-run`: backup and restore of the real image | docker | D (script run locally) |
 
 The process-recovery tests and most concurrency tests also run `verifyDatabase` (`src/server/integrity.ts`: `integrity_check`, `foreign_key_check` and the nine admission invariants) on the persisted file, not only on the returned outcomes. The two exceptions, the 400 ms lock-holder test and the same-request-id test, assert `redemptions` and `scans` row counts instead.
 
@@ -102,6 +122,11 @@ Each row is one principal attempting another role's actions. Non-members get 404
 | Scanner key | Account API with a scanner key → 401; account session on the scanner API → 401 | `tests/accounts-api.test.ts`: "never accepts scanner keys or account sessions in place of each other" | API | V |
 | Scanner key, wrong token, Basic auth, raw token, no token | Every operator route → 401 | `tests/security-api.test.ts`: "%s %s requires the admin token" (one case per route) | API | V |
 | Operator token | Scanning with the operator token → 401 | `tests/security-api.test.ts`: "requires a scanner key for scanning; the admin token is not a scanner key" | API | V |
+| Second device with the same setup link | Claiming a link that another device already claimed → refused | `tests/product-api.test.ts`: "lets exactly one of two racing devices claim a link" | API | V |
+| Holder of an expired, superseded or revoked setup link | Enrollment → refused | `tests/product-api.test.ts`: "refuses expired, superseded and revoked links, and audits the enrollment" | API | V |
+| Disabled platform admin | Reset links, renewed invitations and scanner setup links they still hold stop working | `tests/account-recovery.test.ts`: "disabling an administrator cancels the reset links, renewed invitations and scanner setup links they still hold (SR-03)" | API | V |
+| Account created from a manager invitation while sign-up is closed | Creating or cloning events → refused until a platform admin allows it | `tests/account-recovery.test.ts`: "accounts created from a manager invitation cannot create or clone events until a platform admin allows it" (security review R6); control: "keeps the old behaviour while sign-up is open" | API | V |
+| Member who does not manage an invitation | Renewing it → refused | `tests/account-recovery.test.ts`: "only lets people who manage the invitation renew it" | API | V |
 
 Not covered by a named test: a platform admin attempting event writes (only reads and the export are probed), and one manager acting on another manager's membership.
 
@@ -111,6 +136,8 @@ Not covered by a named test: a platform admin attempting event writes (only read
 | --- | --- | --- | --- |
 | Role escalation | `tests/accounts-api.test.ts`: "lets a manager run operations but not change lifecycle, team, ownership or export attendee data" (ownership transfer, invitations, platform invitations) | API | V |
 | | `tests/accounts-api.test.ts`: "lets only the operator reset a platform administrator, and a password change cancels open reset links" | API | V |
+| | `tests/account-recovery.test.ts`: "without email: needs a written reason, is audited with it, and leaves a notice that a password change cannot hide"; "with email: using a link someone else created notifies the owner’s own mailbox"; "with email: the link goes only to the account address, never to the administrator" (security review R2) | API | V |
+| | `tests/account-recovery.test.ts`: "accounts created from a manager invitation cannot create or clone events until a platform admin allows it" (security review R6) | API | V |
 | | `tests/accounts-api.test.ts`: "accepts an invitation exactly once, even when two acceptances race"; "refuses revoked and expired invitations"; "binds an invitation to its email: an existing account must be signed in as that email" | API | V |
 | Cross-tenant access | `tests/accounts-api.test.ts`: "shows each organizer only their own events and answers 404 for anyone else’s"; "does not let a platform admin read organizers’ events through their role alone" | API | V |
 | | `tests/policies-api.test.ts`: "refuses cross-event gates, policies and scanner bindings (IDOR)" | API | V |
@@ -120,7 +147,9 @@ Not covered by a named test: a platform admin attempting event writes (only read
 | | `tests/accounts-api.test.ts`: "stores only hashes of passwords and session ids"; "signs up with an HttpOnly, Secure, SameSite=Strict host-only cookie and never returns a credential in the body" | API | V |
 | | `tests/redemption.test.ts`: "answers unknown and malformed tokens identically" | API | V |
 | | `tests/tokens.test.ts`: "generates distinct 256-bit base64url tokens"; "hashes deterministically without revealing the token"; "compares secrets of different lengths without throwing" | unit | V |
-| | `tests/vercel-config.test.ts`: "builds a static-only preview with a 503 backend route and no production secret" | unit | VC, P |
+| | `tests/product-api.test.ts`: "never puts the device key in the setup link; the link works exactly once" | API | V |
+| | `tests/account-recovery.test.ts`: "answers the same for known and unknown addresses, emails only real active accounts, and limits requests per address"; "omits the link when the provider accepted the email, and a new link replaces the old one"; "reports refusals and timeouts as failures without logging the recipient or key" | API | V |
+| | `tests/vercel-config.test.ts`: "builds a static-only preview with a 503 backend route and no production secret" | unit | V, P |
 | XSS and injection | `tests/redemption.test.ts`: "escapes attendee and event names" | API | V |
 | | `tests/pass-page.test.ts`: "escapes organiser- and attendee-controlled text"; "has no scripts and renders a not-found page" | unit | V |
 | | `tests/security.test.ts`: "rejects SVG attribute injection and unsafe logo references"; "drops unknown keys so arbitrary client data is never persisted" | unit | V |
@@ -131,12 +160,18 @@ Not covered by a named test: a platform admin attempting event writes (only read
 | Replay | `tests/product-api.test.ts`: "returns the stored result for a retried request instead of judging it again" | API | V |
 | | `tests/accounts-api.test.ts`: "accepts an invitation exactly once, even when two acceptances race"; "uses a password reset link once, ends existing sessions, and only the newest link works" | API | V |
 | | `tests/accounts-api.test.ts`: "ends sessions on sign-out, after 24 h idle and after 7 days regardless of activity"; "ends every other session when the password changes" | API | V |
+| | `tests/product-api.test.ts`: "never puts the device key in the setup link; the link works exactly once"; "lets exactly one of two racing devices claim a link"; "refuses expired, superseded and revoked links, and audits the enrollment" | API | V |
+| | `tests/account-recovery.test.ts`: "cancels a reset link the provider did not accept"; "disabling an administrator cancels the reset links, renewed invitations and scanner setup links they still hold (SR-03)" | API | V |
+| | `e2e/admission.spec.ts`: "organiser configures gates and a capped policy; door staff see admit, duplicate, wrong gate and full" (opening a second setup link on a set-up device asks "Replace this scanner's setup?") | e2e | E |
 | Proxy-header spoofing | `tests/security-api.test.ts`: "ignores spoofed X-Forwarded-For when no proxy is trusted"; "rate-limits by the CDN-provided client IP, not by spoofable X-Forwarded-For"; "refuses requests without the origin secret when a CDN fronts the API"; "rejects configuration that would trust spoofed forwarding headers" | API | V |
-| | `tests/vercel-config.test.ts`: "proxies /api and /p in production with the ORIGIN_SECRET transform" | unit | VC |
+| | `tests/invariants.test.ts`: "throttles failed authentication by the last x-vercel-forwarded-for entry, which the CDN appended" (SEC-03) | API | V |
+| | `tests/vercel-config.test.ts`: "proxies /api and /p in production with the ORIGIN_SECRET transform" | unit | V |
 | API abuse and rate limits | `tests/security-api.test.ts`: "rate-limits scans per device, so gates sharing one NAT address do not throttle each other"; "throttles failed authentication per IP without locking out valid credentials from that IP"; "maps malformed JSON and oversized bodies to 4xx" | API | V |
 | | `tests/accounts-api.test.ts`: "throttles repeated failures for one account even across addresses, without locking out other accounts"; "gives the same answer for an unknown email and a wrong password, and audits failures"; "rejects weak passwords and refuses sign-up when registration is closed" | API | V |
 | | `tests/accounts-api.test.ts`: "keeps a locked account locked even for the correct password (guessing from many addresses gains nothing)" | API | V |
 | | `tests/security-api.test.ts`: "requires the admin token (CPU-heavy rendering is not public)"; "answers invalid input with 400 instead of 500" | API | V |
+| | `tests/product-api.test.ts`: "throttles repeated bad codes from one address" (scanner enrollment) | API | V |
+| | `tests/account-recovery.test.ts`: "answers the same for known and unknown addresses, emails only real active accounts, and limits requests per address"; "re-inviting an address renews its pending invitation instead of adding one, and caps emails per recipient" | API | V |
 | Unauthorized exports | `tests/accounts-api.test.ts`: "lets a manager run operations but not change lifecycle, team, ownership or export attendee data" (three exports → 403); "shows each organizer only their own events and answers 404 for anyone else’s" (export → 404); "does not let a platform admin read organizers’ events through their role alone" (export → 404) | API | V |
 | | `tests/product-api.test.ts`: "exports attendance with formula injection neutralised and records the download" (download audited) | API | V |
 | | `e2e/accounts.spec.ts`: "owner invites a manager who can issue passes but not manage the team or export" | e2e | E |
@@ -147,37 +182,55 @@ The security review itself was static (no proof-of-concept execution); its findi
 
 | Requirement | Test file: test name | Type | Result |
 | --- | --- | --- | --- |
-| Populated v2 → v3 migration keeps every row and hash | `tests/migration.test.ts`: "preserves every row, hash, constraint and invariant, and keeps legacy passes and keys working" | API (database) | R |
+| Populated v2 migration keeps every row and hash | `tests/migration.test.ts`: "preserves every row, hash, constraint and invariant, and keeps legacy passes and keys working" | API (database) | R |
+| v3 → v4 migration (accounts, pre-enrollment scanner keys) | `tests/migration.test.ts`: "keeps accounts able to create events, keeps issued scanner keys working, and lets them move to one-time setup links" | API (database) | V |
 | A bad migration rolls back | `tests/migration.test.ts`: "rolls back a migration that would leave a foreign-key violation, leaving the version unchanged"; "commits each migration on its own: a failing later migration leaves the upgrade from version 2 intact and itself fully rolled back" | API (database) | R |
 | An existing pre-migration backup does not block start-up (DB-03) | `tests/migration.test.ts`: "opens and migrates when a pre-migration backup from an earlier failed attempt already exists (DB-03)" | API (database) | R |
 | Older migrations and schema guard | `tests/database.test.ts`: "upgrades a version 1 database with data, keeps old passes valid and backs it up first"; "rolls back a failing migration completely"; "refuses to open a database written by a newer schema" | API (database) | V |
+| Maintenance commands never migrate an older file (ORCH-03) | `tests/invariants.test.ts`: "verify reports a schema-3 rollback copy as not current and leaves it at version 3, byte for byte; backup copies it without migrating" | process recovery (CLI) | V |
+| Rollback across the schema 3 → 4 migration | `scripts/rollback-rehearsal.sh` (old and new Docker images on a throwaway volume) | docker | D: 9/9 checks |
 | Corrupt database is not replaced | `tests/database.test.ts`: "fails loudly on a corrupt database file instead of replacing it" | API (database) | V |
+| Readiness: health reflects the database and the build | `tests/security-api.test.ts`: "reports an unavailable database through the health check"; "is not ready while the database schema differs from the build (half-applied deploy or wrong file)"; "reports the build commit for release checks and tags every response with a request id" | API | V |
+| | `tests/vercel-config.test.ts`: "serves /version.json with Cache-Control: no-store before the filesystem phase" | unit | V |
+| | `scripts/release-check.ts` | release check | RC |
 | Crash, restart, backup, restore | see [Data-integrity acceptance tests](#data-integrity-acceptance-tests): "A restart keeps admissions" and "A restored backup is consistent with its audit log" | process recovery | R |
 
 ## Browser end-to-end tests
 
 `playwright.config.ts` defines four projects. `mobile-chrome` runs only `e2e/onboarding.spec.ts`. Codes are entered through the scanner's manual entry field; no camera is involved.
 
+Locally the server runs with `TRUST_PROXY=loopback` and each Playwright project sends its own `X-Forwarded-For` address, so the per-address rate limits stay on and are counted per project (see `playwright.config.ts`).
+
 | Spec: test | chromium | firefox | webkit | mobile-chrome (Pixel 7) |
 | --- | --- | --- | --- | --- |
 | `e2e/onboarding.spec.ts`: "a first-time organiser is guided from a new event to \"Ready for doors\"" | Pass | Pass | Pass | Pass |
-| `e2e/admission.spec.ts`: "organiser configures gates and a capped policy; door staff see admit, duplicate, wrong gate and full" | Pass | Pass | Pass | not run |
+| `e2e/admission.spec.ts`: "organiser configures gates and a capped policy; door staff see admit, duplicate, wrong gate and full" (includes the "Replace this scanner's setup?" confirmation) | Pass | Pass | Pass | not run |
 | `e2e/admission.spec.ts`: "revoked passes and revoked scanner devices are refused at the door" | Pass | Pass | Pass | not run |
 | `e2e/admission.spec.ts`: "expired passes are refused once their expiry passes, and the pass page says so" | Pass | Pass | Pass | not run |
 | `e2e/accounts.spec.ts`: "owner invites a manager who can issue passes but not manage the team or export" (includes sign-out) | Pass | Pass | Pass | not run |
 | `e2e/accounts.spec.ts`: "CSV import previews rejected duplicates, and the attendance export lists the admitted attendee" | Pass | Pass | Pass | not run |
-| Recorded run | 6/6, 39.3 s | 13/13 for firefox, webkit and mobile-chrome together, 55.6 s | (same run) | (same run) |
+| `e2e/journey.spec.ts`: "organiser sets up an event in the UI; a phone admits by the printed reference; dashboard and pass page agree" | Pass | Pass | Pass | not run |
+| `e2e/scanner-failclosed.spec.ts`: "an aborted request is Not verified, never Admit; Retry verification reuses the requestId and admits once" | Pass | Pass | Pass | not run |
+| `e2e/scanner-failclosed.spec.ts`: "a request that outlasts the 12 s deadline shows the slow notice, then Not verified" | Pass | Pass | Pass | not run |
+| `e2e/scanner-failclosed.spec.ts`: "a 503 from a busy server is Not verified and offers no retry of the stored verdict; the next scan is judged normally" | Pass | Pass | Pass | not run |
+| `e2e/scanner-failclosed.spec.ts`: "after a lost response, entering the same code again replays the stored verdict: Admit, confirmed after reconnect" | Pass | Pass | Pass | not run |
+| `e2e/scanner-failclosed.spec.ts`: "a gateway error after the server admitted is Not verified; the next scan of that code confirms the admission instead of \"Already used\"" | Pass | Pass | Pass | not run |
+| `e2e/scanner-failclosed.spec.ts`: "a device revoked mid-session is signed out at its next server answer (401), without admitting" | Pass | Pass | Pass | not run |
+| `e2e/scanner-failclosed.spec.ts`: "offline, scanning pauses: manual entry cannot submit and nothing is sent; back online the same code is checked" | Pass | Pass | Pass | not run |
+| `e2e/scanner-failclosed.spec.ts`: "re-opening a used setup link on a working scanner keeps its key: the phone can still scan" | Pass | Pass | Pass | not run |
+| Recorded run (E) | 15/15 | 15/15 | 15/15 | 1/1 |
 
-Run on the local built server (Windows host). Not yet run on GitHub Actions or against a deployed URL from this branch.
+Run on the local built server (Windows host), 46/46 in 54.4 s. Not run against a deployed URL from this branch.
 
 ## Docker
 
 | Check | Where defined | Result |
 | --- | --- | --- |
-| Image builds (`linux/amd64`) | `Dockerfile`; CI job `docker-run` | D: built locally, 49.85 s |
-| Restart persistence, `verify`, graceful stop | CI job `docker-run` | D: steps executed locally; all passed |
-| Multi-arch build (`linux/amd64`, `linux/arm64`) | CI job `docker` | Not run on this branch |
-| Recovery tests on Linux | `tests/migration.test.ts`, `tests/recovery.test.ts` in `node:24-bookworm-slim` | R: 10/10, twice |
+| Image builds (`linux/amd64`) | `Dockerfile`; CI job `docker-run` | D: built locally |
+| Scanner enrollment, restart persistence, backup, restore, graceful stop | CI job `docker-run` | D: script run locally on 2026-11-15; passed |
+| Rollback across the schema migration | `scripts/rollback-rehearsal.sh` | D: old = `4a6ba5c` (schema 3), new = schema 4; 9/9 checks |
+| Multi-arch build (`linux/amd64`, `linux/arm64`) | CI job `docker` | Not run locally |
+| Recovery tests on Linux | `tests/migration.test.ts`, `tests/recovery.test.ts` in `node:24-bookworm-slim` | R: 10/10, twice (2026-11-10/11) |
 
 ## Concurrency: what the history check shows
 
@@ -192,7 +245,7 @@ Any outcome other than `admitted`, `already_redeemed` or `busy` is also reported
 
 What this is and is not:
 
-- It is **evidence about the histories observed** in these runs (2, 25 and 100 threads, plus the 400 ms lock-holder test, which applies the same check; run C), on one Windows laptop, with in-process calls to `GatePass.redeem` rather than HTTP. A passing run means none of those observed histories violated the condition.
+- It is **evidence about the histories observed** in these runs (2, 25 and 100 threads, plus the 400 ms lock-holder test, which applies the same check; run C), on one Windows laptop, with in-process calls to `GatePass.redeem` rather than HTTP. A passing run means none of those observed histories violated the condition. The HTTP mapping of a held write lock (503, then one admission on retry with the same requestId) is tested separately in `tests/invariants.test.ts` (DB-06).
 - It is **not a proof** that the system is linearizable in general, under other schedules, on other machines or file systems, over HTTP, or across processes. The check covers one pass and one operation type; it does not check revocation, capacity or reissue histories against a specification (those tests assert final counts and invariants instead).
 - Instants come from each worker thread's own `performance.timeOrigin`; skew between threads was not measured, so orderings closer together than that skew are not reliably distinguished.
 - The production topology is one process with one connection; the multi-connection setting here is deliberately harsher than production and is why `busy` outcomes occur at 100 threads.
@@ -207,8 +260,10 @@ All recorded runs used one machine:
 | --- | --- |
 | Machine | Windows laptop, Intel Core i7-14650HX, 24 logical cores, 15.7 GiB RAM, NVMe SSD |
 | Node | 24.14.1 |
+| TypeScript | 7.0.2 |
+| Vitest | 5.1.0 |
 | SQLite | 3.51.2 |
-| Linux runs | Docker container `node:24-bookworm-slim` on the same machine (run R); Alpine container with bash for the `docker-run` steps (run D) |
+| Linux runs | Docker on the same machine: container `node:24-bookworm-slim` (run R); the `docker-run` script and `scripts/rollback-rehearsal.sh` (run D) |
 | Browsers | Playwright's bundled Chromium, Firefox and WebKit; versions not recorded |
 
 Full host details for the load tests (OS build, disk model, database pragmas, background load) are in [performance.md](performance.md#host-configuration).
@@ -216,10 +271,13 @@ Full host details for the load tests (OS build, disk model, database pragmas, ba
 ## Not verified
 
 - **Physical devices.** Camera scanning on a real iPhone or Android phone has not been tried (no devices available). The decoder tests (`tests/scanner-detector.test.ts`) and camera tests (`tests/scanner-camera.test.ts`) use fakes and a generated frame; Playwright enters codes by hand. Use the [manual checklist](#manual-real-device-acceptance-checklist) below.
-- **GitHub-hosted runs.** The CI workflow (`check` on Ubuntu with Node 22 and 24 and on Windows with Node 24, `e2e` per browser project, `docker`, `docker-run`) is running on this branch, but no result has been recorded. Until one is, nothing here is evidence for those runners.
-- **Render free instance load.** All performance numbers are from the laptop. The deployed Render free instance (0.1 CPU) has not been load-tested.
+- **`release-verify.yml` on GitHub.** It has no pull-request trigger, so it has not run on GitHub; the release check (run RC) was run locally. `security.yml`, `codeql.yml` and the changed `ci.yml` ran on pull request #14; their results are recorded in the PR, not here.
+- **Docker on the final state.** Run D was recorded on 2026-11-15 on an earlier state of this branch; it has not been repeated on the final state.
+- **Live email delivery.** No Resend key or sending domain was available. The email paths are tested against a fake provider (`tests/account-recovery.test.ts`); no message has been sent through Resend.
+- **Durable hosting target.** The intended target (a Render instance with a persistent disk, or a VM) has never been exercised. Production still runs `4a6ba5c` (run RC).
+- **Load on a hosted instance.** All performance numbers are from the laptop (run L, 2026-11-10, before this branch's changes). No hosted instance has been load-tested.
 - **SIGTERM on Windows.** Windows has no catchable SIGTERM for a child process, so the graceful-stop test is skipped there; graceful stop was verified on Linux only (runs R and D).
-- **`SQLITE_BUSY` across processes.** The two-process test admitted exactly once, but no attempt hit `SQLITE_BUSY` in that run, so the 503 path across processes was not exercised. (Across connections in one process it was, at 100 threads in run C.) Two processes on one file is an unsupported topology.
+- **`mobile-chrome` coverage.** The Pixel 7 project runs only `e2e/onboarding.spec.ts`; the scanner and account specs are not run at phone size.
 
 ## Manual real-device acceptance checklist
 
@@ -228,15 +286,16 @@ Run once on an iPhone with Safari and once on an Android phone with Chrome. Reco
 ### Preparation
 
 1. A deployment reachable over **HTTPS** (the camera is blocked on plain HTTP), built from the commit under test. Write down the commit.
-2. As an owner: one `active` event whose window contains the test time, one scanner device (setup link or key), and at least four passes: A (valid), B (valid), C (revoked), D (valid, used for the reconnect step). Print the passes or show them on a second screen at normal brightness. Note pass A's 8-character reference.
+2. As an owner: one `active` event whose window contains the test time, one scanner device with a fresh **one-time setup link** that has not been opened yet (it works once and expires after an hour; create it shortly before the run), and at least four passes: A (valid), B (valid), C (revoked), D (valid, used for the reconnect step). Print the passes or show them on a second screen at normal brightness. Note pass A's 8-character reference.
 3. A second event with one valid pass E (for the wrong-event case).
-4. Phone: site permissions for the deployment reset (never asked before), sound on, ring/silent switch off on iPhone.
+4. A second scanner device in the first event with its own unopened setup link (for step 22).
+5. Phone: site permissions for the deployment reset (never asked before), sound on, ring/silent switch off on iPhone.
 
 ### Steps
 
 | # | Step | Expected |
 | --- | --- | --- |
-| 1 | Open the scanner setup link. | Scanner page for the event; the key is removed from the address bar; the viewfinder shows "Tap to start scanning". Footer reads "Decoder: starts with the camera". |
+| 1 | Open the one-time scanner setup link. | "Setting up this device…" briefly, then the scanner page for the event; the setup code (the link carries a code, not a key) is removed from the address bar; the viewfinder shows "Tap to start scanning". Footer reads "Decoder: starts with the camera". |
 | 2 | Tap "Tap to start scanning". | The browser asks for camera permission (first visit). |
 | 3 | **Deny** the permission. | An error explains how to allow the camera (iPhone: aA → Website Settings → Camera; Android: icon left of the address → Permissions → Camera) and a "Retry camera" button is shown. No crash, manual entry still usable. |
 | 4 | Allow the camera in the browser's site settings as described, return, tap "Retry camera". | The camera starts without reloading the page. |
@@ -253,18 +312,20 @@ Run once on an iPhone with Safari and once on an Android phone with Chrome. Reco
 | 15 | Enable airplane mode. Present pass D to the camera and try the manual field. | Banner "Scanning paused — offline. Do not admit anyone until the connection returns."; the viewfinder shows "Paused — offline"; no code is checked and the manual submit button is disabled. No "Admit" appears. |
 | 16 | Disable airplane mode. Scan pass D, and as soon as "Checking…" appears enable airplane mode again (or use a link weak enough that the check times out). | "Not verified" overlay telling staff not to admit, with a "Retry verification" button. It stays until staff act. |
 | 17 | Reconnect, tap "Retry verification". | If the first attempt had reached the server: "Admit" with the note "Confirmed after reconnect". If it had not: plain "Admit". In no case "Already used" for pass D. Record which variant was seen; repeat step 16–17 with new passes until the "Confirmed after reconnect" variant is seen, or record "not produced" after five attempts. |
-| 18 | After a "Not verified", present the same code again immediately. | It is checked again at once (no 12 s suppression after "Not verified"). |
+| 18 | After a "Not verified" (from a timeout, or from a server or gateway error), present the same code again immediately. | It is checked again at once (no 12 s suppression after "Not verified"). If the failed attempt had reached the server, the verdict is "Admit" with the note "Confirmed after reconnect", never "Already used". |
 | 19 | Rotate to landscape and scan a new valid pass. | Layout usable in landscape: viewfinder, overlay and buttons fully visible; verdict readable. Rotate back. |
 | 20 | VoiceOver (iPhone) / TalkBack (Android) on. Scan an already used pass, keep it out of view for more than 12 s, then scan it again. | Each verdict is announced (verdict, reason, name), including the second of two identical consecutive verdicts; the result overlay can be reached and dismissed with the screen reader. |
 | 21 | Turn the camera off with the "Camera" button. | "Camera off. Use manual entry below."; manual entry still works. |
+| 22 | Open the second device's setup link on this phone, which is already set up. | A dialog asks "Replace this scanner's setup?" with the buttons "Use the new setup" and "Keep the current setup". "Keep the current setup" returns to the scanner unchanged. |
+| 23 | Open the first setup link (already used in step 1) in a private tab. | No scanner session: "This setup link is invalid, expired or already used. Ask the organiser for a new setup link." |
 
 ### Results
 
 Copy one row per device run. Mark each step P (pass), F (fail, add a note) or N/A (with reason).
 
-| Device | OS version | Browser and version | Date | Tester | Commit | 1 | 2 | 3 | 4 | 5 | 6 | 7 (decoder) | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 (variant) | 18 | 19 | 20 | 21 | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| iPhone: | iOS | Safari | | | | | | | | | | | | | | | | | | | | | | | | | |
-| Android: | Android | Chrome | | | | | | | | | | | | | | | | | | | | | | | | | |
+| Device | OS version | Browser and version | Date | Tester | Commit | 1 | 2 | 3 | 4 | 5 | 6 | 7 (decoder) | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 (variant) | 18 | 19 | 20 | 21 | 22 | 23 | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| iPhone: | iOS | Safari | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+| Android: | Android | Chrome | | | | | | | | | | | | | | | | | | | | | | | | | | | |
 
 No row has been filled in yet.

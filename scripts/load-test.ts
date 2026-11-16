@@ -161,7 +161,10 @@ async function httpPart(): Promise<HttpPartResult> {
       endsAt: new Date(now + 6 * 3_600_000).toISOString()
     });
     const keys: string[] = [];
-    for (let i = 0; i < config.scanners; i++) keys.push((await admin<{ key: string }>('POST', `/api/events/${event.id}/scanners`, { label: `Load ${i + 1}` })).key);
+    for (let i = 0; i < config.scanners; i++) {
+      const { enrollment } = await admin<{ enrollment: { url: string } }>('POST', `/api/events/${event.id}/scanners`, { label: `Load ${i + 1}` });
+      keys.push((await admin<{ key: string }>('POST', '/api/scanner/enroll', { code: enrollment.url.split('#enroll=')[1] })).key);
+    }
     const tokens: string[] = [];
     for (let left = passes; left > 0; left -= 500) {
       const issued = await admin<Array<{ token: string }>>('POST', `/api/events/${event.id}/passes`, { count: Math.min(500, left) });
@@ -306,8 +309,8 @@ function syncTrial(mode: 'FULL' | 'NORMAL', trial: number): SyncTrial {
     const service = new GatePass(db, { publicUrl: 'https://gate.example' });
     const now = Date.now();
     const event = service.createEvent({ name: 'Sync', startsAt: new Date(now - 3_600_000).toISOString(), endsAt: new Date(now + 6 * 3_600_000).toISOString() }, 'operator');
-    const { key } = service.createScanner(event.id, 'Sync door', null, 'operator');
-    const scanner = service.authenticateScanner(key)!;
+    const { scanner: created } = service.createScanner(event.id, 'Sync door', null, 'operator');
+    const scanner = { id: created.id, eventId: created.eventId, gateId: created.gateId, label: created.label };
     const warmup = 100;
     const tokens: string[] = [];
     for (let left = config.syncRedeems + warmup; left > 0; left -= 500) tokens.push(...service.issuePasses(event.id, { count: Math.min(500, left) }, 'operator').map((pass) => pass.token));

@@ -36,7 +36,7 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
     <div className="stack-sm">
       <ErrorNote message={error} />
       <div className="table-wrap">
-        <table>
+        <table className="table-cards">
           <thead>
             <tr>
               <th scope="col">Time ({zoneLabel(event.timeZone, event.startsAt)})</th>
@@ -49,13 +49,13 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
           <tbody>
             {scans?.map((scan) => (
               <tr key={scan.id}>
-                <td className="num muted">{formatTimeInZone(scan.createdAt, event.timeZone)}</td>
-                <td>
+                <td className="muted nowrap cell-meta">{formatTimeInZone(scan.createdAt, event.timeZone)}</td>
+                <td className="cell-badge">
                   <OutcomeBadge outcome={scan.outcome} />
                 </td>
-                <td className="strong">{scan.passId ? scan.attendeeName || <code>{scan.passId.slice(0, 8)}</code> : <span className="muted">—</span>}</td>
-                <td>{scan.gateName ?? <span className="muted">Any gate</span>}</td>
-                <td className="muted">{scan.scannerLabel}</td>
+                <td className="strong cell-primary">{scan.passId ? scan.attendeeName || <code>{scan.passId.slice(0, 8)}</code> : <span className="muted">—</span>}</td>
+                <td className="cell-sub">{scan.gateName ?? <span className="muted">Any gate</span>}</td>
+                <td className="muted cell-sub">{scan.scannerLabel}</td>
               </tr>
             ))}
             {scans === null && !error ? <TableMessage colSpan={5}>Loading scans…</TableMessage> : null}

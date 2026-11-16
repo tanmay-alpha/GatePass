@@ -99,6 +99,8 @@ export const config = {
   routes: [
     ...backendRoutes,
     { src: '/(.*)', headers: securityHeaders, continue: true },
+    // Build commit for scripts/release-check.ts; must never be served stale.
+    { src: '/version\\.json', headers: { 'Cache-Control': 'no-store' }, continue: true },
     { handle: 'filesystem' },
     ...noBackendRoutes,
     { src: '/(.*)', dest: '/index.html' }

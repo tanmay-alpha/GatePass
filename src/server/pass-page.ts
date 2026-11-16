@@ -18,6 +18,22 @@ const STATUS_TEXT: Record<Pass['status'], string> = {
   expired: 'This pass has expired.'
 };
 
+/** Short label for the pill at the top of the ticket; the full sentence under the ticket is the announced status. */
+const STATUS_PILL: Record<Pass['status'], string> = {
+  active: 'Valid',
+  redeemed: 'Used',
+  revoked: 'Revoked',
+  expired: 'Expired'
+};
+
+/**
+ * Map search for the venue text: a plain link (no embed, no script), opened in
+ * a new tab without a referrer so the pass URL (a bearer link) never leaks.
+ */
+export function directionsUrl(venue: string): string {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(venue)}`;
+}
+
 /**
  * Server-rendered, script-free page an attendee opens from the QR or a shared
  * link. Unknown and malformed tokens get the same response. Every time is
@@ -39,6 +55,9 @@ export function renderPassPage(view: PassView | null): string {
   const zone = validZone(event.timeZone);
   const attendee = pass.attendeeName ? escapeHtml(pass.attendeeName) : 'Guest';
   const venue = event.venue ? escapeHtml(event.venue) : '—';
+  const directions = event.venue
+    ? `<a class="directions" href="${escapeHtml(directionsUrl(event.venue))}" target="_blank" rel="noopener noreferrer">Get directions<span class="sr-only"> to ${venue} (opens Google Maps)</span></a>`
+    : '';
   const admissionText = escapeHtml(formatAdmission(admission));
   const redeemed = pass.redeemedAt ? ` Checked in ${escapeHtml(formatMoment(pass.redeemedAt, zone))}.` : '';
   const reference = escapeHtml(pass.id.slice(0, 8).toUpperCase());
@@ -48,21 +67,25 @@ export function renderPassPage(view: PassView | null): string {
 
   const body = `
     <div class="card">
-      <p class="brand">GATEPASS</p>
+      <div class="top">
+        <p class="brand">GATEPASS</p>
+        <span class="pill ${pass.status}" aria-hidden="true">${STATUS_PILL[pass.status]}</span>
+      </div>
       <h1 class="event-name">${escapeHtml(event.name)}</h1>
       <div class="grid">
+        <div class="field field-wide">
+          <span class="label">Attendee</span>
+          <span class="value value-lg">${attendee}</span>
+        </div>
         <div class="field field-wide">
           <span class="label">Date</span>
           <span class="value">${escapeHtml(formatEventWhen(event.startsAt, event.endsAt, zone))}</span>
           <span class="zone">${escapeHtml(zoneLabel(event.startsAt, zone))}</span>
         </div>
-        <div class="field">
+        <div class="field field-wide">
           <span class="label">Venue</span>
           <span class="value">${venue}</span>
-        </div>
-        <div class="field">
-          <span class="label">Attendee</span>
-          <span class="value">${attendee}</span>
+          ${directions}
         </div>
         <div class="field field-wide">
           <span class="label">Admission</span>
@@ -157,6 +180,7 @@ function layout(title: string, body: string): string {
   --ok:#3fb950;
   --warn:#e3a008;
   --bad:#f05252;
+  --accent:#8b97ff;
 }
 @media (prefers-color-scheme:light){
   :root{
@@ -168,13 +192,14 @@ function layout(title: string, body: string): string {
     --ok:#1a7f37;
     --warn:#805600;
     --bad:#cf222e;
+    --accent:#3b4fd8;
   }
 }
 body{
   margin:0;
   background:var(--bg);
   color:var(--fg);
-  font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  font:14px/1.5 "Inter Variable",Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   min-height:100vh;
   display:flex;
   flex-direction:column;
@@ -228,10 +253,72 @@ main{
   margin:0;
   line-height:1.5;
 }
+.top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin:0 0 8px;
+}
+.top .brand{
+  margin:0;
+}
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:2px 10px;
+  border:1px solid currentColor;
+  border-radius:999px;
+  font-size:0.75rem;
+  font-weight:600;
+}
+.pill::before{
+  content:'';
+  width:6px;
+  height:6px;
+  border-radius:50%;
+  background:currentColor;
+}
+.pill.active{color:var(--ok)}
+.pill.redeemed{color:var(--warn)}
+.pill.revoked,.pill.expired{color:var(--bad)}
 .grid{
   display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:16px 12px;
+  grid-template-columns:1fr;
+  gap:14px;
+}
+.value-lg{
+  font-size:1.05rem;
+}
+.directions{
+  display:inline-flex;
+  align-items:center;
+  align-self:flex-start;
+  min-height:44px;
+  margin:-6px 0 -10px;
+  font-size:0.85rem;
+  font-weight:600;
+  color:var(--accent);
+  text-underline-offset:3px;
+}
+.directions::after{
+  content:'\\2197';
+  margin-left:4px;
+  text-decoration:none;
+}
+.directions:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+  border-radius:4px;
+}
+.sr-only{
+  position:absolute;
+  width:1px;
+  height:1px;
+  overflow:hidden;
+  clip-path:inset(50%);
+  white-space:nowrap;
 }
 .field{
   display:flex;
@@ -308,8 +395,8 @@ main{
   background:#ffffff;
   border-radius:12px;
   padding:12px;
-  width:220px;
-  height:220px;
+  width:min(100%,264px);
+  aspect-ratio:1;
   box-sizing:border-box;
   display:flex;
   align-items:center;
@@ -342,23 +429,23 @@ main{
   padding:12px 0 0;
 }
 .status{
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  gap:8px;
-  font-size:0.85rem;
-  font-weight:500;
+  font-size:0.9rem;
+  font-weight:600;
   margin:18px 0 6px;
   text-align:center;
 }
+/* Inline dot, so a status that wraps onto two lines keeps the dot beside its first word. */
 .status::before{
   content:'';
   display:inline-block;
   width:7px;
   height:7px;
+  margin-right:8px;
   border-radius:50%;
   background:currentColor;
-  flex-shrink:0;
+  vertical-align:middle;
+  position:relative;
+  top:-1px;
 }
 .status.active{color:var(--ok)}
 .status.redeemed{color:var(--warn)}
@@ -408,8 +495,9 @@ main{
   .qr{
     -webkit-print-color-adjust:exact;
     print-color-adjust:exact;
+    width:60mm;
   }
-  .status::before{
+  .status::before,.directions{
     display:none;
   }
 }

@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { verifyDatabase } from '../src/server/integrity';
-import { createHarness, EVENT_INPUT, scan, seedEvent, type Harness } from './helpers';
+import { createHarness, enroll, EVENT_INPUT, scan, seedEvent, setupCode, type Harness } from './helpers';
 
 let h: Harness;
 beforeEach(() => {
@@ -14,7 +14,7 @@ const admin = (method: 'get' | 'post' | 'patch' | 'delete', path: string) => h.a
 describe('event lifecycle, time zone and capacity', () => {
   it('admits only while active and allows only the documented status moves', async () => {
     const event = (await admin('post', '/api/events').send({ ...EVENT_INPUT, status: 'draft' }).expect(201)).body;
-    const scanner = (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door' }).expect(201)).body;
+    const scanner = { key: await enroll(h.app, (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door' }).expect(201)).body) };
     const [first, second] = (await admin('post', `/api/events/${event.id}/passes`).send({ count: 2 }).expect(201)).body;
     expect((await scan(h, scanner.key, first.token).expect(200)).body.outcome).toBe('event_closed');
 
@@ -40,7 +40,7 @@ describe('event lifecycle, time zone and capacity', () => {
   it('enforces an event-wide capacity across policies and refuses lowering it below admissions', async () => {
     const event = (await admin('post', '/api/events').send({ ...EVENT_INPUT, capacity: 2 }).expect(201)).body;
     const vip = (await admin('post', `/api/events/${event.id}/policies`).send({ name: 'VIP', capacity: 10 }).expect(201)).body;
-    const scanner = (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door' }).expect(201)).body;
+    const scanner = { key: await enroll(h.app, (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door' }).expect(201)).body) };
     const general = (await admin('post', `/api/events/${event.id}/passes`).send({ count: 2 }).expect(201)).body;
     const [vipPass] = (await admin('post', `/api/events/${event.id}/passes`).send({ count: 1, policyId: vip.id }).expect(201)).body;
     for (const pass of general) expect((await scan(h, scanner.key, pass.token)).body.outcome).toBe('admitted');
@@ -188,7 +188,7 @@ describe('scanner behaviour', () => {
 
   it('keeps request ids per device: another scanner reusing an id gets its own judgement', async () => {
     const { event, passes, scannerKey } = await seedEvent(h, 1);
-    const other = (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door 2' }).expect(201)).body.key;
+    const other = await enroll(h.app, (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door 2' }).expect(201)).body);
     const send = (key: string) => request(h.app).post('/api/scanner/redeem').set('Authorization', `Bearer ${key}`).send({ code: passes[0].token, requestId: 'shared-id-123' });
     expect((await send(scannerKey)).body.outcome).toBe('admitted');
     expect((await send(other)).body).toMatchObject({ outcome: 'already_redeemed', detail: { sameDevice: false } });
@@ -208,9 +208,10 @@ describe('scanner behaviour', () => {
     const { event, passes, scannerKey, scannerId } = await seedEvent(h, 2);
     await scan(h, scannerKey, passes[0].token).expect(200);
     const rotated = (await admin('post', `/api/scanners/${scannerId}/rotate`).expect(200)).body;
-    expect(rotated.scanner.id).toBe(scannerId);
+    expect(rotated.scanner).toMatchObject({ id: scannerId, setup: 'pending', enrolledAt: null });
+    expect(rotated).not.toHaveProperty('key');
     await scan(h, scannerKey, passes[1].token).expect(401);
-    expect((await scan(h, rotated.key, passes[1].token)).body.outcome).toBe('admitted');
+    expect((await scan(h, await enroll(h.app, rotated), passes[1].token)).body.outcome).toBe('admitted');
     expect(h.service.listScans(event.id).every((s) => s.scannerId === scannerId)).toBe(true);
   });
 
@@ -225,5 +226,76 @@ describe('scanner behaviour', () => {
     expect(ops.scanners).toEqual([expect.objectContaining({ label: 'Door 1', state: 'recent', scansLast15m: 1, revoked: false })]);
     h.clock.advance(11 * 60_000);
     expect((await admin('get', `/api/events/${event.id}/operations`).expect(200)).body.scanners[0].state).toBe('idle');
+  });
+});
+
+describe('one-time scanner enrollment', () => {
+  const enrollWith = (code: string) => request(h.app).post('/api/scanner/enroll').send({ code });
+
+  it('never puts the device key in the setup link; the link works exactly once', async () => {
+    const event = (await admin('post', '/api/events').send(EVENT_INPUT).expect(201)).body;
+    const created = (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door' }).expect(201)).body;
+    expect(created).not.toHaveProperty('key');
+    expect(created.enrollment.url).toMatch(/^https:\/\/gate\.example\/scan#enroll=[A-Za-z0-9_-]{43}$/);
+    expect(created.scanner).toMatchObject({ setup: 'pending', enrolledAt: null });
+
+    const first = (await enrollWith(setupCode(created)).expect(201)).body;
+    expect(first.key).toMatch(/^gps_/);
+    expect(first.session).toMatchObject({ scanner: { id: created.scanner.id }, event: { id: event.id } });
+    await enrollWith(setupCode(created)).expect(410); // replay
+    const [scanner] = (await admin('get', `/api/events/${event.id}/scanners`).expect(200)).body;
+    expect(scanner).toMatchObject({ setup: 'enrolled', setupExpiresAt: null });
+    // Only hashes are stored: neither the code nor the key appears in the database.
+    const dump = JSON.stringify(h.db.prepare('SELECT * FROM scanner_enrollments').all()) + JSON.stringify(h.db.prepare('SELECT * FROM scanners').all());
+    expect(dump).not.toContain(setupCode(created));
+    expect(dump).not.toContain(first.key);
+  });
+
+  it('counts a device as ready for the door only once a phone holds its key', async () => {
+    const event = (await admin('post', '/api/events').send(EVENT_INPUT).expect(201)).body;
+    const counts = async () => {
+      const { scannerCount, readyScannerCount } = (await admin('get', `/api/events/${event.id}`).expect(200)).body;
+      return { scannerCount, readyScannerCount };
+    };
+    const created = (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door' }).expect(201)).body;
+    expect(await counts()).toEqual({ scannerCount: 1, readyScannerCount: 0 }); // link not opened yet
+    await enrollWith(setupCode(created)).expect(201);
+    expect(await counts()).toEqual({ scannerCount: 1, readyScannerCount: 1 });
+    await admin('post', `/api/scanners/${created.scanner.id}/rotate`).expect(200); // key stopped, new link waiting
+    expect(await counts()).toEqual({ scannerCount: 1, readyScannerCount: 0 });
+  });
+
+  it('lets exactly one of two racing devices claim a link', async () => {
+    const event = (await admin('post', '/api/events').send(EVENT_INPUT).expect(201)).body;
+    const created = (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Door' }).expect(201)).body;
+    const results = await Promise.all([enrollWith(setupCode(created)), enrollWith(setupCode(created))]);
+    expect(results.map((r) => r.status).sort()).toEqual([201, 410]);
+  });
+
+  it('refuses expired, superseded and revoked links, and audits the enrollment', async () => {
+    const event = (await admin('post', '/api/events').send(EVENT_INPUT).expect(201)).body;
+    const expiring = (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Late phone' }).expect(201)).body;
+    h.clock.advance(60 * 60_000);
+    await enrollWith(setupCode(expiring)).expect(410);
+    expect((await admin('get', `/api/events/${event.id}/scanners`).expect(200)).body[0]).toMatchObject({ setup: 'expired' });
+
+    const renewed = (await admin('post', `/api/scanners/${expiring.scanner.id}/rotate`).expect(200)).body;
+    const newest = (await admin('post', `/api/scanners/${expiring.scanner.id}/rotate`).expect(200)).body;
+    await enrollWith(setupCode(renewed)).expect(410); // superseded by the newest link
+    await enrollWith(setupCode(newest)).expect(201);
+
+    const lost = (await admin('post', `/api/events/${event.id}/scanners`).send({ label: 'Lost phone' }).expect(201)).body;
+    await admin('post', `/api/scanners/${lost.scanner.id}/revoke`).expect(200);
+    await enrollWith(setupCode(lost)).expect(410);
+    await admin('post', `/api/scanners/${lost.scanner.id}/rotate`).expect(409);
+
+    const audit = (await admin('get', `/api/events/${event.id}/audit?action=scanner.enrolled`).expect(200)).body;
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actor: `scanner:${expiring.scanner.id}`, actorLabel: 'Late phone' });
+  });
+
+  it('throttles repeated bad codes from one address', async () => {
+    for (let i = 0; i < 60; i += 1) await enrollWith(`bad-code-${i}`.padEnd(43, 'x')).expect(410);
+    await enrollWith('x'.repeat(43)).expect(429);
   });
 });

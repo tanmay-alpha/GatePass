@@ -67,12 +67,16 @@ test('organiser configures gates and a capped policy; door staff see admit, dupl
   const south = await phone.newPage();
   await south.goto(setupLinks['South phone']);
   await expect(south.getByText('South phone')).toBeVisible();
-  expect(south.url()).not.toContain('key='); // key removed from the address bar
+  expect(south.url()).not.toContain('enroll='); // one-time code removed from the address bar
   await scan(south, passes[0].passUrl);
   await expect(verdict(south)).toContainText('Use gate: North');
 
+  // Same phone storage, another setup link: the scanner asks before replacing its setup.
   const north = await phone.newPage();
   await north.goto(setupLinks['North phone']);
+  const replace = north.getByRole('alertdialog', { name: "Replace this scanner's setup?" });
+  await expect(replace).toContainText('South phone');
+  await replace.getByRole('button', { name: 'Use the new setup' }).click();
   await expect(north.getByText('North phone')).toBeVisible();
   await scan(north, passes[0].passUrl);
   await expect(verdict(north)).toHaveAccessibleName('Admit');
@@ -114,7 +118,7 @@ test('revoked passes and revoked scanner devices are refused at the door', async
   expect((await api.post(`/api/passes/${pass.id}/revoke`, { headers: CSRF })).ok()).toBe(true);
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`/scan#key=${scanner.key}`);
+  await page.goto(`/scan${new URL(scanner.enrollment.url).hash}`);
   await expect(page.getByText('Gate phone')).toBeVisible();
   await scan(page, pass.passUrl);
   await expect(verdict(page)).toContainText('This pass was revoked by the organiser.');
@@ -122,7 +126,7 @@ test('revoked passes and revoked scanner devices are refused at the door', async
   expect((await api.post(`/api/scanners/${scanner.scanner.id}/revoke`, { headers: CSRF })).ok()).toBe(true);
   await dismiss(page);
   await scan(page, pass.passUrl);
-  await expect(page.getByLabel('Scanner key')).toBeVisible();
+  await expect(page.getByLabel('Setup link or code')).toBeVisible();
   await expect(page.getByText(/revoked/i).first()).toBeVisible();
 });
 
@@ -148,7 +152,8 @@ test('expired passes are refused once their expiry passes, and the pass page say
   await page.reload();
   await expect(page.getByRole('status')).toHaveText(/expired/);
 
-  // A scanner device has no session cookie: use a cookie-less request context.
-  const result = await request.post('/api/scanner/redeem', { headers: { Authorization: `Bearer ${scanner.key}` }, data: { code: pass.passUrl } });
+  // A scanner device has no session cookie: use a cookie-less request context, enrolled through its one-time setup code.
+  const { key } = await (await request.post('/api/scanner/enroll', { data: { code: new URL(scanner.enrollment.url).hash.replace('#enroll=', '') } })).json();
+  const result = await request.post('/api/scanner/redeem', { headers: { Authorization: `Bearer ${key}` }, data: { code: pass.passUrl } });
   expect((await result.json()).outcome).toBe('expired');
 });

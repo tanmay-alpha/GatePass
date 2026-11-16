@@ -20,6 +20,8 @@ export function PoliciesSection({ event, gates, policies, error: loadError, onCh
   /** `null` = closed, `'new'` = create, otherwise the policy being edited. */
   const [editing, setEditing] = useState<AdmissionPolicy | 'new' | null>(null);
   const [error, setError] = useState('');
+  /** Policy whose delete request is in flight; its button stays disabled so it cannot be sent twice. */
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [confirm, dialog] = useConfirm();
   const notify = useToast();
   const gateNames = new Map(gates.map((gate) => [gate.id, gate.name]));
@@ -35,12 +37,15 @@ export function PoliciesSection({ event, gates, policies, error: loadError, onCh
     });
     if (!ok) return;
     setError('');
+    setDeleting(policy.id);
     try {
       await adminApi(`/api/policies/${policy.id}`, { method: 'DELETE' });
       await onChanged();
       notify(`Policy “${policy.name}” deleted`);
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      setDeleting(null);
     }
   }
 
@@ -68,7 +73,7 @@ export function PoliciesSection({ event, gates, policies, error: loadError, onCh
       ) : null}
       {policies?.length ? (
         <div className="table-wrap">
-          <table>
+          <table className="table-cards">
             <thead>
               <tr>
                 <th scope="col">Name</th>
@@ -88,22 +93,25 @@ export function PoliciesSection({ event, gates, policies, error: loadError, onCh
             <tbody>
               {policies.map((policy) => (
                 <tr key={policy.id}>
-                  <td className="strong">{policy.name}</td>
-                  <td className="num nowrap">
+                  <td className="strong cell-primary">{policy.name}</td>
+                  <td className="nowrap" data-label="Window">
                     {policy.opensAt ? formatShortInZone(policy.opensAt, zone) : 'Event start'} – {policy.closesAt ? formatShortInZone(policy.closesAt, zone) : 'Event end'}
                   </td>
-                  <td className="capacity-cell">
+                  <td className="capacity-cell" data-label="Capacity">
                     <CapacityLine admitted={policy.admittedCount} capacity={policy.capacity} />
                   </td>
-                  <td>{policy.gateIds.length ? policy.gateIds.map((id) => gateNames.get(id) ?? 'Unknown gate').join(', ') : <span className="muted">Any gate</span>}</td>
-                  <td className="num">{policy.passCount}</td>
+                  <td data-label="Allowed gates">{policy.gateIds.length ? policy.gateIds.map((id) => gateNames.get(id) ?? 'Unknown gate').join(', ') : <span className="muted">Any gate</span>}</td>
+                  <td className="num" data-label="Passes">
+                    {policy.passCount}
+                  </td>
                   {editable ? (
                     <td className="row-actions">
                       <button className="btn btn-ghost btn-small" onClick={() => setEditing(policy)} aria-label={`Edit policy ${policy.name}`}>
                         <Pencil size={14} aria-hidden /> Edit
                       </button>
-                      <button className="btn btn-ghost btn-icon danger" onClick={() => void remove(policy)} aria-label={`Delete policy ${policy.name}`} title="Delete">
+                      <button className="btn btn-ghost btn-icon danger" onClick={() => void remove(policy)} disabled={deleting === policy.id} aria-label={`Delete policy ${policy.name}`} title="Delete">
                         <Trash2 size={14} aria-hidden />
+                        <span className="row-action-text">Delete</span>
                       </button>
                     </td>
                   ) : null}

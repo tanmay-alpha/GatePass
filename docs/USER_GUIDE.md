@@ -64,12 +64,14 @@ Invitation links expire after 7 days and work once. If the page says the link is
 
 - Sign in with your email and password. After several wrong passwords, sign-in is paused for a while ("Too many attempts").
 - To change your password, open the menu with your name (top right) and choose **Change password**. Your other devices are signed out.
-- Forgot your password? Ask your GatePass administrator for a reset link. A reset link works for one hour.
+- Forgot your password? When the server can send email, click **Forgot your password?** on the sign-in screen and GatePass emails you a one-time reset link. Otherwise ask your GatePass administrator for a reset link. A reset link works once, for one hour.
 - You stay signed in for up to 7 days, or until 24 hours pass without using GatePass. Then you sign in again.
 
 ## 5. Create an event
 
-Click **New event** (the **+** next to **Events** in the left column) and fill in:
+After signing in you see **Your events**: one card per event with its status, dates, venue and how many pass holders have checked in. Events whose setup is not finished are marked **Setup not finished**. Click a card (or an event in the left column) to open it. On a phone the left column becomes an event picker at the top.
+
+Click **New event** (on **Your events**, or the **+** next to **Events** in the left column) and fill in:
 
 - **Name** – for example "City Tech Meetup".
 - **Venue (optional)**.
@@ -88,13 +90,13 @@ Click **Create event**. If something is missing or wrong (for example, the end i
 
 ## 6. The setup checklist
 
-A new event shows **Set up this event**, with how many steps are done. Work from the top.
+A new event shows **Set up this event**, with how many steps are done and which one is next. Work from the top.
 
 1. **Create event** – done when the event exists.
 2. **Add gates** (optional) – one per entrance. Skip if you have a single door.
 3. **Configure admission** (optional) – limit some passes to a time slot, gate or capacity. Skip for general admission.
 4. **Issue passes** – add attendees and share each pass link.
-5. **Set up a scanner** – open the setup link on each door phone.
+5. **Set up a scanner** – add a door device, then open its one-time setup link on that phone.
 6. **Open the event (set Active)** – scanners refuse every pass while the event is a draft.
 7. **Begin entry** – scan the first pass at the door and watch progress on **Operations**.
 
@@ -102,7 +104,7 @@ Each step has a button that takes you to the right place. Optional steps have **
 
 ![Setup checklist on a new draft event](screenshots/guide/05-setup-checklist.png)
 
-When the event is Active and has passes and at least one scanner, the checklist changes to **Ready for doors**. After the first scan it disappears.
+When the event is Active, has passes and at least one door device has opened its setup link, the checklist changes to **Ready for doors**. Adding a device is not enough: until a phone opens the link, the **Set up a scanner** step stays open. After the first scan the checklist disappears.
 
 ## 7. Gates and admission policies
 
@@ -167,9 +169,9 @@ After the import, the new passes are shown once, the same as passes issued by ha
 
 ### Send passes to attendees
 
-GatePass does not send emails. You send each link yourself, by email, chat or text message, or you hand out printed passes. The attendee opens the link and shows the QR code at the door.
+GatePass does not email passes. You send each link yourself, by email, chat or text message, or you hand out printed passes. The attendee opens the link and shows the QR code at the door.
 
-The pass page shows the event, the times in the event's time zone, the attendee's name, what the pass allows (for example "General admission"), the QR code and an 8-character **Reference (for manual entry at the door)**. Opening the page does not check anyone in.
+The pass page shows whether the pass is valid, the attendee's name, the event, the times in the event's time zone, the venue with a **Get directions** link (a map search for the venue text; it opens in a new tab), what the pass allows (for example "General admission"), the QR code and an 8-character **Reference (for manual entry at the door)**. Opening the page does not check anyone in. Printing the page gives a single, black-and-white pass.
 
 ![Attendee pass page](screenshots/guide/21-attendee-pass.png)
 
@@ -179,7 +181,7 @@ The list shows every pass with its status (**Active**, **Redeemed**, **Revoked**
 
 ![Pass list](screenshots/guide/10-passes-list.png)
 
-Actions on a pass (icons at the end of the row):
+Actions on a pass (icons at the end of the row; on a phone each pass is a compact card and the actions are labelled buttons under it):
 
 - **Change policy** – moves the pass to another group, for example from no policy to VIP. The QR code stays the same.
 - **Reissue** – for a lost pass. You get a new code and link, shown once. The old code stops working immediately.
@@ -199,25 +201,25 @@ Printing is limited to 500 passes at a time; for larger batches use the CSV of l
 
 ## 10. Set up door devices (scanners)
 
-Each door phone or tablet gets its own key, which only works for this event.
+Each door phone or tablet gets its own key, which only works for this event. The key reaches the device through a one-time setup link, so it never has to be copied by hand.
 
 1. In the **Access** tab, under **Scanner devices**, enter a **Device label** (for example "North phone 1") and choose its **Gate** (or **Any gate**).
 2. Click **Add device**. A setup card appears with a QR code and a **Setup link**.
-3. On the door device, scan the setup QR code with the camera, or open the setup link. The device remembers its key; staff only do this once per device.
-4. Click **Done**. The key is shown only once.
+3. On the door device, scan the setup QR code with the camera, or open the setup link. The link works once, on one device, and expires after an hour. The device then remembers its key; staff only do this once per device.
+4. Click **Done**. The setup link is shown only on this card; the card closes by itself once the device has opened the link.
 
 ![Scanner setup card](screenshots/guide/12-scanner-setup.png)
 
-Treat the setup link like a key: anyone who has it can scan for your event.
+Until a device has opened its link, the device table shows **Waiting for device**; if the hour passes first it shows **Setup link expired** – click **New setup link** to get another one.
 
-- **Rotate key** – use this if a setup link was shared by mistake. The old key and link stop working immediately and you get a new setup link. History and gate stay the same.
+- **Rotate key** – use this if a device may be compromised. Its current key stops working immediately and you get a new one-time setup link to open on the device. History and gate stay the same.
 - **Revoke** – use this if a device is lost or stolen. It can no longer scan. Its past scans stay in the history. To use it again, add it as a new device.
 
 The device table shows when each device was **Last used**.
 
 ### Open the event
 
-When gates, passes and devices are ready, open the **Settings** tab and click **Open the event**, then confirm. Only the owner can do this. The checklist then shows **Ready for doors**.
+When gates, passes and devices are ready, open the **Settings** tab and click **Open the event**, then confirm. Only the owner can do this. The checklist then shows **Ready for doors**, provided at least one door device has opened its setup link.
 
 ![Ready for doors](screenshots/guide/13-ready-for-doors.png)
 

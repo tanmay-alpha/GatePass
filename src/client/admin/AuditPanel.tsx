@@ -130,7 +130,7 @@ export function AuditPanel({ event }: { event: EventSummary }) {
       </div>
       <ErrorNote message={error} />
       <div className="table-wrap">
-        <table aria-busy={loading}>
+        <table className="table-cards" aria-busy={loading}>
           <thead>
             <tr>
               <th scope="col">Time ({zoneLabel(event.timeZone, event.startsAt)})</th>
@@ -142,10 +142,12 @@ export function AuditPanel({ event }: { event: EventSummary }) {
           <tbody>
             {entries?.map((entry) => (
               <tr key={entry.id}>
-                <td className="num muted nowrap">{formatDateTimeInZone(entry.createdAt, event.timeZone, false)}</td>
-                <td className="strong">{actionLabel(entry.action)}</td>
-                <td>{describe(entry)}</td>
-                <td className="muted">{entry.actorLabel}</td>
+                <td className="muted nowrap cell-meta">{formatDateTimeInZone(entry.createdAt, event.timeZone, false)}</td>
+                <td className="strong cell-primary">{actionLabel(entry.action)}</td>
+                <td className="cell-full">{describe(entry)}</td>
+                <td className="muted" data-label="By">
+                  {entry.actorLabel}
+                </td>
               </tr>
             ))}
             {entries === null && !error ? <TableMessage colSpan={4}>Loading audit log…</TableMessage> : null}

@@ -200,6 +200,8 @@ The database holds events, attendee names and email addresses, scanner metadata,
 
 Restoring a backup rolls back redemptions made after it was taken: those passes become redeemable again. Back up immediately before and after an event, and avoid restoring during doors-open.
 
+`scripts/offsite-backup.sh` automates the Docker path end to end: online `backup`, `verify`, `docker cp` to the host with a checksum check, an optional upload hook (`BACKUP_UPLOAD_CMD`, e.g. rclone or scp) and retention. See [deployment-runbook.md](deployment-runbook.md#off-host-backups-docker-single-host).
+
 ### Online backup (app keeps running)
 
 `VACUUM INTO` writes a consistent, compacted copy while the app is serving traffic. The image has no `sqlite3` CLI; Node's built-in `node:sqlite` does the job:
@@ -422,7 +424,7 @@ sudo systemctl restart gatepass
 | --- | --- | --- |
 | Account session (`__Host-gatepass_session` cookie) | `/api/events*`, `/api/passes*`, `/api/scanners*` for events where the user is owner or manager (non-members get 404); `/api/platform/*` for platform admins. | Email and password (scrypt), HttpOnly cookie, 7-day absolute and 24-hour idle limit; writes need `X-GatePass-CSRF: 1`. Accounts come from sign-up (`ALLOW_SIGNUP=true`) or invitations. |
 | `ADMIN_TOKEN` (`Authorization: Bearer`) | Operator break-glass access to the whole API; not accepted by the UI. | One shared secret, compared in constant time, audited as `operator`. To rotate: change `.env`, then `docker compose up -d` (or `systemctl restart gatepass`). See [security-and-threat-model.md](security-and-threat-model.md). |
-| Scanner key (`gps_…`) | `/api/scanner/session` and `/api/scanner/redeem` for **one event only**. | Created by an admin, shown once as a `/scan#key=…` setup link (the fragment is never sent to the server), stored hashed. Kept in the device's `localStorage`. Revoke a lost or departed device in the admin UI. |
+| Scanner key (`gps_…`) | `/api/scanner/session` and `/api/scanner/redeem` for **one event only**. | Created by an admin; the setup link `/scan#enroll=…` carries a one-time code that expires after about an hour (the fragment is never sent to the server as part of the URL). The device exchanges it once via `POST /api/scanner/enroll` for its key; a used or expired code answers 410. Keys are stored hashed and kept in the device's `localStorage`. Revoke a lost or departed device in the admin UI. |
 | Pass link `/p/<token>` | Viewing that pass and its QR code. | A bearer credential: anyone with the link can show the QR. Viewing never redeems. Revoke or reissue from the admin UI. Pages are `no-store` and `noindex`. |
 | Public | `/api/health`, `/api/auth/login`, `/api/auth/register` (when `ALLOW_SIGNUP=true`), `/api/invitations/preview` and `/accept`, the static UI. | No event data access. |
 

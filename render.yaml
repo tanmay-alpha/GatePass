@@ -1,0 +1,72 @@
+# Render Blueprint for the DURABLE GatePass backend. NOT APPLIED.
+#
+# Status: prepared for owner approval only (docs/deployment-runbook.md,
+# "Durable switch-over"). It describes the target from ADR 0009: one instance
+# with a 1 GB persistent disk holding the SQLite database.
+#
+# - Render ignores this file until someone creates a Blueprint from it
+#   (Dashboard → New → Blueprint). Doing so creates a NEW, PAID service
+#   (about $7/month for the instance plus $0.25/GB/month for the disk at the
+#   last check; re-check render.com/pricing). Do that only with the owner's
+#   approval.
+# - It is deliberately NOT wired to the live free demo service `gatepass-api`
+#   (srv-dbng57u7bikc73cfc5bg): the name differs, so applying it never
+#   modifies or replaces the demo. The runbook lists the alternative of
+#   upgrading the existing service in the Dashboard instead.
+# - Secrets use `sync: false`: Render asks for them when the Blueprint is
+#   created; no value is stored here.
+#
+# Validate without applying: `render blueprints validate render.yaml`
+# (Render CLI >= 2.7), or the JSON schema at https://render.com/schema/render.yaml.json.
+services:
+  - type: web
+    name: gatepass-api-durable
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    region: singapore # same region as the demo service
+    # Starter: 0.5 CPU / 512 MB (ADR 0007). Disks need a paid plan.
+    plan: starter
+    # A disk pins the service to one instance and disables zero-downtime
+    # deploys (a few seconds of downtime per deploy): do not deploy while doors are open.
+    numInstances: 1
+    healthCheckPath: /api/health # 503 when the database is not ready
+    # Deploy main only after the commit's GitHub checks pass, like the live demo service.
+    # Consequence: no check may wait for this service to serve the commit (it would never
+    # finish), which is why release-verify is started by hand after the deploy is live.
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30 # the server drains and closes SQLite on SIGTERM
+    previews:
+      generation: 'off' # quoted: bare off is a YAML boolean. Previews must never get production data or a copy of the disk
+    disk:
+      name: gatepass-data
+      mountPath: /data # the image creates /data owned by the non-root `node` user
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_FILE
+        value: /data/gatepass.db
+      # Durable service: no demo banner, no "data is ephemeral" warning.
+      - key: DEMO_MODE
+        value: 'false'
+      # Accounts come from invitations; self-registration stays off unless the owner decides otherwise.
+      - key: ALLOW_SIGNUP
+        value: 'false'
+      # Requests arrive through Vercel (the frontend proxies /api/* and /p/*).
+      - key: CLIENT_IP_HEADER
+        value: x-vercel-forwarded-for
+      - key: TRUST_PROXY
+        sync: false # copy the value from the current service
+      - key: APP_PUBLIC_URL
+        sync: false # public HTTPS origin, e.g. https://gatepass-sandy.vercel.app
+      # Secrets: entered in the Dashboard when the Blueprint is created; never committed.
+      - key: ADMIN_TOKEN
+        sync: false # >= 24 characters, operator break-glass token
+      - key: ORIGIN_SECRET
+        sync: false # >= 32 characters, same value as Vercel Production ORIGIN_SECRET
+      # Optional transactional email (invitations, password resets). Leave empty to disable.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false

@@ -1,6 +1,6 @@
 # 0002 — Hashed random bearer tokens for passes and scanner keys
 
-Status: accepted
+Status: accepted; the scanner setup link described below is superseded by [ADR 0010](0010-enrollment-recovery-email.md)
 
 ## Context
 
@@ -13,7 +13,7 @@ A pass QR code must let exactly one person in, must be revocable and replaceable
 - Only `sha256(token)` is stored (`passes.token_hash`, `scanners.key_hash`, both `UNIQUE`). An unsalted fast hash is enough because the input has 256 bits of entropy: a leaked database cannot be brute-forced back into tokens.
 - The raw value is returned once, in the issue/reissue or scanner-create response. List endpoints never return it. A lost pass is reissued (new token, same pass ID; the old QR stops working on the next scan); a lost device's key is revoked.
 - Lookup is by hash equality in SQL. The admin token, which is not stored in the database, is compared with `safeEqual` (SHA-256 both sides, then `timingSafeEqual`).
-- Scanner keys travel in the setup link's URL fragment (`/scan#key=…`), which browsers do not send to servers or proxies.
+- Scanner keys originally travelled in the setup link's URL fragment (`/scan#key=…`), which browsers do not send to servers or proxies. Superseded by [ADR 0010](0010-enrollment-recovery-email.md): the link now carries a one-time code (`/scan#enroll=<code>`) and the key never appears in a link; `#key=` links for keys issued before migration 4 keep working until rotated.
 
 ## Consequences
 

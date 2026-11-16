@@ -45,6 +45,8 @@ function GatesSection({ event, gates, error: loadError, onChanged }: GatesProps)
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [renaming, setRenaming] = useState<Gate | null>(null);
+  /** Gate whose delete request is in flight; its button stays disabled so it cannot be sent twice. */
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [confirm, dialog] = useConfirm();
   const notify = useToast();
   const editable = can(event, 'access') && event.status !== 'archived';
@@ -74,12 +76,15 @@ function GatesSection({ event, gates, error: loadError, onChanged }: GatesProps)
     });
     if (!ok) return;
     setError('');
+    setDeleting(gate.id);
     try {
       await adminApi(`/api/gates/${gate.id}`, { method: 'DELETE' });
       await onChanged();
       notify(`Gate “${gate.name}” deleted`);
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      setDeleting(null);
     }
   }
 
@@ -101,7 +106,14 @@ function GatesSection({ event, gates, error: loadError, onChanged }: GatesProps)
                     <button type="button" className="btn btn-ghost btn-icon chip-btn" onClick={() => setRenaming(gate)} aria-label={`Rename gate ${gate.name}`} title="Rename">
                       <Pencil size={13} aria-hidden />
                     </button>
-                    <button type="button" className="btn btn-ghost btn-icon chip-btn danger" onClick={() => void remove(gate)} aria-label={`Delete gate ${gate.name}`} title="Delete">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-icon chip-btn danger"
+                      onClick={() => void remove(gate)}
+                      disabled={deleting === gate.id}
+                      aria-label={`Delete gate ${gate.name}`}
+                      title="Delete"
+                    >
                       <Trash2 size={13} aria-hidden />
                     </button>
                   </span>

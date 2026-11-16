@@ -2,7 +2,8 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/server/app';
 import { loadConfig } from '../src/server/config';
-import { ADMIN_TOKEN, createHarness, scan, seedEvent, type Harness } from './helpers';
+import { SCHEMA_VERSION } from '../src/server/db';
+import { ADMIN_TOKEN, createHarness, enroll, scan, seedEvent, type Harness } from './helpers';
 
 let h: Harness;
 beforeEach(() => {
@@ -53,7 +54,8 @@ const adminRoutes: Array<[method: 'get' | 'post' | 'patch' | 'delete', path: str
   ['post', '/api/qr/custom'],
   ['get', '/api/platform/users'],
   ['post', '/api/platform/invitations'],
-  ['post', '/api/platform/users/x/reset-link']
+  ['post', '/api/platform/users/x/reset-link'],
+  ['post', '/api/platform/users/x/event-creation']
 ];
 
 describe('authentication', () => {
@@ -114,12 +116,27 @@ describe('information exposure', () => {
   });
 
   it('reports an unavailable database through the health check', async () => {
-    await request(h.app).get('/api/health').expect(200, { ok: true, service: 'gatepass', signup: true });
+    await request(h.app).get('/api/health').expect(200, { ok: true, service: 'gatepass', signup: true, email: false, build: { commit: null, schema: SCHEMA_VERSION } });
     vi.spyOn(console, 'error').mockImplementation(() => {});
     h.db.close();
     await request(h.app).get('/api/health').expect(503, { ok: false });
     const failed = await h.admin(request(h.app).get('/api/events')).expect(500);
     expect(failed.body.error).toBe('Internal server error');
+  });
+
+  it('is not ready while the database schema differs from the build (half-applied deploy or wrong file)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    h.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+    await request(h.app).get('/api/health').expect(503, { ok: false });
+    h.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    await request(h.app).get('/api/health').expect(200);
+  });
+
+  it('reports the build commit for release checks and tags every response with a request id', async () => {
+    const app = createApp({ service: h.service, adminToken: ADMIN_TOKEN, buildCommit: 'abc1234' });
+    const response = await request(app).get('/api/health').expect(200);
+    expect(response.body.build).toEqual({ commit: 'abc1234', schema: SCHEMA_VERSION });
+    expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('sends security headers and disables caching on API responses', async () => {
@@ -140,7 +157,7 @@ describe('information exposure', () => {
 
   it('rate-limits scans per device, so gates sharing one NAT address do not throttle each other', async () => {
     const { event, scannerKey } = await seedEvent(h, 1);
-    const addDevice = async (label: string) => (await h.admin(request(h.app).post(`/api/events/${event.id}/scanners`)).send({ label }).expect(201)).body.key as string;
+    const addDevice = async (label: string) => enroll(h.app, (await h.admin(request(h.app).post(`/api/events/${event.id}/scanners`)).send({ label }).expect(201)).body);
     const [second, third] = [await addDevice('Door 2'), await addDevice('Door 3')];
     const statuses: number[] = [];
     for (let i = 0; i < 245; i += 1) statuses.push((await scan(h, scannerKey, 'garbage')).status);

@@ -1,4 +1,4 @@
-import { X } from 'lucide-react';
+import { RotateCw, X } from 'lucide-react';
 import type { Invitation, InvitationLink } from '../../shared/types';
 import { Modal } from '../dialog';
 import { TableMessage, ToneBadge, formatShortDateTime, type Tone } from '../ui';
@@ -16,24 +16,26 @@ export function InvitationStatusBadge({ status }: { status: Invitation['status']
   return <ToneBadge tone={INVITATION_STATUS[status].tone}>{INVITATION_STATUS[status].label}</ToneBadge>;
 }
 
-/** Invitations with status; pending ones can be revoked. Shared with the event Team tab. */
+/** Invitations with status; pending ones can be revoked, pending or expired ones re-sent with a fresh link. Shared with the event Team tab. */
 export function InvitationTable({
   invitations,
   loading,
   pending,
   onRevoke,
+  onResend,
   showRole = false
 }: {
   invitations: Invitation[] | null;
   loading: boolean;
   pending: string | null;
   onRevoke: (invitation: Invitation) => void;
+  onResend: (invitation: Invitation) => void;
   showRole?: boolean;
 }) {
   const columns = showRole ? 5 : 4;
   return (
     <div className="table-wrap">
-      <table>
+      <table className="table-cards">
         <thead>
           <tr>
             <th scope="col">Email</th>
@@ -48,13 +50,20 @@ export function InvitationTable({
         <tbody>
           {invitations?.map((invitation) => (
             <tr key={invitation.id}>
-              <td className="strong">{invitation.email}</td>
-              {showRole ? <td>{INVITATION_ROLE_LABEL[invitation.role]}</td> : null}
-              <td>
+              <td className="strong cell-primary">{invitation.email}</td>
+              {showRole ? <td data-label="Role">{INVITATION_ROLE_LABEL[invitation.role]}</td> : null}
+              <td className="cell-badge">
                 <InvitationStatusBadge status={invitation.status} />
               </td>
-              <td className="num muted nowrap">{invitation.status === 'pending' ? formatShortDateTime(invitation.expiresAt) : '—'}</td>
+              <td className="num muted nowrap" data-label="Expires">
+                {invitation.status === 'pending' ? formatShortDateTime(invitation.expiresAt) : '—'}
+              </td>
               <td className="row-actions">
+                {invitation.status === 'pending' || invitation.status === 'expired' ? (
+                  <button className="btn btn-ghost btn-small" onClick={() => onResend(invitation)} disabled={pending === invitation.id} aria-label={`New link for ${invitation.email}`}>
+                    <RotateCw size={14} aria-hidden /> New link
+                  </button>
+                ) : null}
                 {invitation.status === 'pending' ? (
                   <button className="btn btn-ghost btn-small danger" onClick={() => onRevoke(invitation)} disabled={pending === invitation.id} aria-label={`Revoke invitation for ${invitation.email}`}>
                     <X size={14} aria-hidden /> Revoke
@@ -71,13 +80,28 @@ export function InvitationTable({
   );
 }
 
-/** The invitation link, shown once right after it is created. */
+/**
+ * Right after an invitation is created or renewed. When the provider accepted
+ * the email, only the invitee holds the link; otherwise it is shown once to
+ * share by hand. "Sent" means accepted by the provider, not delivered.
+ */
 export function InvitationLinkDialog({ link, onClose }: { link: InvitationLink; onClose: () => void }) {
+  const { email } = link;
   return (
     <Modal title={`Invitation for ${link.invitation.email}`} onClose={onClose}>
       <div className="stack">
-        <p className="warning-text small">This link is shown only once and no email is sent. Copy it now and send it to {link.invitation.email} yourself.</p>
-        <CopyField label="Invitation link" value={link.url} hint={`Expires ${formatShortDateTime(link.invitation.expiresAt)}. It works once, for this email address only.`} />
+        {email.status === 'sent' ? (
+          <p className="small">
+            The invitation email was handed to the email provider for {link.invitation.email} (message id <code>{email.providerId}</code>). Delivery is not confirmed: if it does not arrive,
+            use “New link” to send it again.
+          </p>
+        ) : (
+          <p className="warning-text small">
+            {email.status === 'failed' ? `The email could not be sent: ${email.error} ` : 'Email is not set up on this server. '}
+            This link is shown only once: copy it now and send it to {link.invitation.email} yourself.
+          </p>
+        )}
+        {link.url ? <CopyField label="Invitation link" value={link.url} hint={`Expires ${formatShortDateTime(link.invitation.expiresAt)}. It works once, for this email address only.`} /> : null}
         <div className="dialog-actions">
           <button type="button" className="btn btn-primary" onClick={onClose}>
             Done

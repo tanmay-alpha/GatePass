@@ -25,7 +25,7 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   }
   // Write-lock contention beyond busy_timeout (e.g. a CLI backup holding the lock): transient, retryable.
   if (error instanceof Error && /database is locked|SQLITE_BUSY/.test(error.message)) {
-    console.error(error);
+    logError(res, 'database busy', error);
     res.setHeader('Retry-After', '1');
     res.status(503).json({ error: 'The server is busy. Try again.' });
     return;
@@ -36,9 +36,15 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
     res.status(status).json({ error: error instanceof Error ? error.message : 'Bad request' });
     return;
   }
-  console.error(error);
+  logError(res, 'unhandled error', error);
   res.status(500).json({ error: 'Internal server error' });
 };
+
+/** One JSON line on stderr, tied to the response's X-Request-Id. Request bodies and headers are never logged. */
+function logError(res: Response, msg: string, error: unknown): void {
+  const detail = error instanceof Error ? { name: error.name, error: error.message, stack: error.stack } : { error: String(error) };
+  console.error(JSON.stringify({ level: 'error', msg, requestId: res.locals.requestId ?? null, ...detail }));
+}
 
 /**
  * Fixed-window limiter backed by express-rate-limit's in-memory store. Keyed by

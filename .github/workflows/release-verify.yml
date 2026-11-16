@@ -1,0 +1,66 @@
+name: Release verify
+# A release is complete only when scripts/release-check.ts passes against
+# production (docs/deployment-runbook.md, "Release gates").
+#
+# - workflow_dispatch: run it once BOTH deployments report the release live
+#   (expected commit defaults to the head of the chosen branch); it waits a
+#   few minutes for a cold start, then runs the nondestructive smoke checks.
+# - schedule: synthetic check every 6 hours: health, frontend/backend commit
+#   agreement and the smoke checks, without an expected commit.
+#
+# Deliberately NOT triggered by the deployment itself: the Render service
+# deploys only after every GitHub check on the commit has passed
+# (`autoDeployTrigger: checksPass`), and a check that waits for Render to
+# serve that commit would keep Render waiting until it failed. The same
+# release check can be run from a laptop: `npx tsx scripts/release-check.ts`.
+#
+# Read-only against production: GET requests plus one unauthenticated POST
+# that the server refuses. No credentials are used.
+#
+# Repository variables (Settings → Secrets and variables → Actions → Variables):
+#   GATEPASS_FRONTEND_URL  default https://gatepass-sandy.vercel.app
+#   GATEPASS_BACKEND_URL   default https://gatepass-api-mvle.onrender.com
+on:
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: 'Commit SHA that must be live (default: head of the selected branch)'
+        required: false
+      frontend_url:
+        description: 'Frontend origin (default: repository variable GATEPASS_FRONTEND_URL)'
+        required: false
+      backend_url:
+        description: 'Backend origin (default: repository variable GATEPASS_BACKEND_URL)'
+        required: false
+  schedule:
+    - cron: '17 */6 * * *'
+concurrency:
+  group: release-verify-${{ github.event_name }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  release-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Run release check
+        env:
+          FRONTEND_URL: ${{ inputs.frontend_url || vars.GATEPASS_FRONTEND_URL || 'https://gatepass-sandy.vercel.app' }}
+          BACKEND_URL: ${{ inputs.backend_url || vars.GATEPASS_BACKEND_URL || 'https://gatepass-api-mvle.onrender.com' }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            workflow_dispatch) export EXPECTED_COMMIT="${INPUT_COMMIT:-$GITHUB_SHA}" RELEASE_CHECK_TIMEOUT=300 ;;
+            *) export RELEASE_CHECK_TIMEOUT=300 ;; # synthetic: no expected commit, allow a cold start
+          esac
+          # Node 24 runs the TypeScript file directly (type stripping); no npm install needed.
+          node scripts/release-check.ts

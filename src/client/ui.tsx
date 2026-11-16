@@ -78,12 +78,13 @@ export function Stat({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-/** Card header: title and optional description on the left, actions or meta on the right. */
-export function SectionHead({ id, title, description, children }: { id?: string; title: string; description?: ReactNode; children?: ReactNode }) {
+/** Card header: title and optional description on the left, actions or meta on the right. `level` 1 when the card is the page itself. */
+export function SectionHead({ id, title, description, level = 2, children }: { id?: string; title: string; description?: ReactNode; level?: 1 | 2; children?: ReactNode }) {
+  const Heading = level === 1 ? 'h1' : 'h2';
   return (
     <div className="section-head">
       <div className="section-title">
-        <h2 id={id}>{title}</h2>
+        <Heading id={id}>{title}</Heading>
         {description ? <p className="muted small">{description}</p> : null}
       </div>
       {children ? <div className="actions">{children}</div> : null}

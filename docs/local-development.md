@@ -32,7 +32,7 @@ npm run dev:web   # vite on http://localhost:5173 (port from WEB_PORT), proxies 
 ```
 
 - **Admin UI**: http://localhost:5173. Create an account with **Sign up** (needs `ALLOW_SIGNUP=true`), then sign in with email and password.
-- **Scanner UI**: http://localhost:5173/scan. Open a scanner setup link from an event's **Scanners** tab, or paste a key.
+- **Scanner UI**: http://localhost:5173/scan. Open a scanner's one-time setup link from an event's **Access** tab (it works once and expires after an hour), or paste the link there.
 - **Pass pages**: issued pass links use `APP_PUBLIC_URL` (default `http://localhost:3000`), so they open `/p/<token>` on the API server.
 
 The database is created at `.local/data/gatepass.db` (with `-wal` and `-shm` files) on first start. Delete the `.local/data` directory to start over. If you change `PORT`, also update the proxy target in `vite.config.ts`.
@@ -41,7 +41,7 @@ The database is created at `.local/data/gatepass.db` (with `-wal` and `-shm` fil
 
 ```sh
 npm run build   # tsc --noEmit, then vite build -> dist/client
-npm start       # node --import tsx src/server/index.ts; serves dist/client and the API on :3000
+npm start       # node dist/server/index.js; serves dist/client and the API on :3000
 ```
 
 ## Environment variables
@@ -54,9 +54,15 @@ npm start       # node --import tsx src/server/index.ts; serves dist/client and 
 | `DATABASE_FILE` | `.local/data/gatepass.db` | The parent directory is created if missing. |
 | `HOST` | `127.0.0.1` | Set `0.0.0.0` to accept connections from other devices. |
 | `PORT` | `3000` | |
-| `TRUST_PROXY` | unset | Express `trust proxy` value (`1`, `loopback`, subnet list, `true`/`false`). |
+| `TRUST_PROXY` | unset | Express `trust proxy` value (`1`, `loopback`, subnet list). `true` is refused. |
 | `CLIENT_DIR` | `dist/client` | Served only if it contains `index.html`. |
 | `HTTPS_CERT_FILE`, `HTTPS_KEY_FILE` | unset | When both are set, Node serves HTTPS directly. |
+| `DEMO_MODE` | `false` | `true` shows the "data can reset" banner (deployments without durable storage). |
+| `RESEND_API_KEY`, `MAIL_FROM` | unset | Both set: invitations and password resets are emailed through Resend and "Forgot your password?" works. Unset: links are shown once to share by hand. |
+| `ORIGIN_SECRET`, `CLIENT_IP_HEADER` | unset | Only behind a CDN that fronts the API (see [deployment-vercel.md](deployment-vercel.md)). |
+| `GATEPASS_COMMIT` | unset | Build commit reported by `/api/health`; set by the Docker build argument, or by Render as `RENDER_GIT_COMMIT`. |
+
+Local development needs no email provider: with both mail variables unset, the UI shows each invitation link once, and a platform admin who gives a reason gets each reset link to pass on.
 
 Empty values in `.env` count as unset.
 

@@ -41,7 +41,8 @@ const event = await admin<{ id: string }>('POST', '/api/events', {
   startsAt: new Date(now - 3_600_000).toISOString(),
   endsAt: new Date(now + 6 * 3_600_000).toISOString()
 });
-const { key } = await admin<{ key: string }>('POST', `/api/events/${event.id}/scanners`, { label: 'Bench door' });
+const { enrollment } = await admin<{ enrollment: { url: string } }>('POST', `/api/events/${event.id}/scanners`, { label: 'Bench door' });
+const { key } = await admin<{ key: string }>('POST', '/api/scanner/enroll', { code: enrollment.url.split('#enroll=')[1] });
 
 async function issue(count: number, policyId?: string): Promise<string[]> {
   const tokens: string[] = [];

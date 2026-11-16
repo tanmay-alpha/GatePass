@@ -274,6 +274,41 @@ const migrations: string[] = [
     BEGIN SELECT RAISE(ABORT, 'redemptions are immutable'); END;
   CREATE TRIGGER redemptions_immutable_delete BEFORE DELETE ON redemptions
     BEGIN SELECT RAISE(ABORT, 'redemptions are immutable'); END;
+  `,
+  // 4 — one-time scanner enrollment, event-creation right for invited members
+  `
+  -- A setup link carries a one-time, expiring enrollment code instead of the
+  -- permanent device key. Claiming it issues a fresh key (old key stops).
+  CREATE TABLE scanner_enrollments (
+    token_hash     TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
+    scanner_id     TEXT NOT NULL REFERENCES scanners(id) ON DELETE RESTRICT,
+    created_by     TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    expires_at     TEXT NOT NULL,
+    used_at        TEXT,
+    invalidated_at TEXT,
+    CHECK (expires_at > created_at)
+  ) STRICT;
+  CREATE INDEX scanner_enrollments_scanner_idx ON scanner_enrollments(scanner_id);
+  CREATE TRIGGER scanner_enrollments_scanner_revoked BEFORE INSERT ON scanner_enrollments
+    WHEN (SELECT revoked_at FROM scanners WHERE id = NEW.scanner_id) IS NOT NULL
+    BEGIN SELECT RAISE(ABORT, 'scanner is revoked'); END;
+
+  -- When the device last claimed a key; NULL for keys handed out before migration 4.
+  ALTER TABLE scanners ADD COLUMN enrolled_at TEXT;
+
+  -- Accounts created from a manager invitation while self-registration is
+  -- closed may not create events of their own (security review R6).
+  ALTER TABLE users ADD COLUMN can_create_events INTEGER NOT NULL DEFAULT 1 CHECK (can_create_events IN (0, 1));
+
+  -- Who created the reset link that set the current password, when it was not
+  -- the account owner (an administrator or the operator); NULL otherwise.
+  -- The owner sees a notice until they change the password themselves.
+  ALTER TABLE users ADD COLUMN password_set_by TEXT;
+
+  -- Who holds the current link of an invitation: its creator, or whoever last
+  -- renewed it. Disabling that account revokes the invitation.
+  ALTER TABLE invitations ADD COLUMN issued_by TEXT;
   `
 ];
 

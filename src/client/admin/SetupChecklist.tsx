@@ -102,8 +102,11 @@ function buildSteps(event: EventSummary, skipped: Skippable[]): Step[] {
     {
       id: 'scanner',
       title: 'Set up a scanner',
-      description: 'Open the setup link on each door phone.',
-      done: event.scannerCount > 0,
+      description:
+        event.scannerCount > 0
+          ? 'A door device is added but no phone has opened its setup link yet. Open the one-time link on the door phone; if it expired, create a new one under Access.'
+          : 'Add a door device, then open its one-time setup link on that phone.',
+      done: event.readyScannerCount > 0,
       optional: false,
       skipped: false,
       action: { label: 'Set up a scanner', target: SETUP_TARGETS.scanner }
@@ -131,9 +134,9 @@ function buildSteps(event: EventSummary, skipped: Skippable[]): Step[] {
   ];
 }
 
-/** Active, with passes and at least one scanner: the event can admit people. */
+/** Active, with passes and at least one device that can scan: the event can admit people. */
 export function isReadyForDoors(event: EventSummary): boolean {
-  return event.status === 'active' && event.passCount > 0 && event.scannerCount > 0;
+  return event.status === 'active' && event.passCount > 0 && event.readyScannerCount > 0;
 }
 
 /** Shown for draft and active events that have not ended, until entry has begun. */
@@ -159,7 +162,7 @@ export function SetupChecklist({ event, onGo }: { event: EventSummary; onGo: (ta
         <CircleCheck className="setup-ready-icon" size={22} aria-hidden />
         <div className="setup-ready-text">
           <h2 id="setup-title">Ready for doors</h2>
-          <p className="muted small">Passes are issued and a scanner is set up. Scan the first pass at the door and watch progress on Operations.</p>
+          <p className="muted small">Passes are issued and a door device is set up. Scan the first pass at the door and watch progress on Operations.</p>
         </div>
         <div className="actions">
           <button type="button" className="btn btn-primary btn-small" onClick={() => onGo(SETUP_TARGETS.operations)}>
@@ -201,7 +204,11 @@ export function SetupChecklist({ event, onGo }: { event: EventSummary; onGo: (ta
 
   return (
     <section className="card setup" aria-labelledby="setup-title">
-      <SectionHead id="setup-title" title="Set up this event" description={`${progress}. Work from the top; optional steps can be skipped.`}>
+      <SectionHead
+        id="setup-title"
+        title="Set up this event"
+        description={current ? `${progress}. Next: ${current.title.toLowerCase()}${current.optional ? ' (optional)' : ''}.` : `${progress}.`}
+      >
         <span className="setup-meter">
           <Bar value={doneCount} max={steps.length} />
         </span>
