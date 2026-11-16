@@ -33,11 +33,11 @@ flowchart LR
 | `admin/IssuedPasses.tsx` | Shows freshly issued pass links (the only time tokens are visible) and exports them as CSV. |
 | `admin/AccessPanel.tsx` | Gates plus the two sections below. |
 | `admin/PoliciesSection.tsx` | Create and edit admission policies (window, capacity, allowed gates). |
-| `admin/ScannersSection.tsx` | Register door devices; shows the one-time setup link `/scan#key=<key>` as text and QR code. |
+| `admin/ScannersSection.tsx` | Register door devices; shows the one-time setup link `/scan#enroll=<code>` as text and QR code, and each device's setup state (waiting, expired, active). |
 | `admin/DesignPanel.tsx` | QR design editor; previews through `POST /api/qr/custom` and refuses to save a design its own detector cannot decode. |
 | `admin/SettingsPanel.tsx` | Edit or archive the event. |
 | `admin/AuditPanel.tsx` | Read-only list of admin actions from `audit_log`. |
-| `scanner/ScannerApp.tsx` | Gets the scanner key, loads `/api/scanner/session`, then shows the station. |
+| `scanner/ScannerApp.tsx` | Claims the one-time setup code (`POST /api/scanner/enroll`) or loads the stored key's `/api/scanner/session`, then shows the station. |
 | `scanner/ScannerStation.tsx` | Camera loop: detect every 150 ms, ignore the same code for 12 s, 12 s request timeout, manual entry (pass link, bare token or 8-character reference), clock in the event's time zone. |
 | `scanner/ResultOverlay.tsx` | Full-screen verdict (Admit / Already used / Denied / error) with colour, icon and headline; held for 2.5 s. |
 | `api.ts` | `fetch` wrapper: session cookie (`credentials: 'same-origin'`) plus `X-GatePass-CSRF: 1` on writes for admin pages, bearer key for scanners, deadline, `ApiError` with `http` / `timeout` / `network`, "waking up the server" hint after 3 s. |
@@ -47,7 +47,7 @@ flowchart LR
 **Client-side auth.**
 
 - *Admin*: organisers sign in with email and password (`/api/auth/login`, or `/api/auth/register` when `ALLOW_SIGNUP=true`, or by accepting an invitation). The server sets an HttpOnly `__Host-gatepass_session` cookie (7-day absolute, 24-hour idle limit); the client never sees the session id. `ADMIN_TOKEN` is not a UI login: it is an operator break-glass bearer credential for the API only. See [security-and-threat-model.md](security-and-threat-model.md).
-- *Scanner*: the setup link carries the key in the URL fragment (`/scan#key=gps_…`). Browsers never send fragments to servers or proxies. `ScannerApp` reads it once, stores it in `localStorage` (a door phone should survive a reload), and removes it from the address bar and history with `history.replaceState`. A 401 clears the stored key.
+- *Scanner*: the setup link carries a one-time code in the URL fragment (`/scan#enroll=<code>`; single use, 1 hour). Browsers never send fragments to servers or proxies. `ScannerApp` reads it once, removes it from the address bar and history with `history.replaceState`, exchanges it for the device key and stores only the key in `localStorage` (a door phone should survive a reload). A 401 clears the stored key. See [ADR 0010](decisions/0010-enrollment-recovery-email.md).
 
 ## 3. Backend modules (`src/server/`)
 

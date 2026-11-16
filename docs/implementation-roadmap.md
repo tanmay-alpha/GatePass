@@ -16,7 +16,8 @@ Admission correctness and data durability come before features, and features bef
 | 5. Scanning | Retry with the same `requestId`, decoding paused during results and offline, 12 s same-code suppression, camera fallback and per-error guidance, camera choice, torch, native → WebAssembly decoder fallback, accessible result dialog, reference-code manual entry, event-zone clock. | P1 | Done (physical devices not verified — see test matrix) |
 | 6. Operations dashboard | Issued vs admitted from the passes table, capacity remaining, pass state summary, scanner health (heartbeat), plus the existing gates, policies, timeline and alerts. | P2 | Done |
 | 7. Deployment | Vercel previews build static-only and never reach production; CI adds Windows, Firefox/WebKit, container restart-persistence; runbook with release gates and rollback. | P1 | Done in repository; production release follows the gates in [deployment-runbook.md](deployment-runbook.md) |
-| 8. Durable hosting | Persistent-disk SQLite (ADR 0009). Requires owner approval of a paid Render instance + disk (or the free single-VM path). | P0 for real events | **Blocked on owner approval** — the live demo stays `DEMO_MODE=true` |
+| 8. Durable hosting | Persistent-disk SQLite (ADR 0009). Requires owner approval of a paid Render instance + disk (or the free single-VM path). `render.yaml` and the switch-over steps are ready (branch `feat/production-readiness`). | P0 for real events | **Blocked on owner approval** — the live demo stays `DEMO_MODE=true` |
+| 9. Production readiness (branch `feat/production-readiness`, base `4a6ba5c`) | One-time scanner enrollment links (SEC-08); safer account recovery with optional Resend email and audited emergency resets (SR-02); closed sign-up enforced for invited accounts (SR-06); readiness health check with build commit, `/version.json` and a release check; JSON request/error logs with request ids; CI secret scanning, CodeQL, dependency review, backup/restore in `docker-run`; rollback rehearsal script; UI audit at 320–1440 px with axe fixes; new invariant, journey and scanner fail-closed tests. | P0–P2 | Done in repository; live email and physical-device checks pending (TODO.md) |
 
 ## Deferred (with reason)
 
@@ -24,8 +25,8 @@ Admission correctness and data durability come before features, and features bef
 | --- | --- | --- |
 | Persistent disk on Render | Costs money; owner chose "no spend now" on 2026-11-10. | Owner approval (≈ $7.25/month per ADR 0007), then the steps in the runbook. |
 | PostgreSQL | Not required by expected load or single-writer model; every query is synchronous `node:sqlite`; large rewrite (ADR 0009). | Revisit only for multi-instance or multi-region requirements. |
-| Email delivery of invitations/resets | No provider configured; links are shown once to the inviter and copied manually. The UI says no email is sent. | A transactional email provider with opt-in, rate limits and bounce handling. |
-| One-time scanner enrollment tokens (SEC-08) | Rotation (new) and revocation cover the lifecycle; enrollment would add a second token type. | Short-lived enrollment token exchanged for a device key. |
+| Live email delivery | Integration is built (Resend, optional); no provider key or verified sending domain is available. | `RESEND_API_KEY`, `MAIL_FROM` on a verified domain (TODO MAIL-01). |
+| Emailing attendee passes | Needs a durable outbox and a rate-limited worker; provider limits rule out sending a large import inside one request. | TODO MAIL-02. |
 | MFA, breached-password API | Scope; a local common-password list and 10-character minimum are in place. | WebAuthn/TOTP; k-anonymity breached-password check. |
 | Offline admission | Unsafe by default: the scanner never admits without a server answer. | An explicit conflict model and owner risk approval. |
 | Distributed rate limiting | In-memory limits are correct for the single-process deployment. | A shared store if more than one instance ever runs. |

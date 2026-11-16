@@ -45,6 +45,22 @@ PostgreSQL under its default READ COMMITTED isolation uses MVCC: two transaction
 
 **Maintenance burden.** Option A: run `backup` before and after each event and copy the file off the host; run `verify` on backups; restore only with doors closed, because a restore drops every admission made after the backup ([deployment-runbook.md](../deployment-runbook.md#backup-verify-and-restore)). Upgrades of Node.js need care because `node:sqlite` is still experimental (ADR 0001). Option B adds database upgrades, credential rotation and the provider's backup tooling on top of the application's own.
 
+## Where the disk lives: Render disk or a single Docker host
+
+Both run the same image with the database on a volume at `/data`; the code path is identical. They differ in who operates what (reviewed 2026-11-15; prices as in ADR 0007, not re-checked):
+
+| | Render Starter + persistent disk (`render.yaml`) | Single host, Docker Compose + Caddy (`docker-compose.yml`) |
+| --- | --- | --- |
+| Cost | About $7.25/month (instance + 1 GB disk) | $0 on an Oracle Always Free A1 VM; a small paid VPS otherwise |
+| TLS, OS patching, Docker runtime | Managed by Render | The owner (Caddy automates certificates; OS updates are manual) |
+| Deploys | Automatic from `main`; a disk disables zero-downtime deploys, so each deploy is a short outage | Manual `docker compose up -d --build`; also a short outage |
+| Backups | `backup` CLI over Render shell/SSH; Render's disk snapshots are not a database backup (Render advises against restoring them for databases); an off-host copy needs a scheduled job | `scripts/offsite-backup.sh` from cron: backup, `verify`, copy off the host |
+| Logs and alerts | Render log stream and metrics; JSON log lines are searchable | `docker logs`; anything more is set up by the owner |
+| Failure domain | One instance, one disk, one region | One VM; Always Free instances can be reclaimed when idle for 7 days |
+| Rollback | Redeploy the previous commit; schema rollback still means restoring the `.pre-vN.bak` (runbook) | Same, with the previous image tag |
+
+**Recommendation:** Render Starter with a disk when the owner accepts about $7.25/month, because it removes OS, TLS and runtime maintenance, which is the larger operational risk for a single maintainer. The single Docker host is the zero-cost path and is already exercised in CI (`docker-run`: restart persistence, backup, verify, restore). Either way: back up before and after every event and copy the file off the host. Neither target has been run for a real event in this repository; until one is approved and verified, production readiness stays **blocked** and the demo stays labelled.
+
 ## Consequences
 
 - Correctness rests on one process and one writer. Running two app instances against the file is **not supported**. `tests/recovery.test.ts` shows that two server processes on one file still admit a pass exactly once out of 40 concurrent scans (the `SQLITE_BUSY` path was not exercised in that run), but rate limits and login throttles live in process memory and would not be shared.

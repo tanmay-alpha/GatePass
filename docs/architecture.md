@@ -24,11 +24,13 @@ flowchart LR
 
 | Module (`src/server/`) | Responsibility |
 | --- | --- |
-| `index.ts` | Entry point: loads config, opens the database, starts HTTP or HTTPS, shuts down on `SIGTERM`/`SIGINT` (forced exit after 10 s). CLI commands instead of serving: `backup <file>` writes a verified online backup, `verify [file]` checks integrity and admission invariants, `restore <backup>` verifies and swaps in a backup (old files kept as `.replaced-<ts>`). See [deployment-runbook.md](deployment-runbook.md). |
-| `config.ts` | Validates environment variables with zod. Refuses `TRUST_PROXY=true`, an `ADMIN_TOKEN` (operator break-glass API credential) under 24 characters and an `ORIGIN_SECRET` under 32. `ALLOW_SIGNUP=true` opens self-registration (default `false`: accounts come from invitations). |
-| `app.ts` | Express app: optional `X-Origin-Secret` gate, helmet/CSP, `Permissions-Policy`, `no-store`, rate limits, zod request schemas, admin and scanner authentication, routes, static SPA. |
-| `http.ts` | Error handler (zod → 400, 4xx pass-through, generic 500), `rateLimit` wrapper around `express-rate-limit`, `FailureThrottle` (in-memory per-IP count of failed authentications), bearer-token parsing. |
-| `gatepass.ts` | Domain service: events, passes, scanners, redemption, scan feed. Every write runs in `transaction()`. |
+| `index.ts` | Entry point: loads config, opens the database, builds the mailer (Resend when `RESEND_API_KEY` and `MAIL_FROM` are set, otherwise disabled), starts HTTP or HTTPS, logs one JSON `listening` line (commit, demo, email, database file), shuts down on `SIGTERM`/`SIGINT` (forced exit after 10 s). CLI commands instead of serving: `backup <file>` writes a verified online backup, `verify [file]` checks integrity and admission invariants (read-only), `restore <backup>` verifies and swaps in a backup (old files kept as `.replaced-<ts>`). See [deployment-runbook.md](deployment-runbook.md). |
+| `config.ts` | Validates environment variables with zod. Refuses `TRUST_PROXY=true`, an `ADMIN_TOKEN` (operator break-glass API credential) under 24 characters, an `ORIGIN_SECRET` under 32 and `RESEND_API_KEY` without `MAIL_FROM`. `ALLOW_SIGNUP=true` opens self-registration (default `false`: accounts come from invitations). `buildCommit` reads `GATEPASS_COMMIT` or Render's `RENDER_GIT_COMMIT` (anything that is not a git hash is reported as unknown, never fatal). |
+| `app.ts` | Express app: request id (`X-Request-Id`) and one JSON log line per request with the route pattern (never the raw path), optional `X-Origin-Secret` gate, helmet/CSP, `Permissions-Policy`, `no-store`, rate limits, zod request schemas, admin and scanner authentication, routes, static SPA (`version.json` served `no-store`). |
+| `http.ts` | Error handler (zod → 400, 4xx pass-through, `SQLITE_BUSY` → 503 with `Retry-After`, generic 500 logged as one JSON line with the request id), `rateLimit` wrapper around `express-rate-limit`, `FailureThrottle` (in-memory per-key count of failures), bearer-token parsing. |
+| `gatepass.ts` | Domain service: events, passes, scanners and their one-time enrollment, redemption, scan feed, readiness probe. Every write runs in `transaction()`. |
+| `accounts.ts` | Accounts (scrypt), sessions, invitations (emailed or returned for manual sharing), password resets (self-service by email; administrator-started with email or with an audited reason), security notice, event membership, event-creation right. |
+| `mailer.ts` | `Mailer` interface, the Resend HTTP adapter (10 s timeout, idempotency key, no retries, never logs recipients or the key) and the disabled mailer; `composeEmail` escapes every value in the HTML part. |
 | `policies.ts` | `AccessControl`: gates, admission policies, policy-gate links, the capacity claim used by redemption. |
 | `admission.ts` | `evaluateAdmission`: pure, ordered admission rules. No I/O. |
 | `operations.ts` | Read-only aggregates for the operations dashboard: totals, per-gate and per-policy counts, 15-minute timeline, alerts. |
@@ -47,8 +49,8 @@ In order, for every request:
 1. If `ORIGIN_SECRET` is set, anything except `/api/health` without a matching `X-Origin-Secret` header gets 403.
 2. helmet sets security headers; `Permissions-Policy` allows the camera for this origin only; `/api` and `/p` responses are `Cache-Control: no-store`.
 3. `/api/*` except `/api/scanner/*`: 600 requests per minute per client IP.
-4. JSON bodies are capped at 100 kB; handlers parse bodies and queries with strict zod schemas.
-5. Account routes accept the `__Host-gatepass_session` cookie (HttpOnly, Secure, SameSite=Strict on https) created by `/api/auth/login` or `/api/auth/register`; cookie writes need the `X-GatePass-CSRF: 1` header. Event access is checked per membership (owner or manager); non-members get 404. `ADMIN_TOKEN` is an operator break-glass bearer credential for the API only (no UI login), compared in constant time and audited as `operator`. Scanner routes look up `sha256(key)` among unrevoked scanners and attach the scanner (event, optional gate) to the request. A failed check is counted per IP by `FailureThrottle` (`http.ts`): the response is 401, or 429 with `Retry-After` once that IP has more than 60 failures in 5 minutes. Valid credentials are never refused by the throttle. See [security-and-threat-model.md](security-and-threat-model.md).
+4. JSON bodies are capped at 512 kB; handlers parse bodies and queries with strict zod schemas.
+5. Account routes accept the `__Host-gatepass_session` cookie (HttpOnly, Secure, SameSite=Strict on https) created by `/api/auth/login` or `/api/auth/register`; cookie writes need the `X-GatePass-CSRF: 1` header. Event access is checked per membership (owner or manager); non-members get 404. `ADMIN_TOKEN` is an operator break-glass bearer credential for the API only (no UI login), compared in constant time and audited as `operator`. Scanner routes look up `sha256(key)` among unrevoked scanners and attach the scanner (event, optional gate) to the request; `POST /api/scanner/enroll` takes no credential but a one-time setup code. A failed check (including a bad setup code) is counted per IP by `FailureThrottle` (`http.ts`): the response is 401 (410 for a setup code), or 429 with `Retry-After` once that IP has more than 60 failures in 5 minutes. Valid credentials are never refused by the throttle. See [security-and-threat-model.md](security-and-threat-model.md).
 6. Per-route limits: scanner session 60 per minute and redeem 240 per minute, both **per scanner device** (keyed after authentication, so gates behind one NAT address do not share a bucket); `/api/qr/custom` 120 per minute per IP (signed-in accounts only); `/p/:token` 60 per minute per IP.
 7. Service methods are synchronous (`node:sqlite` is synchronous). Errors with a 4xx `status` are returned as is; anything else becomes a generic 500.
 
@@ -113,7 +115,21 @@ The QR code encodes `${APP_PUBLIC_URL}/p/<token>`. The scanner accepts that URL 
 
 ## Scanner setup
 
-The admin creates a scanner (optionally bound to a gate) and receives a `gps_…` key once. The UI shows `${origin}/scan#key=<key>` as a link and QR code. The scanner page reads the fragment, stores the key in `localStorage` and removes the fragment with `history.replaceState`; browsers do not send fragments to servers. A 401 from any scanner request clears the stored key. The camera loop (`src/client/scanner/ScannerStation.tsx`) runs detection every 150 ms using the native `BarcodeDetector` with a fallback to the ZXing WebAssembly decoder, ignores the same code for 12 s and holds an admit result for 2.5 s. Times are shown in the event's time zone. Without a secure context or camera permission the page offers manual entry, which accepts the pass link, the bare token or the 8-character reference printed on the pass.
+The admin creates a scanner (optionally bound to a gate) and receives a **one-time setup link** `${origin}/scan#enroll=<code>`, shown once as a link and QR code. The code is 256-bit, stored only as a SHA-256 hash in `scanner_enrollments`, expires after an hour, works once, and only the newest link of a device works. The scanner page reads the fragment, removes it with `history.replaceState` (browsers do not send fragments to servers), claims the code with `POST /api/scanner/enroll` and stores the returned `gps_…` key in `localStorage`; the key itself never travels in a link. Rotating a device stops its key at once and returns a new setup link; revoking it also cancels any unused link. A 401 from any scanner request clears the stored key. Older `#key=` links keep working for keys issued before migration 4. The camera loop (`src/client/scanner/ScannerStation.tsx`) runs detection every 150 ms using the native `BarcodeDetector` with a fallback to the ZXing WebAssembly decoder, ignores the same code for 12 s and holds an admit result for 2.5 s. Times are shown in the event's time zone. Without a secure context or camera permission the page offers manual entry, which accepts the pass link, the bare token or the 8-character reference printed on the pass.
+
+```mermaid
+sequenceDiagram
+  participant O as Organizer (admin UI)
+  participant A as API
+  participant P as Door phone (/scan)
+  O->>A: POST /api/events/:id/scanners {label, gateId}
+  A-->>O: {scanner, enrollment: {url: /scan#enroll=code, expiresAt}} (code stored as hash)
+  O-->>P: setup link / QR (one use, 1 h)
+  P->>A: POST /api/scanner/enroll {code}
+  A->>A: BEGIN IMMEDIATE · claim code once · mint key · store sha256(key)
+  A-->>P: {key, session} (key returned once, kept in localStorage)
+  P->>A: POST /api/scanner/redeem (Bearer key)
+```
 
 ## Operations dashboard and audit
 
@@ -122,7 +138,7 @@ The admin creates a scanner (optionally bound to a gate) and receives a `gps_…
 - totals and per-outcome counts; admitted/denied per gate (plus "Any gate" for unrestricted scanners); admitted versus capacity per policy with state `upcoming`/`open`/`full`/`closed`; a timeline in 15-minute buckets (last 96);
 - alerts (`ALERT_RULES` in `operations.ts`): a pass rejected as `already_redeemed` 2 or more times; a pass scanned at 2 or more gates; 5 or more invalid or wrong-event codes from one device within 10 minutes; a policy at 90 % of capacity or more.
 
-The admin client polls this endpoint and `GET /api/events/:id/scans?after=<last id>` (cursor on the `(event_id, id)` index) while the tab is visible. Admin mutations write `audit_log` rows with actor `admin`: `event.created`, `event.updated`, `passes.issued`, `pass.policy_changed`, `pass.revoked`, `pass.reissued`, `scanner.created`, `scanner.revoked`, `gate.created`, `policy.created`, `policy.updated`.
+The admin client polls this endpoint and `GET /api/events/:id/scans?after=<last id>` (cursor on the `(event_id, id)` index) while the tab is visible. Mutations write `audit_log` rows naming the actor (`user:<id>`, `operator`, `scanner:<id>` or `anonymous`): for example `event.created`, `event.updated`, `event.status_changed`, `passes.issued`, `passes.imported`, `pass.policy_changed`, `pass.revoked`, `pass.reissued`, `scanner.created`, `scanner.rotated`, `scanner.enrolled`, `scanner.revoked`, `gate.created`, `policy.created`, `policy.updated`, `invitation.created`, `invitation.renewed`, `email.sent`, `email.failed`, `export.downloaded`.
 
 ## Pass design
 
@@ -130,7 +146,9 @@ Each event stores a normalised `DesignConfig` in `events.design_json`. The admin
 
 ## Persistence
 
-Schema: [README.md#database-design](decisions/0009-durable-storage.md). Migrations are an append-only array in `db.ts`, tracked by `PRAGMA user_version`; each runs in its own transaction with the version bump. Before migrating an existing file the server writes `<file>.pre-v<N>.bak` (`VACUUM INTO`, then `PRAGMA integrity_check` on the copy). A database with a newer schema version than the build, or a corrupt file, stops startup; neither is ever replaced. One process per database file.
+Schema: [ADR 0009](decisions/0009-durable-storage.md). Migrations are an append-only array in `db.ts`, tracked by `PRAGMA user_version` (version 4: one-time scanner enrollment and the event-creation right); each runs in its own transaction with the version bump. Before migrating an existing file the server writes `<file>.pre-v<N>.bak` (`VACUUM INTO`, then `PRAGMA integrity_check` on the copy). A database with a newer schema version than the build, or a corrupt file, stops startup; neither is ever replaced. One process per database file.
+
+`GET /api/health` is a readiness probe: it answers 200 only when the connection is open, `user_version` equals this build's schema version and the admission tables answer an indexed read; otherwise 503 `{ok:false}`. The body carries `build: { commit, schema }` and `email`, which `scripts/release-check.ts` compares with the frontend's `/version.json` before a release counts as complete.
 
 ## Deployment topologies
 

@@ -7,24 +7,25 @@ Rules that apply to every step:
 - Never print secret values. Env var *names* are fine.
 - Do not change paid plans without the owner's approval.
 - Do not run destructive operations on a production database without the owner's approval.
+- **A release is complete only when `scripts/release-check.ts` passes against production** (gate 6). A green deploy page on Vercel or Render is not enough.
 
 ## Environments
 
 | Environment | What runs | Data | Purpose |
 | --- | --- | --- | --- |
-| Local | `npm run dev`, or `npm run build` + `node dist/server/index.js`; optionally Docker Compose (`docker compose up -d --build`) | `.local/data/gatepass.db` (or the `gatepass-data` volume) | Development, the `backup`/`verify`/`restore` rehearsal |
-| CI (GitHub Actions, `.github/workflows/ci.yml`) | `check` (typecheck, unit/integration tests, build, QR smoke, `npm audit`), `e2e` (Playwright per browser project), `docker` (multi-arch build), `docker-run` (boot, persistence across `docker restart`, `verify`, graceful stop) | Temporary files and volumes | Release gate 1 |
+| Local | `npm run dev`, or `npm run build` + `node dist/server/index.js`; optionally Docker Compose (`docker compose up -d --build`) | `.local/data/gatepass.db` (or the `gatepass-data` volume) | Development, the `backup`/`verify`/`restore` and rollback rehearsals |
+| CI (GitHub Actions) | `ci.yml`: `check` (typecheck, unit/integration tests, build, QR smoke, `npm audit`), `e2e` (Playwright per browser project), `docker` (multi-arch build), `docker-run` (see gate 1). `security.yml`: gitleaks secret scan, dependency review on PRs. `codeql.yml`: CodeQL for JavaScript/TypeScript and the workflows | Temporary files and volumes | Release gate 1 |
+| Staging | No hosted staging service. See [Staging strategy](#staging-strategy) | Synthetic only | Release gate 4 |
 | Vercel preview | Static SPA only. `/api/*` and `/p/*` answer 503 with `preview-no-backend.json` unless a separate `GATEPASS_PREVIEW_BACKEND_ORIGIN` is configured (none is today) | None | UI review. Previews never reach production (`vercel.mjs`, INF-01) |
-| Production (free demo) | Vercel project `gatepass` (team `tanmay-alphas-projects`) serves `https://gatepass-sandy.vercel.app` and proxies to Render service `gatepass-api` (`srv-dbng57u7bikc73cfc5bg`; Free plan, Docker, Singapore, 1 instance, no disk, health check `/api/health`, auto-deploy after CI checks pass) | **Ephemeral**: the SQLite file is lost on every restart, deploy or idle spin-down | Public demo with `DEMO_MODE=true` |
-
-There is no separate staging environment. Release gate 4 below explains what stands in for it.
+| Production (free demo) | Vercel project `gatepass` (team `tanmay-alphas-projects`) serves `https://gatepass-sandy.vercel.app` and proxies to Render service `gatepass-api` (`srv-dbng57u7bikc73cfc5bg`; Free plan, Docker, Singapore, 1 instance, no disk, health check `/api/health`, auto-deploy from `main`) | **Ephemeral**: the SQLite file is lost on every restart, deploy or idle spin-down | Public demo with `DEMO_MODE=true` |
+| Production (durable, **not created**) | `render.yaml` Blueprint: `gatepass-api-durable`, Starter, 1 GB disk at `/data` | Persistent SQLite on the disk | Target after owner approval; see [Durable switch-over](#durable-switch-over) |
 
 ## Environment variables (names only)
 
 | Variable | Local | CI | Vercel Production | Vercel Preview | Render (production) |
 | --- | --- | --- | --- | --- | --- |
 | `ADMIN_TOKEN` (≥ 24 chars, operator break-glass) | `.env` | fixed test value in `playwright.config.ts` / the `docker-run` job | — | — | set |
-| `APP_PUBLIC_URL` | `.env` (`http://localhost:3000`) | test URL | — | — | set (`https://gatepass-sandy.vercel.app`; HTTPS turns on the `__Host-` session cookie) |
+| `APP_PUBLIC_URL` | `.env` (`http://localhost:3000`) | test URL | — | — | set (`https://gatepass-sandy.vercel.app`; HTTPS turns on the `__Host-` session cookie; scanner enrollment links use it) |
 | `DATABASE_FILE` | `.env` | temp path | — | — | image default `/data/gatepass.db` |
 | `HOST`, `PORT`, `CLIENT_DIR` | `.env` | test values | — | — | image defaults (`0.0.0.0`, `3000`, `/app/dist/client`) |
 | `NODE_ENV` | — | — | — | — | `production` |
@@ -33,87 +34,118 @@ There is no separate staging environment. Release gate 4 below explains what sta
 | `CLIENT_IP_HEADER` | — | — | — | — | `x-vercel-forwarded-for` |
 | `DEMO_MODE` | optional | — | — | — | `true` until durable storage is approved |
 | `ALLOW_SIGNUP` | optional | `true` (e2e web server) | — | — | `true` (set 2026-11-10 via the Render API; owner decision; the live demo allows self-registration, and deployed e2e signs up fresh accounts) |
+| `RESEND_API_KEY`, `MAIL_FROM` | optional | — | — | — | **not set** (no credentials; emailed invitations and resets are off, links are handed over by hand) |
+| `GATEPASS_COMMIT` | optional (`GATEPASS_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`) | `docker build --build-arg GATEPASS_COMMIT=$GITHUB_SHA` | — | — | not needed: Render sets `RENDER_GIT_COMMIT` at runtime and the server falls back to it |
+| `VERCEL_GIT_COMMIT_SHA` | — | — | system variable, written into `/version.json` at build | same | — |
 | `GATEPASS_BACKEND_ORIGIN` | when running `vercel` locally | — | **set, Production only** | not set (ignored by previews) | — |
 | `GATEPASS_PREVIEW_BACKEND_ORIGIN`, `PREVIEW_ORIGIN_SECRET` | — | — | — | optional; must point at a non-production server | — |
 | `HTTPS_CERT_FILE`, `HTTPS_KEY_FILE` | optional | — | — | — | — |
 
-The Render env var names above were taken from a read-only inspection on 2026-11-10 (`DEMO_MODE`, `ADMIN_TOKEN`, `CLIENT_IP_HEADER`, `APP_PUBLIC_URL`, `NODE_ENV`, `TRUST_PROXY`, `ORIGIN_SECRET`). `ALLOW_SIGNUP=true` was added on 2026-11-10 through the Render API before the release deploy.
+The Render env var names above were taken from a read-only inspection (latest 2026-11-15: `ALLOW_SIGNUP`, `DEMO_MODE`, `ADMIN_TOKEN`, `CLIENT_IP_HEADER`, `APP_PUBLIC_URL`, `NODE_ENV`, `TRUST_PROXY`, `ORIGIN_SECRET`).
+
+GitHub repository variables used by `release-verify.yml` (optional; defaults in the workflow): `GATEPASS_FRONTEND_URL`, `GATEPASS_BACKEND_URL`.
+
+## Build identity
+
+Every build says which commit it came from, so a release can be checked instead of assumed:
+
+- **Frontend:** `vite build` writes `dist/client/version.json` = `{"commit": "<sha>"}` from `VERCEL_GIT_COMMIT_SHA`, then `GATEPASS_COMMIT`, then `git rev-parse HEAD`, else `null`. Vercel serves it with `Cache-Control: no-store` (`vercel.mjs`).
+- **Backend:** `GET /api/health` → `{"ok":true,"service":"gatepass","signup":…,"email":…,"build":{"commit":"<sha>|null","schema":<n>}}` (plus `"demo":true` on the demo). `commit` comes from `GATEPASS_COMMIT`, falling back to `RENDER_GIT_COMMIT`. It answers 503 `{"ok":false}` when the database is not ready.
+- **Docker image:** `ARG GATEPASS_COMMIT` feeds both. `.git` is not in the build context, so an image built without the argument reports `null` (Render still reports its `RENDER_GIT_COMMIT`).
 
 ## Release gates
 
-All ten must be ticked before the change counts as released. Record the evidence (command, result, time) in [test-matrix.md](test-matrix.md).
+All must be ticked before the change counts as released. Record the evidence (command, result, time) in [test-matrix.md](test-matrix.md).
 
-- [ ] **1. All required GitHub checks pass.** On the PR head commit, the `check`, `e2e`, `docker` and `docker-run` jobs are green: `gh pr checks <number>`.
+- [ ] **1. All required GitHub checks pass** on the PR head commit: `gh pr checks <number>`.
+  - `ci.yml`: `check`, `e2e`, `docker`, `docker-run`. `docker-run` boots the real image and requires: `/api/health` and `/version.json` report the built commit and a schema; a scanner enrolls with the one-time code from its setup link, and a second use of the code is refused; an admission survives `docker restart`; `verify` passes; an online `backup` verifies; after a graceful stop, `restore` in a one-off container on the same volume brings back the admitted pass and drops a pass issued after the backup; `verify` passes again; the operator token, scanner key, enrollment code and pass token never appear in the container log; every stop exits 0.
+  - `security.yml`: `secret scan (gitleaks)` (PR commits; full history on `main`, weekly and on demand) and `dependency-review` (fails on a new dependency with a high or critical advisory).
+  - `codeql.yml`: `analyze (javascript-typescript)`, `analyze (actions)`.
 - [ ] **2. Migration and backup verification passes.**
-  - Locally: `npx vitest run tests/migration.test.ts tests/recovery.test.ts`. This covers: a populated schema-version-2 database migrates with row counts and hashes preserved; `.pre-v3.bak` is written and stays at version 2; backup → restore → `verify` round trip; a corrupt backup is refused.
-  - In CI: the `docker-run` job requires `node dist/server/index.js verify` to exit 0.
-- [ ] **3. Frontend and backend revisions are compatible.** Both Vercel and Render must serve the same merge commit (gate 6). The new admin SPA needs `/api/auth/*`, so it cannot work against an older API.
-  - Vercel deploys on push. Render waits for CI. In between, the demo's sign-in fails, and this window is accepted for the demo.
-  - Check: `curl -fsS https://gatepass-sandy.vercel.app/api/health` must include the `signup` field, which only this branch's server returns.
-- [ ] **4. Staging E2E passes.** There is no staging service. As a substitute:
-  - (a) CI e2e runs against the built server in Chromium, Firefox and WebKit.
-  - (b) After deploying, the same specs run against the demo: `E2E_BASE_URL=https://gatepass-sandy.vercel.app npx playwright test --project=chromium`. This needs `ALLOW_SIGNUP=true` on Render. It creates synthetic data, which the next restart erases.
-- [ ] **5. Production deployment is approved and safe.** The owner has approved merging and deploying once the gates pass (decision recorded 2026-11-10). No paid plan changes are made. The demo database is ephemeral, so the migration cannot destroy retained data.
-- [ ] **6. Deployed SHA is verified.** See [Verify the deployed SHA](#verify-the-deployed-sha) for both providers.
-- [ ] **7. Health checks pass.** See [Health checks](#health-checks).
-- [ ] **8. Key application journeys pass.** See [Smoke journey](#smoke-journey).
-- [ ] **9. No unexpected errors in logs.**
-  - Render: open the service's Logs page in the dashboard for the window since the deploy went live. Expect the "GatePass listening on …" line and no stack traces, "Internal server error" or "database is locked" lines beyond the smoke run's expected 4xx.
-  - Vercel: `vercel logs https://gatepass-sandy.vercel.app`.
-- [ ] **10. Rollback procedure is documented and tested.** The procedure is [Rollback](#rollback).
-  - Tested: database restore (`tests/recovery.test.ts`), and the pre-migration backup being written and kept at the old version (`tests/migration.test.ts`).
-  - **Not** tested on the real providers: a Render rollback and a `vercel rollback`. Record that honestly unless an operator performs one.
+  - Locally: `npx vitest run tests/migration.test.ts tests/recovery.test.ts` (migration with row counts and hashes preserved, `.pre-vN.bak` written at the old version, backup → restore → `verify`, corrupt backup refused).
+  - In CI: the `docker-run` backup/restore round trip (gate 1).
+  - For a release that adds a migration: `scripts/rollback-rehearsal.sh` with the previous release's image as `OLD_IMAGE` and the candidate as `NEW_IMAGE` ([Rollback rehearsal](#rollback-rehearsal)).
+- [ ] **3. Frontend and backend revisions are compatible.** Vercel deploys on push; Render deploys after CI. In between, the two sides run different commits; for the demo this window is accepted. `release-check` (gate 6) fails until both report the same commit.
+- [ ] **4. Staging E2E passes.** See [Staging strategy](#staging-strategy).
+- [ ] **5. Production deployment is approved and safe.** The owner has approved merging and deploying once the gates pass. No paid plan changes are made. On the ephemeral demo a migration cannot destroy retained data; on a durable service, take a backup first ([Backups](#backup-verify-and-restore)).
+- [ ] **6. Release check passes against production.** This is the gate that closes a release:
+  ```sh
+  FRONTEND_URL=https://gatepass-sandy.vercel.app \
+  BACKEND_URL=https://gatepass-api-mvle.onrender.com \
+  EXPECTED_COMMIT=$(git rev-parse origin/main) \
+  npx tsx scripts/release-check.ts          # or: node scripts/release-check.ts (Node ≥ 22.18)
+  ```
+  It waits (default up to 15 min, tolerant of the free instance's ~50 s cold start) until `/version.json`, the frontend's `/api/health` and the backend's `/api/health` all report `EXPECTED_COMMIT` with `ok: true` and a schema version. Then it runs nondestructive smoke checks: CSP, `nosniff` and HSTS on the SPA; `/api/health` `no-store`; unauthenticated `GET /api/events` → 401; `POST /api/scanner/redeem` without a key → 401; an unknown 43-character pass link → 404 page with its own CSP; the backend origin refuses unproxied API requests (401/403); with `PREVIEW_URL`, a preview does not reach a backend. Exit 0 = released; 1 = a check failed (the report says which); 2 = bad input. It uses no credentials and changes nothing.
+  - Automated: `release-verify.yml` runs it when Vercel reports a successful **Production** deployment (`deployment_status`), expecting that deployment's commit, and on demand (`workflow_dispatch`). The run summary shows the report.
+- [ ] **7. Key application journeys pass.** See [Smoke journey](#smoke-journey).
+- [ ] **8. No unexpected errors in logs.** See [Monitoring](#monitoring). Expect no stack traces, 5xx lines, "database is locked" or `"ok":false` health answers since the deploy went live, beyond the smoke run's expected 4xx.
+- [ ] **9. Rollback procedure is documented and rehearsed.** The procedure is [Rollback](#rollback); the database part is rehearsed by `scripts/rollback-rehearsal.sh`. A Render rollback and a `vercel rollback` have **not** been exercised on the real providers; record that honestly unless an operator performs one.
+
+## Staging strategy
+
+There is no hosted staging service, and production data never leaves production. In order of preference:
+
+1. **Local production-like stack (default, free).** `GATEPASS_COMMIT=$(git rev-parse HEAD) docker compose up -d --build` with a throwaway `.env` (synthetic `ADMIN_TOKEN`, `APP_PUBLIC_URL=http://localhost:3000`). Then:
+   - `E2E_BASE_URL=http://localhost:3000 npx playwright test --project=chromium`
+   - `FRONTEND_URL=http://localhost:3000 EXPECTED_COMMIT=$(git rev-parse HEAD) npx tsx scripts/release-check.ts`
+   - for migrations, `scripts/rollback-rehearsal.sh`.
+   `docker compose down -v` removes the volume afterwards.
+2. **CI** (gate 1) runs the same image and specs on every PR.
+3. **Hosted preview pair (optional, costs nothing on free tiers but needs owner setup).** A second Render service (for example `gatepass-api-preview`, Free plan, `DEMO_MODE=true`, its own `ADMIN_TOKEN` and `ORIGIN_SECRET`) and, in Vercel's **Preview** environment only, `GATEPASS_PREVIEW_BACKEND_ORIGIN` + `PREVIEW_ORIGIN_SECRET` pointing at it. `vercel.mjs` refuses a preview origin equal to the production origin. Seed it only with synthetic data. Run the release check against the preview URL (Vercel Deployment Protection may require a bypass token for automated requests). Not set up today.
+4. **After deploying**, the e2e specs can run against the demo (`E2E_BASE_URL=https://gatepass-sandy.vercel.app npx playwright test --project=chromium`; needs `ALLOW_SIGNUP=true`). They create synthetic data that the next restart erases. Do not do this against a durable production service.
 
 ## Deploy steps
 
-1. Merge the PR into `main` once gates 1, 2 and 4(a) are green.
-2. **Before** the Render deploy goes live, add `ALLOW_SIGNUP=true` to the Render service environment: Dashboard → `gatepass-api` → Environment. Leave the other variables unchanged. Saving env vars can trigger a deploy; let it complete.
-3. Vercel builds production from `main` automatically (`VERCEL_ENV=production`; the build fails if `GATEPASS_BACKEND_ORIGIN` is missing, which is intended).
-4. Render builds the Docker image once CI passes on the merge commit (auto-deploy "after CI checks pass"). If it does not start, use Dashboard → Manual Deploy → "Deploy latest commit".
-5. Wait for the Render deploy to show `live`. A failed deploy keeps the **previous** instance and environment serving (production audit, finding 3). Retry until it is live, and confirm with gate 6.
-6. Run gates 6–9.
-7. Bootstrap accounts on the new, empty database:
-   - Sign up an organizer account in the UI (sign-up is open).
+1. Merge the PR into `main` once gates 1, 2 and 4 are green.
+2. Vercel builds production from `main` automatically (`VERCEL_ENV=production`; the build fails if `GATEPASS_BACKEND_ORIGIN` is missing, which is intended).
+3. Render builds the Docker image from `main`. If it does not start, use Dashboard → Manual Deploy → "Deploy latest commit".
+4. Wait for the Render deploy to show `live`. A failed deploy keeps the **previous** instance and environment serving (production audit, finding 3).
+5. `release-verify.yml` starts when Vercel reports the Production deployment. Watch it (`gh run watch`) or run the release check by hand (gate 6). It fails if Render never reaches the commit within 20 minutes; then check the Render deploy and re-run the workflow with `workflow_dispatch`.
+6. Run gates 7–8.
+7. Bootstrap accounts on a new, empty database:
+   - Sign up an organizer account in the UI (sign-up is open on the demo).
    - If a platform admin is needed, create the invitation with the operator token:
      ```sh
      curl -fsS -X POST https://gatepass-sandy.vercel.app/api/platform/invitations \
        -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
        -d '{"email":"<owner email>","role":"platform_admin"}'
      ```
-     Open the returned `url` and set a password. Hand the link over in person; no email is sent.
+     Open the returned `url` and set a password. Without `RESEND_API_KEY` no email is sent; hand the link over in person.
 
-On a server with retained data (the durable setup), events created before migration 3 have no owner and are visible only to the operator. Assign each one with `POST /api/events/<id>/owner {"userId":"<id>"}` using the operator bearer token. The operator may assign an account that is not yet a member.
+On a server with retained data (the durable setup), events created before migration 3 have no owner and are visible only to the operator. Assign each one with `POST /api/events/<id>/owner {"userId":"<id>"}` using the operator bearer token.
 
 ## Verify the deployed SHA
+
+`release-check` does this from the outside (`/version.json`, `/api/health` `build.commit`). To cross-check with the providers:
 
 ```sh
 # Render: the newest deploys, with status and commit (API key from the operator's local secret store)
 curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
   "https://api.render.com/v1/services/srv-dbng57u7bikc73cfc5bg/deploys?limit=5" \
   | jq -r '.[].deploy | [.id, .status, .commit.id, .finishedAt] | @tsv'
-# The live deploy must show the merge commit SHA (git rev-parse origin/main).
 
 # Vercel: the production deployment behind the alias
 vercel inspect https://gatepass-sandy.vercel.app
 vercel ls gatepass --prod
-# Match the deployment's source commit with git rev-parse origin/main (shown on the deployment's page in the Vercel dashboard).
 ```
-
-For reference, before this branch the live Render deploy was `dep-dbniivlg1s2s73fj441g` at commit `4ff70f1f` (inspection of 2026-11-10).
 
 ## Health checks
 
 ```sh
-curl -fsS https://gatepass-sandy.vercel.app/api/health
-# {"ok":true,"service":"gatepass","signup":true,"demo":true}
-
+curl -fsS https://gatepass-sandy.vercel.app/api/health                                        # ok, build.commit, build.schema
+curl -fsS https://gatepass-sandy.vercel.app/version.json                                      # {"commit": …}
 curl -fsS https://gatepass-api-mvle.onrender.com/api/health                                   # origin, no secret needed
 curl -s -o /dev/null -w '%{http_code}\n' https://gatepass-api-mvle.onrender.com/api/events    # 403: origin-secret gate
-curl -sI https://gatepass-sandy.vercel.app/ | grep -iE 'strict-transport|content-security|x-frame|referrer-policy|permissions-policy'
-curl -sI https://gatepass-sandy.vercel.app/api/health | grep -i 'cache-control'                # no-store
 ```
 
 The first request after 15 idle minutes wakes the free instance and takes about 50 s.
+
+## Monitoring
+
+- **Synthetic check:** `release-verify.yml` runs every 6 hours (`schedule`) without an expected commit: health, frontend/backend commit agreement and the smoke checks. A failed run emails the repository's watchers per their GitHub notification settings. GitHub disables scheduled workflows in a public repository after 60 days without repository activity; re-enable it on the Actions page.
+- **Platform health check:** Render probes `/api/health` (503 when the database is not ready) and restarts or holds back an unhealthy deploy. The Docker image has its own `HEALTHCHECK` for Compose and CI.
+- **Structured logs:** the server writes one JSON line per request to stdout (method, route pattern, status, duration, request id; tokens are never logged) plus JSON error lines. Read them on Render's Logs page (or `docker compose logs gatepass` on a single host) and filter for `"status":5` or error entries. Vercel: `vercel logs https://gatepass-sandy.vercel.app`.
+- **Code and supply chain:** CodeQL and gitleaks run weekly as well as on every PR; Dependabot opens update PRs weekly.
 
 ## Smoke journey
 
@@ -123,7 +155,7 @@ Manual, on a phone where possible:
 
 1. Sign up. The response sets a `__Host-gatepass_session` cookie; check in the browser's dev tools that it is HttpOnly and Secure.
 2. Create an event (time zone, capacity), set it active, add a gate, issue two passes, create a scanner.
-3. Open the scanner setup link on the phone and tap "Tap to start scanning".
+3. Open the scanner setup link on the phone within its validity (about an hour; the link works once) and tap "Tap to start scanning".
 4. Scan pass 1: **Admit**. Scan it again after 12 s out of view: **Already used**, with "on this device".
 5. Type pass 2's 8-character reference into manual entry: **Admit**.
 6. Revoke the scanner. Its next scan is refused, and the phone returns to setup.
@@ -136,32 +168,42 @@ Manual, on a phone where possible:
 - Dashboard → `gatepass-api` → Deploys → choose the previous successful deploy → **Rollback**. This also disables auto-deploy until it is re-enabled in Settings.
 - API: `POST https://api.render.com/v1/services/srv-dbng57u7bikc73cfc5bg/rollback` with `{"deployId":"<previous deploy id>"}` ([Render API: Roll back deploy](https://api-docs.render.com/reference/rollback-deploy)). This does **not** disable auto-deploy.
 
-Per [Render's rollback documentation](https://render.com/docs/rollbacks):
+Per [Render's rollback documentation](https://render.com/docs/rollbacks): a rollback reuses the target deploy's build artifact **and its environment variables**; disks are **not** rolled back.
 
-- A rollback reuses the target deploy's build artifact **and its environment variables**.
-- Disks are **not** rolled back.
+**Vercel (frontend).** `vercel rollback` returns to the previous production deployment (on the Hobby plan only the immediately previous one, [Vercel CLI: rollback](https://vercel.com/docs/cli/rollback)); `vercel promote <deployment-url>` undoes it. Roll back both sides together, then run the release check with `EXPECTED_COMMIT` set to the rolled-back commit.
 
-**Vercel (frontend).**
+**Database.** The schema is forward-only. A build older than the database refuses to start ("Database schema version N is newer than this build supports"). Rolling code back across a migration therefore needs either:
 
-- `vercel rollback` returns to the previous production deployment. On the Hobby plan only the immediately previous one is allowed ([Vercel CLI: rollback](https://vercel.com/docs/cli/rollback)).
-- `vercel promote <deployment-url>` undoes the rollback.
-- Roll back both sides together (gate 3).
-
-**Database.** The schema is forward-only:
-
-- A build older than the database refuses to start ("Database schema version 3 is newer than this build supports").
-- Rolling code back across migration 3 therefore needs either:
-  - the automatic pre-migration backup `<DATABASE_FILE>.pre-v3.bak` (schema version 2), written before migration 3 ran (`db.ts:301-305`), restored with the server stopped; **or**
-  - running the newer build (roll forward with a fix). This is preferred whenever data written since the upgrade matters.
-- Restoring `.pre-v3.bak` drops every account, session and admission written since the upgrade.
-- The older build has no `restore` command. Restore by hand, as in [deployment.md](deployment.md#restore):
-  1. Stop the server.
-  2. Move `gatepass.db`, `-wal` and `-shm` aside.
-  3. Copy `.pre-v3.bak` to `gatepass.db`.
-  4. Start the old build.
-- Do not use the new build's `restore` for this: it opens the restored file and migrates it to the current schema.
+- **roll forward** with a fix on the newer build (preferred whenever data written since the upgrade matters); or
+- restore the automatic pre-migration backup `<DATABASE_FILE>.pre-vN.bak` (written by the new build before migration N ran, at the old schema), **with the server stopped and using the OLD build**:
+  ```sh
+  # Docker single host, OLD_IMAGE = the release being rolled back to
+  docker compose stop gatepass
+  docker run --rm -v gatepass_gatepass-data:/data "$OLD_IMAGE" node dist/server/index.js verify  /data/gatepass.db.pre-vN.bak
+  docker run --rm -v gatepass_gatepass-data:/data "$OLD_IMAGE" node dist/server/index.js restore /data/gatepass.db.pre-vN.bak
+  # then start the old image (pin it in docker-compose.yml or re-tag it gatepass:local)
+  ```
+  On Render with a disk, the Shell runs inside the live server, and there is no tested way to stop the server while keeping access to the disk. Prefer rolling forward there. A database rollback on Render needs a maintenance procedure that has not been designed or rehearsed (UNVERIFIED); do not improvise one while doors are open.
+- **Never** restore a `.pre-vN.bak` with the NEW build's `restore`: it migrates the restored file to the new schema, and the old build then refuses to start (shown by the rehearsal's control step).
+- Builds before the `restore` command existed (before schema 3): restore by hand: stop, move `gatepass.db`, `-wal` and `-shm` aside, copy the `.bak` to `gatepass.db`, start the old build ([deployment.md](deployment.md#restore)).
+- Restoring a `.pre-vN.bak` drops every account, session and admission written since the upgrade.
 
 On the free demo none of this applies in practice: the disk is ephemeral, so a rolled-back deploy starts on an empty database at the old schema.
+
+### Rollback rehearsal
+
+`scripts/rollback-rehearsal.sh` rehearses the database part on a throwaway Docker volume with synthetic data, needing only Docker and bash:
+
+```sh
+git worktree add ../gatepass-old <previous release commit>
+docker build --build-arg GATEPASS_COMMIT=<previous release commit> -t gatepass:old ../gatepass-old
+docker build --build-arg GATEPASS_COMMIT=$(git rev-parse HEAD) -t gatepass:new .
+OLD_IMAGE=gatepass:old NEW_IMAGE=gatepass:new bash scripts/rollback-rehearsal.sh
+```
+
+It starts OLD, seeds an event, a scanner and one admission; starts NEW (migration, `.pre-vN.bak` written), checks the admission survived and admits a second pass with the scanner key enrolled on OLD; verifies the `.bak` with OLD's `verify`; shows that NEW's `restore` would make the file unusable for OLD (control); restores with OLD's `restore`; starts OLD and requires the first admission present, the second gone and `verify` ok. It prints a PASS/FAIL report and removes its containers and volume (`KEEP=1` keeps them).
+
+Last run: 2026-11-15, OLD = `4a6ba5c` (schema 3), NEW = this branch's working tree (schema 4), all 9 steps passed in about 30 s on Docker Desktop (Windows).
 
 ## Backup, verify and restore
 
@@ -176,19 +218,36 @@ node dist/server/index.js verify                 # the live DATABASE_FILE
 node dist/server/index.js verify /data/backups/gatepass-YYYYMMDD-HHMMSS.db
 
 # Restore (server STOPPED). The current files are kept as <file>.replaced-<time>[-wal|-shm];
-# the restored file is migrated, verified, and the old files are put back on any failure.
+# the restored file is migrated to this build's schema, verified, and the old files are put back on any failure.
 node dist/server/index.js restore /data/backups/gatepass-YYYYMMDD-HHMMSS.db
 ```
 
 Notes:
 
-- `verify` opens the file read-only and never migrates it. For a file at an older schema version (for example `.pre-v3.bak`) it reports the version mismatch instead of checking the admission invariants, and exits 1.
+- `verify` opens the file read-only and never migrates it. For a file at an older schema version it reports the version mismatch instead of checking the admission invariants, and exits 1. Verify an old file with the build of its own schema.
 - A restore drops every admission made after the backup was taken. Back up immediately before and after an event, and never restore while doors are open.
-- In Docker: `docker compose exec gatepass node dist/server/index.js backup /data/backup.db`. Then copy it off the host: `docker compose cp gatepass:/data/backup.db ./backups/`.
-- On Render with a disk (after approval):
-  - Run the same commands from the service's **Shell** page.
-  - Copy backups off the instance with SCP over Render SSH, or `magic-wormhole` ([Render disks](https://render.com/docs/disks#transferring-files)).
-  - Render also takes a daily disk snapshot, kept for seven days. Render advises against restoring snapshots of disks that back a database, so prefer the `backup`/`restore` commands.
+- In Docker the server must be stopped for `restore`; run it in a one-off container on the same volume, as CI does: `docker compose stop gatepass && docker compose run --rm --no-deps gatepass node dist/server/index.js restore /data/backups/<file> && docker compose start gatepass`.
+
+### Off-host backups (Docker single host)
+
+`scripts/offsite-backup.sh` runs on the Docker host:
+
+1. `backup` inside the running container to `/data/backups/gatepass-<UTC time>.db`;
+2. `verify` that copy (the JSON report is kept next to the host copy);
+3. `docker cp` it to `BACKUP_DIR` (default `./backups`) and compares SHA-256 inside and outside the container;
+4. runs `BACKUP_UPLOAD_CMD` if set (the file is `$1`), e.g. `rclone copy "$1" offsite:gatepass-backups/` or `scp -q "$1" backup@vault.example.com:gatepass/`. The tool's credentials live in its own config on the host, never in this repository;
+5. keeps the newest `BACKUP_KEEP` (default 14) copies in the container and on the host. Pruning runs only after every earlier step succeeded; any failure exits non-zero.
+
+```sh
+GATEPASS_CONTAINER=gatepass-gatepass-1 BACKUP_DIR=/srv/gatepass/backups BACKUP_KEEP=14 \
+BACKUP_UPLOAD_CMD='rclone copy "$1" offsite:gatepass-backups/' bash scripts/offsite-backup.sh
+# cron, hourly on event days:
+# 15 * * * * cd /srv/gatepass && bash scripts/offsite-backup.sh >> backups/backup.log 2>&1
+```
+
+Without an upload hook the copy stays on the same host, which does not protect against losing the host. Restore-test an off-host copy periodically: copy it into the volume and run `verify` on it.
+
+On Render with a disk (after approval): run `backup` from the service's **Shell** page and copy the file off with SCP over Render SSH or `magic-wormhole` ([Render disks](https://render.com/docs/disks#transferring-files)). Render's daily disk snapshots (kept seven days) are a last resort; Render advises against restoring snapshots of disks that back a database. `offsite-backup.sh` does not apply to Render.
 
 ## Secret rotation
 
@@ -196,40 +255,51 @@ Notes:
 | --- | --- | --- |
 | `ADMIN_TOKEN` | Generate 32 random bytes (`node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`). Set it on Render (Environment, or `PUT /v1/services/<id>/env-vars/ADMIN_TOKEN`). Store it only in the operator's local secret store. | Deploy reaches `live`. `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer <new>" https://gatepass-sandy.vercel.app/api/events` gives 200, and the old token gives 401. A failed deploy keeps the old token live. |
 | `ORIGIN_SECRET` | Generate ≥ 32 characters. Set the same value on Render and on Vercel (**Production** only), then redeploy both: Render first, then `vercel deploy --prod` or a push. | Requests through Vercel succeed. A direct origin request without the header gets 403. Expect 403s through Vercel while only one side has the new value. |
-| Scanner key | Admin UI or `POST /api/scanners/:id/rotate`. Give the new setup link to the device. | The old key gets 401 at once. |
+| Scanner key | Admin UI or `POST /api/scanners/:id/rotate`. This returns a new one-time setup link (valid about an hour); open it on the device. | The old key gets 401 at once. A used or expired setup link answers 410. |
 | Account password / sessions | The user changes it (ends their other sessions), or a platform admin issues a reset link (ends all sessions). Disable an account to end every session immediately. | `GET /api/auth/session` with the old cookie gives 401. |
+| `RESEND_API_KEY` (when configured) | Create a new key in Resend, set it on Render, redeploy, then revoke the old key in Resend. | An invitation email arrives. |
 
-## Owner approval path: durable storage
+## Durable switch-over
 
-The owner decided on 2026-11-10 to keep SQLite with a single writer on a persistent disk as the target ([ADR 0009](decisions/0009-durable-storage.md)), and to spend nothing yet. Until approval, the live site stays a labelled demo (`DEMO_MODE=true`).
+The owner decided on 2026-11-10 to keep SQLite with a single writer on a persistent disk as the target ([ADR 0009](decisions/0009-durable-storage.md)), and to spend nothing yet. Until approval, the live site stays a labelled demo (`DEMO_MODE=true`). **Nothing in this section has been applied.**
 
-**Cost.** As recorded in [ADR 0007](decisions/0007-hosting.md) from [render.com/pricing](https://render.com/pricing), checked 2026-11-07:
+**Cost.** As recorded in [ADR 0007](decisions/0007-hosting.md) from [render.com/pricing](https://render.com/pricing), checked 2026-11-07: Starter (0.5 CPU, 512 MB) $7/month plus $0.25 per GB per month of disk, so about $7.25/month for 1 GB, before bandwidth or build-minute overage. Re-check the pricing page before approving.
 
-- the smallest paid web service (Starter) is $7/month (0.5 CPU, 512 MB);
-- disks cost $0.25 per GB per month;
-- so about $7.25/month for a 1 GB disk, before bandwidth or build-minute overage.
+`render.yaml` describes the target: service `gatepass-api-durable`, Docker, Singapore, `plan: starter`, one instance, 1 GB disk `gatepass-data` at `/data`, `DATABASE_FILE=/data/gatepass.db`, health check `/api/health`, deploy on every commit to `main` (not `checksPass`, which would wait for the release check that itself waits for this service), previews off, `DEMO_MODE=false`, `ALLOW_SIGNUP=false`, secrets as `sync: false`. It validates against Render's Blueprint JSON schema. Render ignores the file until a Blueprint is created from it, and its name differs from the live `gatepass-api`, so it never touches the demo.
 
-Re-check the pricing page before approving.
+**Once the owner approves**, choose one path:
 
-**Once the owner approves:**
+- **A. New service from the Blueprint (clean cut-over).**
+  1. Dashboard → New → Blueprint → this repository. Review the plan and the disk, enter the `sync: false` values (`ADMIN_TOKEN`, `ORIGIN_SECRET` — a new value, `APP_PUBLIC_URL`, `TRUST_PROXY`, and the optional `RESEND_API_KEY`/`MAIL_FROM`).
+  2. Wait for `live`. Check `curl -fsS https://<new service host>/api/health`: `ok: true`, `build.commit` = `git rev-parse origin/main`, a `build.schema`, and no `"demo":true`. (Everything else on the origin answers 403 until requests come through Vercel with the origin secret, so the full release check runs after step 3.)
+  3. Point Vercel at it: Production env `GATEPASS_BACKEND_ORIGIN=https://<new service host>` and `ORIGIN_SECRET` = the new service's value; redeploy production. Run the release check (gate 6) against `https://gatepass-sandy.vercel.app` with `BACKEND_URL` set to the new origin.
+  4. Durability: create an event through the frontend, trigger Manual Deploy on the new service (a restart), confirm the event is still there, and run `node dist/server/index.js verify` from the Shell.
+  5. Suspend or delete the old free `gatepass-api` once the new one has passed for a day.
+- **B. Upgrade the existing service in place.**
+  1. Render Dashboard → `gatepass-api` → Settings → Instance type: **Free** → **Starter**.
+  2. Disk page → Add disk: mount path **`/data`**, size **1 GB**. Render redeploys; the disk is available once the deploy is live.
+  3. Environment: `DEMO_MODE=false` (or delete it). `/api/health` must no longer contain `"demo":true`.
+  4. Durability check as in A.3, then the release check (gate 6).
 
-1. Take a backup of anything worth keeping. On the free plan nothing survives the switch anyway.
-2. Render Dashboard → `gatepass-api` → Settings → Instance type: change **Free** to **Starter**.
-3. Disk page → Add disk:
-   - mount path **`/data`** (the image sets `DATABASE_FILE=/data/gatepass.db` and creates `/data` owned by the non-root `node` user);
-   - size **1 GB**;
-   - save. Render redeploys, and the disk is available once the deploy is live.
-4. Environment: set `DEMO_MODE=false` (or delete it) and save; let the deploy finish. `/api/health` must no longer contain `"demo":true`, and the admin banner disappears.
-5. Check that the disk is writable and durable:
-   - create an event;
-   - trigger Manual Deploy → "Deploy latest commit" (a restart);
-   - the event is still there;
-   - from the Shell, `node dist/server/index.js verify` exits 0.
-   If the server cannot write `/data` (for example because of mount ownership), it fails at startup and the deploy does not go live. Check the logs before proceeding. This step has not yet been exercised on Render.
-6. Schedule backups (Shell or SSH, `backup` as above) and copy them off Render. Update [deployment-live.md](deployment-live.md) (plan, disk, monthly cost) and the README hosting note.
+If the server cannot write `/data` (for example because of mount ownership), it fails at startup and the deploy does not go live; check the logs. This has not been exercised on Render.
+
+After either path: schedule backups and copy them off Render ([Off-host backups](#off-host-backups-docker-single-host)), update [deployment-live.md](deployment-live.md) (plan, disk, monthly cost) and the README hosting note.
 
 Consequences to accept:
 
 - One instance only: a disk prevents scaling to several instances.
 - Each deploy has a few seconds of downtime, because a disk disables zero-downtime deploys ([Render disks](https://render.com/docs/disks#disk-limitations-and-considerations)).
 - Do not deploy while doors are open.
+
+## What is unverified
+
+Stated plainly so nobody mistakes a plan for evidence:
+
+- The new workflows (`security.yml`, `codeql.yml`, `release-verify.yml`) and the extended `docker-run` job have not run on GitHub yet. The `docker-run` script was run locally against an image of this branch (passed); the workflows were checked with a YAML parser and `actionlint`.
+- `release-verify.yml`'s `deployment_status` trigger assumes Vercel's GitHub integration creates deployments named `Production`. Not yet observed for this repository.
+- `VERCEL_GIT_COMMIT_SHA` being available to the Vercel build (it is a Vercel system variable) has not been observed in a real Vercel build of this branch; until it is, `/version.json` may fall back to `git rev-parse HEAD` or `null`, and the release check fails rather than passes.
+- The production release check has only been run against the pre-branch deployment (2026-11-15): it fails as expected because that build has no `/version.json` and no `build` field in `/api/health`; the smoke checks passed.
+- Render: a rollback, a disk, the Blueprint, and backups from the Render Shell have never been exercised. Vercel: `vercel rollback` has never been exercised.
+- `offsite-backup.sh` was run locally against a container of this branch (backup, verify, copy, checksum, upload hook to a local directory, retention, failure exits). A real off-host target (rclone/scp) has not been used.
+- Transactional email (Resend) is implemented but not configured anywhere: live delivery is untested.
+- CodeQL advanced setup conflicts with GitHub's CodeQL "default setup"; whether default setup is enabled on the repository was not checked.
