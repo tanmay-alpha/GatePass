@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, request as playwrightRequest, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Locator, type Page, type TestInfo } from '@playwright/test';
 import { CSRF, PASSWORD, uniqueEmail } from './support';
@@ -55,7 +55,11 @@ async function account(baseURL: string, headers: Record<string, string>, name: s
 export async function seedReview(testInfo: TestInfo): Promise<ReviewSeed> {
   const dir = path.resolve('.local/e2e', `review-${testInfo.project.name}-${path.basename(testInfo.file, '.spec.ts')}`);
   const cache = path.join(dir, 'seed.json');
-  if (existsSync(cache)) return JSON.parse(readFileSync(cache, 'utf8')) as ReviewSeed;
+  try {
+    return JSON.parse(readFileSync(cache, 'utf8')) as ReviewSeed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   mkdirSync(dir, { recursive: true });
   const seed = await createSeed(testInfo, dir);
   writeFileSync(cache, JSON.stringify(seed));

@@ -125,6 +125,8 @@ function sameCommit(actual: string, wanted: string): boolean {
 }
 
 const short = (commit: string | null | undefined) => (commit ? commit.slice(0, 12) : String(commit));
+/** A commit id read from a server: hex only, so nothing else from the response reaches logs or the step summary. */
+const asCommit = (value: unknown) => (typeof value === 'string' && /^[0-9a-f]{7,40}$/i.test(value) ? value.toLowerCase() : null);
 
 // ------------------------------------------------------------ step 1: commits
 
@@ -135,7 +137,7 @@ async function observeVersion(): Promise<Observation> {
     const res = await get(`${frontend}/version.json`, { headers: { 'Cache-Control': 'no-cache' } });
     const body = record(res.json);
     if (res.status !== 200 || !body || !('commit' in body)) return { ready: false, commit: undefined, detail: `HTTP ${res.status}, no commit field` };
-    const commit = typeof body.commit === 'string' ? body.commit.toLowerCase() : null;
+    const commit = asCommit(body.commit);
     if (expected && !(commit && sameCommit(commit, expected))) return { ready: false, commit, detail: `commit ${short(commit)}, want ${short(expected)}` };
     return { ready: true, commit, detail: `commit ${short(commit)}` };
   } catch (error) {
@@ -152,7 +154,7 @@ async function observeHealth(base: string): Promise<Observation> {
     }
     const build = record(body.build);
     if (!build || typeof build.schema !== 'number' || build.schema < 1) return { ready: false, commit: undefined, detail: 'ok, but no build.schema (server older than the release-check contract)' };
-    const commit = typeof build.commit === 'string' ? build.commit.toLowerCase() : null;
+    const commit = asCommit(build.commit);
     if (expected && !(commit && sameCommit(commit, expected))) return { ready: false, commit, detail: `schema ${build.schema}, commit ${short(commit)}, want ${short(expected)}` };
     return { ready: true, commit, detail: `schema ${build.schema}, commit ${short(commit)}${body.demo === true ? ', demo' : ''}` };
   } catch (error) {

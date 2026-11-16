@@ -31,6 +31,8 @@ async function trimAssets() {
 async function cacheAssets(urls) {
   const cache = await caches.open(ASSET_CACHE);
   for (const href of urls) {
+    // Only site-relative /assets/ paths, resolved against this origin: a message can never make the worker fetch elsewhere.
+    if (typeof href !== 'string' || !href.startsWith('/assets/')) continue;
     const url = new URL(href, self.location.origin);
     if (!isAsset(url) || (await cache.match(url.href))) continue;
     try {
@@ -76,6 +78,9 @@ self.addEventListener('activate', (event) => {
 
 /** The page sends the hashed files it loaded before this worker controlled it (fonts, the decoder). */
 self.addEventListener('message', (event) => {
+  // Only pages of this site can reach the worker, but check anyway: ignore anything not sent from this origin.
+  const from = event.origin || (event.source && 'url' in event.source ? new URL(event.source.url).origin : '');
+  if (from !== self.location.origin) return;
   const data = event.data;
   if (data && data.type === 'cache-assets' && Array.isArray(data.urls)) event.waitUntil(cacheAssets(data.urls.filter((url) => typeof url === 'string').slice(0, 100)));
 });

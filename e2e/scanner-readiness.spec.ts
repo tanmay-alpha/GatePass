@@ -1,4 +1,4 @@
-import { rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test as base, expect, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
@@ -100,7 +100,7 @@ function testCodeVideo(payload: string): string {
   }
   const chroma = Buffer.alloc((width / 2) * (height / 2) * 2, 128);
   const frame = Buffer.concat([Buffer.from('FRAME\n'), luma, chroma]);
-  const file = path.join(tmpdir(), `gatepass-e2e-test-code-${process.pid}.y4m`);
+  const file = path.join(mkdtempSync(path.join(tmpdir(), 'gatepass-e2e-')), 'test-code.y4m');
   writeFileSync(file, Buffer.concat([Buffer.from(`YUV4MPEG2 W${width} H${height} F10:1 Ip A1:1 C420jpeg\n`), frame, frame]));
   return file;
 }
@@ -217,7 +217,7 @@ test('camera test: the fake camera shows the test code, the device reads it loca
     await context.close();
   } finally {
     await browser.close();
-    rmSync(video, { force: true });
+    rmSync(path.dirname(video), { recursive: true, force: true });
   }
 });
 
