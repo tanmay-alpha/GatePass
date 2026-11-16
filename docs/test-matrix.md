@@ -23,6 +23,21 @@ Runs of 2026-11-15/16 on branch `feat/production-readiness` (schema 4), on the h
 | **L** | 2026-11-10: `npx tsx --disable-warning=ExperimentalWarning scripts/load-test.ts --repeat 3` | 27 runs, 0 HTTP or network errors, persisted-state checks held after every run; `onepass` (500 attempts on one pass) admitted exactly 1 in each run. Details: [performance.md](performance.md). |
 | **P** | 2026-11-10: Vercel preview deployment `gatepass-34awy9su7` (branch push); `vercel curl /api/health` | Ready. `/api/health` → 503 `{"error":"This preview deployment has no backend. Previews never connect to production data.","preview":true}`. Unauthenticated access returns 302 (Vercel deployment protection). |
 
+### Phase 4 runs (branch `feat/phase4-features`, schema 5, 2026-11-17)
+
+| Key | Run | Result |
+| --- | --- | --- |
+| **T4** | `npm run typecheck` | 0 errors. |
+| **V4** | `npx vitest run` (Windows, Node 24.14.1) | 35 files, 415 passed, 4 skipped. The skips are the Linux-only SIGTERM tests (`recovery.test.ts` graceful stop, three in `shutdown.test.ts`). New files: `enrollment` (15), `recovery-security` (12), `logging` (3), `deliveries`, `shutdown`, `templates` (13), `operations` (5), `assist`, `scanner-readiness` (12), `badge-layout` (8), `release-check` (6). |
+| **R4** | `shutdown`, `recovery`, `deliveries` in Docker `node:24-bookworm-slim` | 34/34, including all four SIGTERM tests (slow, failing and non-responding email provider; the non-responding one exits 0 about 8 s after SIGTERM, delivery re-queued, WAL checkpointed). |
+| **B4** | `npm run build`; `npm run smoke:qr` | Build ok (`dist/server/index.js` 271 kB, gzip 75 kB); QR smoke ok. |
+| **E4** | `npm run build && npx playwright test` (all projects, local built server) | 317 listed: 143 passed, 0 failed, 174 skipped, 3.6 min. Every skip is a browser gate: the axe and overflow specs (84 tests) and the PDF badge spec run only in Chromium; the fake-camera and offline-start tests run only in Chromium. |
+| **A4** | `e2e/a11y.spec.ts` (axe 4.14, wcag2a/aa + 21a/aa) and `e2e/visual-review.spec.ts` | 21 screens, light and dark: 0 violations at 375 and 1280 px; no sideways scroll at 320, 375, 390, 768, 1024, 1280, 1440 px. |
+| **PR4** | `e2e/badges.spec.ts` (Chromium) | Real A4 PDFs have `ceil(10/n)` pages for n = 1, 2, 4, 8; every QR decoded with zxing-wasm from a 150 dpi render of each sheet equals the issued pass URL; QR ≥ 30 mm, names ≥ 10 pt, no overflow. Samples: `docs/screenshots/badges/`. Not printed on paper. |
+| **D4** | Docker Desktop 29.9.2: images from `git archive 8b86114` (old, schema 4) and `6d2f831` (new, schema 5) | Persistence: enroll (second use 410) → admit → `docker restart` → still `redeemed`, re-scan `already_redeemed`, `verify` 0; online backup restored into a second container and volume with the admission present; both stopped with exit 0; no token, key or code in the logs. Rollback rehearsal `scripts/rollback-rehearsal.sh`: 9/9. |
+| **RC4** | `scripts/release-check.ts` against production (read-only), 2026-11-17 | 11/11 passed against `8b86114` (schema 4, `demo: true`); a run gated on this branch's head deferred with exit 0 as designed. |
+| **CI4** | PR #15 GitHub Actions | `check (ubuntu-latest, 22/24)`, all four e2e projects, `docker`, `docker-run`, gitleaks and both CodeQL analyses passed on the first push; the CodeQL result check reported five new alerts (service worker, release-check, two e2e helpers), fixed in `4654f5a`. Final state: see the PR. |
+
 Rows marked C or R below point to those dedicated runs for their detail; the same files also ran in V on the current state (all passed, SIGTERM test skipped).
 
 PR CI results are recorded in the PR. The last recorded CI run on `main` is PR #13's run (all 11 jobs passed, 2026-11-14).
@@ -270,14 +285,14 @@ Full host details for the load tests (OS build, disk model, database pragmas, ba
 
 ## Not verified
 
-- **Physical devices.** Camera scanning on a real iPhone or Android phone has not been tried (no devices available). The decoder tests (`tests/scanner-detector.test.ts`) and camera tests (`tests/scanner-camera.test.ts`) use fakes and a generated frame; Playwright enters codes by hand. Use the [manual checklist](#manual-real-device-acceptance-checklist) below.
-- **`release-verify.yml` on GitHub.** It has no pull-request trigger, so it has not run on GitHub; the release check (run RC) was run locally. `security.yml`, `codeql.yml` and the changed `ci.yml` ran on pull request #14; their results are recorded in the PR, not here.
-- **Docker on the final state.** Run D was recorded on 2026-11-15 on an earlier state of this branch; it has not been repeated on the final state.
-- **Live email delivery.** No Resend key or sending domain was available. The email paths are tested against a fake provider (`tests/account-recovery.test.ts`); no message has been sent through Resend.
-- **Durable hosting target.** The intended target (a Render instance with a persistent disk, or a VM) has never been exercised. Production still runs `4a6ba5c` (run RC).
-- **Load on a hosted instance.** All performance numbers are from the laptop (run L, 2026-11-10, before this branch's changes). No hosted instance has been load-tested.
-- **SIGTERM on Windows.** Windows has no catchable SIGTERM for a child process, so the graceful-stop test is skipped there; graceful stop was verified on Linux only (runs R and D).
-- **`mobile-chrome` coverage.** The Pixel 7 project runs only `e2e/onboarding.spec.ts`; the scanner and account specs are not run at phone size.
+- **Physical devices.** Camera scanning, the readiness checklist, the camera test code and installing the scanner have not been tried on a real iPhone or Android phone (no devices available). Playwright uses Chromium's fake camera (run E4) and Pixel 7 emulation; neither counts as device verification. Use the [manual checklist](#manual-real-device-acceptance-checklist) below.
+- **Printed badges.** Badge QR readability was checked on PDF renders (run PR4), not on paper from a real printer.
+- **`release-verify.yml` on GitHub.** It runs only on schedule and manual dispatch and has not run on GitHub; the release check was run locally (RC4).
+- **Live email delivery.** No Resend key, sending domain or `PASS_DELIVERY_KEY` was available. Invitations, resets and attendee pass email are tested against fake providers (`account-recovery`, `deliveries`, `shutdown`); no message has been sent through Resend.
+- **Durable hosting target.** A Render instance with a persistent disk, or a VM, has never been exercised; the container rehearsal (D4) used a local Docker volume. Production still runs the free demo (`demo: true`, RC4).
+- **Load on a hosted instance.** All performance numbers are from the laptop. No hosted instance has been load-tested.
+- **SIGTERM on Windows.** Windows has no catchable SIGTERM for a child process, so the graceful-stop tests are skipped there; they run on Linux (R4, CI).
+- **Client path of the setup retry (SA2-3).** The server side is tested; the scanner's `pendingEnrollment` resend has no automated browser test.
 
 ## Manual real-device acceptance checklist
 
