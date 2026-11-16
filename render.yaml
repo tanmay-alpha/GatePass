@@ -71,3 +71,7 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
+      # Optional: attendee pass email (docs/decisions/0012-pass-email-outbox.md). 32 random bytes, base64.
+      # Keep it out of backups; rotate only with an empty queue.
+      - key: PASS_DELIVERY_KEY
+        sync: false
