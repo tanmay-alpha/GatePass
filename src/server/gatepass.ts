@@ -444,7 +444,7 @@ export class GatePass {
   createScanner(eventId: string, label: string, gateId: string | null, actor: string): ScannerSetupLink {
     const id = randomUUID();
     const code = this.newToken();
-    transaction(this.db, () => {
+    const enrollment = transaction(this.db, () => {
       this.getEvent(eventId);
       if (gateId) this.access.assertGate(eventId, gateId);
       // Placeholder key nobody holds: the device gets its real key on enrollment.
@@ -452,9 +452,9 @@ export class GatePass {
         .prepare('INSERT INTO scanners (id, event_id, gate_id, label, key_hash, created_at, key_issued_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(id, eventId, gateId, label, hashToken(`unclaimed_${this.newToken()}`), this.timestamp(), actor);
       this.audit(eventId, actor, 'scanner.created', id, { label, gateId });
-      this.insertEnrollment(id, code, actor);
+      return this.insertEnrollment(id, code, actor);
     });
-    return { scanner: this.getScanner(id), enrollment: this.enrollmentOf(code) };
+    return { scanner: this.getScanner(id), enrollment };
   }
 
   /**
@@ -464,14 +464,14 @@ export class GatePass {
    */
   rotateScanner(id: string, actor: string): ScannerSetupLink {
     const code = this.newToken();
-    transaction(this.db, () => {
+    const enrollment = transaction(this.db, () => {
       const scanner = this.getScanner(id);
       if (scanner.revokedAt) throw httpError(409, 'A revoked scanner cannot be rotated. Create a new one.');
       this.db.prepare('UPDATE scanners SET key_hash = ?, key_issued_by = ?, enrolled_at = NULL WHERE id = ?').run(hashToken(`unclaimed_${this.newToken()}`), actor, id);
       this.audit(scanner.eventId, actor, 'scanner.rotated', id, {});
-      this.insertEnrollment(id, code, actor);
+      return this.insertEnrollment(id, code, actor);
     });
-    return { scanner: this.getScanner(id), enrollment: this.enrollmentOf(code) };
+    return { scanner: this.getScanner(id), enrollment };
   }
 
   revokeScanner(id: string, actor: string): Scanner {
@@ -494,7 +494,8 @@ export class GatePass {
   enrollScanner(code: string): { key: string; session: ScannerSession } | null {
     if (!isWellFormedToken(code)) return null;
     const key = `gps_${this.newToken()}`;
-    const scanner = transaction(this.db, (): AuthenticatedScanner | null => {
+    // The session is built inside the claim: if building it fails, the code is not spent and the device can retry.
+    return transaction(this.db, () => {
       const at = this.timestamp();
       const row = this.db
         .prepare(
@@ -507,9 +508,8 @@ export class GatePass {
       // The person who created the link stays the key's issuer: removing them from the team revokes it.
       this.db.prepare('UPDATE scanners SET key_hash = ?, key_issued_by = ?, enrolled_at = ? WHERE id = ?').run(hashToken(key), row.created_by as string, at, row.id as string);
       this.audit(row.event_id as string, `scanner:${row.id as string}`, 'scanner.enrolled', row.id as string, {});
-      return { id: row.id as string, eventId: row.event_id as string, gateId: (row.gate_id as string | null) ?? null, label: row.label as string };
+      return { key, session: this.scannerSession({ id: row.id as string, eventId: row.event_id as string, gateId: (row.gate_id as string | null) ?? null, label: row.label as string }) };
     });
-    return scanner ? { key, session: this.scannerSession(scanner) } : null;
   }
 
   /** Read-only: resolves a scanner key without recording use (use is recorded on redeem). */
@@ -812,18 +812,19 @@ export class GatePass {
     return toScanner(row, this.timestamp());
   }
 
-  /** Must run inside a transaction. Only the newest setup link of a device works. */
-  private insertEnrollment(scannerId: string, code: string, actor: string): void {
+  /**
+   * Must run inside a transaction. Only the newest setup link of a device works.
+   * The code travels in the URL fragment, which browsers never send to a server or proxy log;
+   * the returned expiry is the one stored, so the link never claims more time than the server allows.
+   */
+  private insertEnrollment(scannerId: string, code: string, actor: string): ScannerEnrollment {
     const now = this.now();
+    const expiresAt = new Date(now.getTime() + ENROLLMENT_TTL_MS).toISOString();
     this.db.prepare('UPDATE scanner_enrollments SET invalidated_at = ? WHERE scanner_id = ? AND used_at IS NULL AND invalidated_at IS NULL').run(now.toISOString(), scannerId);
     this.db
       .prepare('INSERT INTO scanner_enrollments (token_hash, scanner_id, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)')
-      .run(hashToken(code), scannerId, actor, now.toISOString(), new Date(now.getTime() + ENROLLMENT_TTL_MS).toISOString());
-  }
-
-  /** The code travels in the URL fragment, which browsers never send to a server or proxy log. */
-  private enrollmentOf(code: string): ScannerEnrollment {
-    return { url: `${this.publicUrl}/scan#enroll=${code}`, expiresAt: new Date(this.now().getTime() + ENROLLMENT_TTL_MS).toISOString() };
+      .run(hashToken(code), scannerId, actor, now.toISOString(), expiresAt);
+    return { url: `${this.publicUrl}/scan#enroll=${code}`, expiresAt };
   }
 
   private audit(eventId: string | null, actor: string, action: string, entityId: string | null, details: Record<string, unknown>): void {
