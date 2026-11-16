@@ -20,3 +20,6 @@
 .ops-facts > div { display: grid; gap: 2px; min-width: 0; }
 .ops-facts dt { font-size: var(--text-sm); color: var(--muted); }
 .ops-facts dd { margin: 0; font-size: var(--text-md); font-weight: 600; overflow-wrap: anywhere; }
+
+/* No alerts: the card keeps its own height instead of stretching to the chart beside it. */
+.ops-alerts-empty { align-self: start; }

@@ -200,7 +200,7 @@ export function ScannersSection({ event, gates, onChanged }: { event: EventSumma
                         <button className="btn btn-ghost btn-small" onClick={() => void rotate(scanner)} disabled={pending === scanner.id} aria-label={`${scanner.setup === 'enrolled' || scanner.setup === 'legacy' ? 'Rotate key' : 'New setup link'} for ${scanner.label}`}>
                           <KeyRound size={14} aria-hidden /> {scanner.setup === 'enrolled' || scanner.setup === 'legacy' ? 'Rotate key' : 'New setup link'}
                         </button>
-                        <button className="btn btn-secondary btn-small danger" onClick={() => void revoke(scanner)} disabled={pending === scanner.id} aria-label={`Revoke ${scanner.label}`}>
+                        <button className="btn btn-ghost btn-small danger" onClick={() => void revoke(scanner)} disabled={pending === scanner.id} aria-label={`Revoke ${scanner.label}`}>
                           <Ban size={14} aria-hidden /> Revoke
                         </button>
                       </>

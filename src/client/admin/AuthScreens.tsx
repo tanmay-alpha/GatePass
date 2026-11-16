@@ -1,7 +1,7 @@
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import type { AccountUser, InvitationPreview, SessionInfo } from '../../shared/types';
 import { api, ApiError, WAKING_MESSAGE } from '../api';
-import { ErrorNote, FieldError, errorMessage, focusFirstInvalid } from '../ui';
+import { ErrorNote, FieldError, describedBy, errorMessage, focusFirstInvalid } from '../ui';
 import { DemoBanner } from './DemoBanner';
 import { INVITATION_ROLE_LABEL } from './model';
 
@@ -67,7 +67,7 @@ export function PasswordField({ label, value, onChange, autoComplete, error, hin
         onChange={(e) => onChange(e.target.value)}
         required
         aria-invalid={error ? true : undefined}
-        aria-describedby={[hint ? `${id}-hint` : '', error ? `${id}-error` : ''].join(' ').trim() || undefined}
+        aria-describedby={describedBy(hint && `${id}-hint`, error && `${id}-error`)}
       />
       {hint ? (
         <span id={`${id}-hint`} className="field-hint">
@@ -224,12 +224,12 @@ export function SignUp({ demo, onSignedIn }: { demo: boolean; onSignedIn: (sessi
       <form className="stack" onSubmit={submit} noValidate>
         <label>
           Your name
-          <input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={errors.name ? `${id}-name` : undefined} />
+          <input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={describedBy(errors.name && `${id}-name`)} />
           <FieldError id={`${id}-name`} message={errors.name} />
         </label>
         <label>
           Email
-          <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required aria-invalid={errors.email ? true : undefined} aria-describedby={errors.email ? `${id}-email` : undefined} />
+          <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required aria-invalid={errors.email ? true : undefined} aria-describedby={describedBy(errors.email && `${id}-email`)} />
           <FieldError id={`${id}-email`} message={errors.email} />
         </label>
         <PasswordField label="Password" value={password} onChange={setPassword} autoComplete="new-password" error={errors.password} hint={`At least ${MIN_PASSWORD} characters. A short sentence is easy to remember.`} />
@@ -501,7 +501,7 @@ function CreateInvitedAccount({ email, busy, error, onSubmit }: { email: string;
       </label>
       <label>
         Your name
-        <input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={errors.name ? `${id}-name` : undefined} />
+        <input autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={describedBy(errors.name && `${id}-name`)} />
         <FieldError id={`${id}-name`} message={errors.name} />
       </label>
       <PasswordField label="Choose a password" value={password} onChange={setPassword} autoComplete="new-password" error={errors.password} hint={`At least ${MIN_PASSWORD} characters.`} />

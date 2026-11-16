@@ -3,7 +3,7 @@ import { useId, useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, ImportReport, IssuedPass } from '../../shared/types';
 import { attendeesFromCsv, parseCsv, type ParsedAttendees } from '../csv';
 import { Modal } from '../dialog';
-import { ErrorNote, FieldError, TableMessage, ToneBadge, errorMessage } from '../ui';
+import { ErrorNote, FieldError, TableMessage, ToneBadge, describedBy, errorMessage } from '../ui';
 import { fromZoneInput, zoneLabel } from '../time';
 import { announceDeliveries, EmailPassesOption } from './DeliveriesSection';
 import { adminApi } from './http';
@@ -222,7 +222,7 @@ export function ImportPasses({ event, policies, onClose, onImported }: Props) {
             onChange={(e) => setText(e.target.value)}
             placeholder={'Name,Email\n"Lovelace, Ada",ada@example.com\nGrace Hopper,grace@example.com'}
             aria-invalid={inputError ? true : undefined}
-            aria-describedby={`${id}-error`}
+            aria-describedby={describedBy(inputError && `${id}-error`)}
           />
           <FieldError id={`${id}-error`} message={inputError} />
         </label>

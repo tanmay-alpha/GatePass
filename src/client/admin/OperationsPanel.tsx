@@ -177,8 +177,9 @@ function Summary({ summary, zone }: { summary: OperationsSummary; zone: string }
       <div className="stats stats-lg">
         <Stat label="Admitted / issued" value={`${passes.redeemed} / ${passes.issued}`} />
         <Stat label="Turnout of expected" value={attendance.rate === null ? '—' : `${percent(attendance.rate)} of ${attendance.expected}`} />
-        <Stat label="Capacity used" value={capacity.limit === null ? 'No limit' : `${percent(capacity.admitted / capacity.limit)} · ${capacity.remaining} left`} />
+        <Stat label="Capacity used" value={capacity.limit === null ? 'No limit' : percent(capacity.admitted / capacity.limit)} />
         <Stat label="Denied scans" value={totals.denied} />
+        <Stat label="Assisted admissions" value={summary.assistedAdmissions} />
       </div>
       <div className="ops-grid">
         <PassStates passes={passes} capacity={capacity} expected={attendance.expected} />
@@ -325,7 +326,7 @@ function Scanners({ scanners, zone }: { scanners: OperationsSummary['scanners'];
 
 function Alerts({ alerts, zone }: { alerts: OperationsSummary['alerts']; zone: string }) {
   return (
-    <section className="card" aria-labelledby="alerts-title">
+    <section className={`card${alerts.length === 0 ? ' ops-alerts-empty' : ''}`} aria-labelledby="alerts-title">
       <SectionHead id="alerts-title" title="Alerts">
         <span className="card-meta num">{alerts.length} open</span>
       </SectionHead>

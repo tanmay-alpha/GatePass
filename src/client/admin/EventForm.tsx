@@ -1,6 +1,6 @@
 import { useId, useMemo, useState, type FormEvent } from 'react';
 import type { EventSummary, EventTemplate } from '../../shared/types';
-import { ErrorNote, FieldError, errorMessage, focusFirstInvalid } from '../ui';
+import { ErrorNote, FieldError, describedBy, errorMessage, focusFirstInvalid } from '../ui';
 import { browserTimeZone, fromZoneInput, listTimeZones, toZoneInput, zoneLabel } from '../time';
 import { adminApi } from './http';
 import { TemplatePicker } from './TemplatePicker';
@@ -110,7 +110,7 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
       <fieldset className="form-grid span-2" disabled={readOnly}>
         <label className="span-2">
           Name
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={`${id}-name-error`} />
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={describedBy(errors.name && `${id}-name-error`)} />
           <FieldError id={`${id}-name-error`} message={errors.name} />
         </label>
         <label className="span-2">
@@ -138,13 +138,13 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
             onChange={(e) => setStartsAt(e.target.value)}
             required
             aria-invalid={errors.startsAt ? true : undefined}
-            aria-describedby={`${id}-starts-error`}
+            aria-describedby={describedBy(errors.startsAt && `${id}-starts-error`)}
           />
           <FieldError id={`${id}-starts-error`} message={errors.startsAt} />
         </label>
         <label>
           Ends
-          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} required aria-invalid={errors.endsAt ? true : undefined} aria-describedby={`${id}-ends-error`} />
+          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} required aria-invalid={errors.endsAt ? true : undefined} aria-describedby={describedBy(errors.endsAt && `${id}-ends-error`)} />
           <FieldError id={`${id}-ends-error`} message={errors.endsAt} />
         </label>
         <label className="span-2">
@@ -157,7 +157,7 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
             value={capacity}
             onChange={(e) => setCapacity(e.target.value)}
             aria-invalid={errors.capacity ? true : undefined}
-            aria-describedby={`${id}-capacity-hint ${id}-capacity-error`}
+            aria-describedby={describedBy(`${id}-capacity-hint`, errors.capacity && `${id}-capacity-error`)}
           />
           <span id={`${id}-capacity-hint`} className="field-hint">
             Most people admitted across every gate and policy, e.g. the venue limit. Empty: no limit.{admitted ? ` ${admitted} already admitted.` : ''}

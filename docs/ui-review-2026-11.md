@@ -59,13 +59,14 @@ computed over a gradient; checked by hand: `--muted` on `--bg`/`--surface` is ab
 - Permission-aware controls: covered by `e2e/accounts.spec.ts` (manager sees the team read-only, no exports).
 - Pass page: script-free, 44 px directions link, valid in light and dark at 320 px.
 
-## Found in files owned by other workstreams (not changed here)
+## Found in files owned by other workstreams (fixed in a follow-up pass)
 
-| File | Observation |
-| --- | --- |
-| `OperationsPanel.tsx` (fixed by the orchestrator during the review) | After a "Share" column was added, the "Admissions by gate" table got the five-column `min-width: 600px` at ≤ 860 px and scrolled sideways inside a div that could not be focused: axe `scrollable-region-focusable` (serious) at 375 px, light and dark. Now `tabIndex={0} role="region" aria-labelledby="gates-ops-title"`, as in `ImportPasses.tsx`. |
-| `OperationsPanel.tsx` / ops grid | At ≥ 1181 px the empty "Alerts" card stretches to the height of the scan chart beside it, leaving a large blank card (`before/event-operations-light-1440.png`). Consider `align-items: start` for that row or a compact empty state. |
-| `IssuedPasses.tsx` / `PassesPanel.tsx` | The pass list card has no visible heading; it starts with the search box (`before/event-passes-dark-768.png`). A "Passes" heading would help orientation and screen-reader navigation. |
-| `ScannersSection.tsx` | In stacked device rows, "Revoke" is a bordered button while "New setup link"/"Rotate key" are ghost buttons (`before/event-access-light-390.png`); the weight difference is fine for a destructive action but the two rows look inconsistent. |
-| `EventForm.tsx`, `IssueForm.tsx`, `ImportPasses.tsx`, `SettingsPanel.tsx`, `SaveTemplateSection.tsx`, `TemplatePicker.tsx` | Same `aria-describedby` pattern as issue 5 (ids of hint/error elements that are only rendered sometimes). Not an axe violation (axe: "needs review"); harmless in practice, but worth aligning. |
-| `PoliciesSection.tsx` | Same pattern; left unchanged to keep this review's diff to CSS and the auth screens. |
+Reported during the review, fixed once those workstreams had finished.
+
+| File | Observation | Fix |
+| --- | --- | --- |
+| `OperationsPanel.tsx` | After a "Share" column was added, the "Admissions by gate" table got the five-column `min-width: 600px` at ≤ 860 px and scrolled sideways inside a div that could not be focused: axe `scrollable-region-focusable` (serious) at 375 px, light and dark. | Fixed by the orchestrator: `tabIndex={0} role="region" aria-labelledby="gates-ops-title"`, as in `ImportPasses.tsx`. |
+| `OperationsPanel.tsx`, `operations.css` | At ≥ 1181 px the empty "Alerts" card stretched to the height of the scan chart beside it, leaving a large blank card (`before/event-operations-light-1440.png`). Admissions made through "Find attendee" were counted by the server but not shown. | Fixed: with no alerts the card gets `align-self: start` (`.ops-alerts-empty`) and keeps its own height; a fifth KPI tile "Assisted admissions" shows `summary.assistedAdmissions` (`after/event-operations-light-1440.png`). |
+| `PassesPanel.tsx` | The pass list card had no visible heading; it started with the search box (`before/event-passes-dark-768.png`). | Fixed: a "Passes" section head, and the card is labelled by it (`aria-labelledby="pass-list-title"`) (`after/event-passes-dark-768.png`). |
+| `ScannersSection.tsx` | In stacked device rows "Revoke" was a bordered button while "New setup link"/"Rotate key" were ghost buttons (`before/event-access-light-390.png`). | Fixed: Revoke is a ghost button in the danger colour, like "Disable" on the platform page; it stays red with a ban icon and still asks for confirmation (`after/event-access-light-390.png`). |
+| `EventForm.tsx`, `IssueForm.tsx`, `ImportPasses.tsx`, `SettingsPanel.tsx`, `SaveTemplateSection.tsx`, `PoliciesSection.tsx` | Same `aria-describedby` pattern as issue 5: ids of error messages that are only rendered after validation. | Fixed with one helper, `describedBy()` in `ui.tsx`, which keeps only the ids of rendered hints and errors; `AuthScreens.tsx` uses it too. `TemplatePicker.tsx` and the policy picker always render their hint, so they needed no change. |

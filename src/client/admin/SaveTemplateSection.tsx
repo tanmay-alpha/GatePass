@@ -1,7 +1,7 @@
 import { BookmarkPlus } from 'lucide-react';
 import { useId, useState, type FormEvent } from 'react';
 import type { EventSummary, EventTemplate } from '../../shared/types';
-import { ErrorNote, FieldError, SectionHead, errorMessage, focusFirstInvalid } from '../ui';
+import { ErrorNote, FieldError, SectionHead, describedBy, errorMessage, focusFirstInvalid } from '../ui';
 import { adminApi } from './http';
 import { useToast } from './toast';
 import './templates.css';
@@ -47,7 +47,7 @@ export function SaveTemplateSection({ event }: { event: EventSummary }) {
       <form className="form-grid" onSubmit={submit} noValidate>
         <label className="span-2">
           Template name
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} aria-invalid={nameError ? true : undefined} aria-describedby={`${id}-name-error`} />
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} aria-invalid={nameError ? true : undefined} aria-describedby={describedBy(nameError && `${id}-name-error`)} />
           <FieldError id={`${id}-name-error`} message={nameError} />
         </label>
         <label className="span-2">

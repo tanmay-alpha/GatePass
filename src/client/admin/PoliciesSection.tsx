@@ -2,7 +2,7 @@ import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, Gate } from '../../shared/types';
 import { Modal, useConfirm } from '../dialog';
-import { CapacityLine, EmptyState, ErrorNote, FieldError, SectionHead, errorMessage, focusFirstInvalid } from '../ui';
+import { CapacityLine, EmptyState, ErrorNote, FieldError, SectionHead, describedBy, errorMessage, focusFirstInvalid } from '../ui';
 import { formatDateTimeInZone, formatShortInZone, fromZoneInput, toZoneInput, zoneLabel } from '../time';
 import { adminApi } from './http';
 import { can } from './model';
@@ -222,7 +222,7 @@ function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
             required
             placeholder="e.g. VIP, Early entry"
             aria-invalid={errors.name ? true : undefined}
-            aria-describedby="policy-name-error"
+            aria-describedby={describedBy(errors.name && 'policy-name-error')}
           />
           <FieldError id="policy-name-error" message={errors.name} />
         </label>
@@ -233,7 +233,7 @@ function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
             value={opensAt}
             onChange={(e) => setOpensAt(e.target.value)}
             aria-invalid={errors.opensAt ? true : undefined}
-            aria-describedby="policy-opens-hint policy-opens-error"
+            aria-describedby={describedBy('policy-opens-hint', errors.opensAt && 'policy-opens-error')}
           />
           <span id="policy-opens-hint" className="field-hint">
             {label}. Empty: event start ({formatDateTimeInZone(event.startsAt, zone, false)})
@@ -247,7 +247,7 @@ function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
             value={closesAt}
             onChange={(e) => setClosesAt(e.target.value)}
             aria-invalid={errors.closesAt ? true : undefined}
-            aria-describedby="policy-closes-hint policy-closes-error"
+            aria-describedby={describedBy('policy-closes-hint', errors.closesAt && 'policy-closes-error')}
           />
           <span id="policy-closes-hint" className="field-hint">
             {label}. Empty: event end ({formatDateTimeInZone(event.endsAt, zone, false)})
@@ -264,7 +264,7 @@ function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
             value={capacity}
             onChange={(e) => setCapacity(e.target.value)}
             aria-invalid={errors.capacity ? true : undefined}
-            aria-describedby="policy-capacity-hint policy-capacity-error"
+            aria-describedby={describedBy('policy-capacity-hint', errors.capacity && 'policy-capacity-error')}
           />
           <span id="policy-capacity-hint" className="field-hint">
             Empty: no limit.{admitted ? ` ${admitted} already admitted, so it cannot be lower than that.` : ''}

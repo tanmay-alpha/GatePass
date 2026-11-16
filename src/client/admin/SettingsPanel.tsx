@@ -2,7 +2,7 @@ import { Copy } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { EventStatus, EventSummary } from '../../shared/types';
 import { useConfirm, type ConfirmOptions } from '../dialog';
-import { ErrorNote, FieldError, SectionHead, ToneBadge, errorMessage, focusFirstInvalid } from '../ui';
+import { ErrorNote, FieldError, SectionHead, ToneBadge, describedBy, errorMessage, focusFirstInvalid } from '../ui';
 import { fromZoneInput, toZoneInput, zoneLabel } from '../time';
 import { EventForm } from './EventForm';
 import { adminApi } from './http';
@@ -190,17 +190,17 @@ function CloneSection({ event, onOpenEvent }: { event: EventSummary; onOpenEvent
       <form className="form-grid" onSubmit={submit} noValidate>
         <label className="span-2">
           New event name
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} aria-invalid={errors.name ? true : undefined} aria-describedby="clone-name-error" />
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} aria-invalid={errors.name ? true : undefined} aria-describedby={describedBy(errors.name && 'clone-name-error')} />
           <FieldError id="clone-name-error" message={errors.name} />
         </label>
         <label>
           New start
-          <input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} aria-invalid={errors.startsAt ? true : undefined} aria-describedby="clone-zone clone-starts-error" />
+          <input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} aria-invalid={errors.startsAt ? true : undefined} aria-describedby={describedBy('clone-zone', errors.startsAt && 'clone-starts-error')} />
           <FieldError id="clone-starts-error" message={errors.startsAt} />
         </label>
         <label>
           New end
-          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} aria-invalid={errors.endsAt ? true : undefined} aria-describedby="clone-zone clone-ends-error" />
+          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} aria-invalid={errors.endsAt ? true : undefined} aria-describedby={describedBy('clone-zone', errors.endsAt && 'clone-ends-error')} />
           <FieldError id="clone-ends-error" message={errors.endsAt} />
         </label>
         <p id="clone-zone" className="field-hint span-2">

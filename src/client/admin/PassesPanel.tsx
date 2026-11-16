@@ -2,7 +2,7 @@ import { Ban, ChevronLeft, ChevronRight, Download, FileUp, RefreshCw, Search, Sh
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, IssuedPass, Pass, PassStatus } from '../../shared/types';
 import { Modal, useConfirm } from '../dialog';
-import { ErrorNote, PassStatusBadge, TableMessage, errorMessage } from '../ui';
+import { ErrorNote, PassStatusBadge, SectionHead, TableMessage, errorMessage } from '../ui';
 import { formatShortInZone, zoneLabel } from '../time';
 import { DeliveriesSection } from './DeliveriesSection';
 import { useDebounced, useResource } from './hooks';
@@ -203,7 +203,8 @@ export function PassesPanel({ event, onChanged }: Props) {
           <p className="notice">{ISSUE_BLOCKED[event.status]}</p>
         )}
 
-        <section className="card" aria-label="Passes">
+        <section className="card" aria-labelledby="pass-list-title">
+          <SectionHead id="pass-list-title" title="Passes" />
           <div className="toolbar">
             <label className="grow search">
               <span className="sr-only">Search passes</span>
