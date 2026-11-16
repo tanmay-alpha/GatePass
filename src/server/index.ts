@@ -5,9 +5,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { createApp } from './app';
 import { buildCommit, loadConfig, trustProxySetting } from './config';
 import { backupDatabase, openDatabase } from './db';
+import { DeliveryWorker } from './deliveries';
 import { GatePass } from './gatepass';
 import { disabledMailer, resendMailer } from './mailer';
 import { restoreDatabase, verifyDatabase } from './integrity';
+import { gracefulShutdown } from './shutdown';
 
 // Maintenance commands. Run `restore` only while the server is stopped.
 // `backup` and `verify` never migrate the file they read: verifying an old
@@ -70,8 +72,15 @@ function start(): void {
   }
 
   const db = openDatabase(config.DATABASE_FILE);
-  const mailer = config.RESEND_API_KEY && config.MAIL_FROM ? resendMailer({ apiKey: config.RESEND_API_KEY, from: config.MAIL_FROM }) : disabledMailer;
-  const service = new GatePass(db, { publicUrl: config.APP_PUBLIC_URL, mailer });
+  const mailer =
+    config.RESEND_API_KEY && config.MAIL_FROM ? resendMailer({ apiKey: config.RESEND_API_KEY, from: config.MAIL_FROM, url: config.RESEND_API_URL }) : disabledMailer;
+  const service = new GatePass(db, { publicUrl: config.APP_PUBLIC_URL, mailer, passDeliveryKey: config.PASS_DELIVERY_KEY });
+  const worker = service.deliveries.available
+    ? new DeliveryWorker(service.deliveries, mailer, { perSecond: config.PASS_EMAIL_PER_SECOND, maxAttempts: config.PASS_EMAIL_MAX_ATTEMPTS })
+    : null;
+  if (mailer.enabled && !worker) {
+    console.warn(JSON.stringify({ level: 'warn', msg: 'pass emails disabled: set PASS_DELIVERY_KEY to let organizers email passes' }));
+  }
   const commit = buildCommit(config);
   const app = createApp({
     service,
@@ -100,33 +109,29 @@ function start(): void {
         commit,
         demo: config.DEMO_MODE,
         email: mailer.enabled,
+        passEmail: worker !== null,
         database: config.DATABASE_FILE
       })
     );
+    worker?.start();
   });
 
-  // Stop accepting connections, let in-flight requests finish (each redeem is
-  // one synchronous transaction, so none is ever half-applied), let emails
-  // already handed to the provider finish and be audited, then close the
-  // database, which checkpoints the WAL. Idle keep-alive sockets from a proxy
-  // would otherwise hold server.close() open until the hard deadline.
+  // Bounded drain: requests, the pass email in flight and emails started
+  // after a response finish and are recorded before the database closes
+  // (src/server/shutdown.ts).
   let stopping = false;
   const shutdown = (signal: string) => {
     if (stopping) return;
     stopping = true;
     console.log(JSON.stringify({ level: 'info', msg: 'shutting down', signal }));
-    server.close(() => {
-      void service.accounts.idle().finally(() => {
-        db.close();
-        process.exit(0);
-      });
+    void gracefulShutdown({
+      server,
+      stopWorkers: () => worker?.stop() ?? Promise.resolve(),
+      abortWorkers: () => worker?.abort(),
+      idle: () => service.accounts.idle(),
+      db,
+      exit: (code) => process.exit(code)
     });
-    server.closeIdleConnections();
-    setTimeout(() => server.closeAllConnections(), 5_000).unref();
-    setTimeout(() => {
-      if (db.isOpen) db.close();
-      process.exit(1);
-    }, 10_000).unref();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));

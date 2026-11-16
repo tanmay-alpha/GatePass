@@ -46,6 +46,33 @@ const envSchema = z.object({
   /** Sender, e.g. `GatePass <no-reply@your-verified-domain>`; required with RESEND_API_KEY. */
   MAIL_FROM: z.string().min(3).max(200).optional(),
   /**
+   * Encrypts pass links while they wait in the email outbox (AES-256-GCM).
+   * 32 random bytes, base64. Required to email passes; never stored in the
+   * database. See docs/decisions/0012-pass-email-outbox.md for rotation.
+   */
+  PASS_DELIVERY_KEY: z
+    .string()
+    .regex(/^[A-Za-z0-9+/_-]{43}=?$/, 'PASS_DELIVERY_KEY must be 32 random bytes in base64. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"')
+    .transform((value) => Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64'))
+    .refine((key) => key.length === 32, 'PASS_DELIVERY_KEY must decode to exactly 32 bytes')
+    .optional(),
+  /** Pass emails handed to the provider per second at most (Resend's default account limit is 2). */
+  PASS_EMAIL_PER_SECOND: z.coerce.number().min(0.1).max(100).default(2),
+  /** Attempts per pass email before it is marked failed (exponential backoff from 30 s, capped at 1 h). */
+  PASS_EMAIL_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(8),
+  /**
+   * Testing only: replaces https://api.resend.com/emails (the shutdown tests
+   * point it at a local fake provider). Plain http is accepted only for
+   * loopback addresses, so the API key never travels in clear text.
+   */
+  RESEND_API_URL: z
+    .url({ protocol: /^https?$/, error: 'RESEND_API_URL must be an http(s) URL' })
+    .refine((value) => {
+      const url = new URL(value);
+      return url.protocol === 'https:' || ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+    }, 'RESEND_API_URL must use https (http only for 127.0.0.1 or localhost)')
+    .optional(),
+  /**
    * Commit this build came from, reported by /api/health for release checks
    * (Render sets RENDER_GIT_COMMIT). Never fatal: a value that is not a git
    * hash is reported as unknown.

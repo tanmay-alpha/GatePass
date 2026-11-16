@@ -490,3 +490,63 @@ export interface EventTemplate {
   createdAt: string | null;
   updatedAt: string | null;
 }
+
+/**
+ * Attendee pass email outbox (docs/decisions/0012-pass-email-outbox.md).
+ * `accepted` means the email provider accepted the message, never that it
+ * reached the inbox.
+ */
+export type DeliveryStatus = 'queued' | 'sending' | 'accepted' | 'failed' | 'cancelled';
+
+export interface PassDelivery {
+  id: string;
+  passId: string;
+  attendeeName: string | null;
+  recipient: string;
+  status: DeliveryStatus;
+  /** Provider requests made so far. */
+  attempts: number;
+  /** When a queued email is tried next. */
+  nextAttemptAt: string | null;
+  /** Last provider error (queued: retrying; failed: final) or why it was cancelled. */
+  lastError: string | null;
+  providerId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  acceptedAt: string | null;
+  /** A later email was queued for the same pass; this one needs no action. */
+  superseded: boolean;
+}
+
+/** Per status; `failed` leaves out failed emails that were sent again since; `retrying` counts queued emails that already failed at least once. */
+export type DeliveryCounts = Record<DeliveryStatus, number> & { retrying: number };
+
+/** GET /api/events/:eventId/deliveries (newest first). */
+export interface DeliveryList {
+  deliveries: PassDelivery[];
+  /** Rows matching the filter. */
+  total: number;
+  /** Whole event, unfiltered. */
+  counts: DeliveryCounts;
+}
+
+export type DeliverySkipReason =
+  | 'not_found'
+  | 'no_email'
+  | 'redeemed'
+  | 'revoked'
+  | 'expired'
+  | 'already_queued'
+  | 'needs_reissue'
+  | 'link_changed'
+  | 'recipient_limit'
+  | 'in_progress'
+  | 'not_queued'
+  | 'superseded';
+
+/** Bulk queue, retry and cancel: how many were handled, how many passes got a new link, and what was skipped (pass or delivery id). */
+export interface DeliveryActionResult {
+  done: number;
+  reissued: number;
+  skipped: Array<{ id: string; reason: DeliverySkipReason }>;
+}

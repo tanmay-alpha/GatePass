@@ -1,0 +1,4 @@
+/* Pass email status card (DeliveriesSection.tsx). Layout reuses .card, .pass-actions and .table-cards from styles.css. */
+.delivery-counts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+.delivery-status { min-width: 12rem; }
+.delivery-detail { margin-top: var(--space-1); max-width: 40ch; overflow-wrap: anywhere; }

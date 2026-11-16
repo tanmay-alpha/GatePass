@@ -4,6 +4,7 @@ import type { AdmissionPolicy, EventSummary, IssuedPass, Pass, PassStatus } from
 import { Modal, useConfirm } from '../dialog';
 import { ErrorNote, PassStatusBadge, TableMessage, errorMessage } from '../ui';
 import { formatShortInZone, zoneLabel } from '../time';
+import { DeliveriesSection } from './DeliveriesSection';
 import { useDebounced, useResource } from './hooks';
 import { adminApi, adminDownload, fetchPage, type Page } from './http';
 import { ImportPasses } from './ImportPasses';
@@ -385,6 +386,7 @@ export function PassesPanel({ event, onChanged }: Props) {
           ) : null}
         </section>
       </div>
+      <DeliveriesSection event={event} />
       {changing ? (
         <ChangePolicyDialog
           pass={changing}

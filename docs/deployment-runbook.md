@@ -35,6 +35,7 @@ Rules that apply to every step:
 | `DEMO_MODE` | optional | — | — | — | `true` until durable storage is approved |
 | `ALLOW_SIGNUP` | optional | `true` (e2e web server) | — | — | `true` (set 2026-11-10 via the Render API; owner decision; the live demo allows self-registration, and deployed e2e signs up fresh accounts) |
 | `RESEND_API_KEY`, `MAIL_FROM` | optional | — | — | — | **not set** (no credentials; emailed invitations and resets are off, links are handed over by hand) |
+| `PASS_DELIVERY_KEY` (32 random bytes, base64), `PASS_EMAIL_PER_SECOND`, `PASS_EMAIL_MAX_ATTEMPTS` | optional | — | — | — | **not set** (attendee pass email off; needs `RESEND_API_KEY` too). Add it as a `sync: false` secret, stored apart from database backups ([ADR 0012](decisions/0012-pass-email-outbox.md)) |
 | `GATEPASS_COMMIT` | optional (`GATEPASS_COMMIT=$(git rev-parse HEAD) docker compose up -d --build`) | `docker build --build-arg GATEPASS_COMMIT=$GITHUB_SHA` | — | — | not needed: Render sets `RENDER_GIT_COMMIT` at runtime and the server falls back to it |
 | `VERCEL_GIT_COMMIT_SHA` | — | — | system variable, written into `/version.json` at build | same | — |
 | `GATEPASS_BACKEND_ORIGIN` | when running `vercel` locally | — | **set, Production only** | not set (ignored by previews) | — |
@@ -262,6 +263,7 @@ On Render with a disk (after approval): run `backup` from the service's **Shell*
 | Scanner key | Admin UI or `POST /api/scanners/:id/rotate`. This returns a new one-time setup link (valid about an hour); open it on the device. | The old key gets 401 at once. A used or expired setup link answers 410. |
 | Account password / sessions | The user changes it (ends their other sessions), or a platform admin issues a reset link (ends all sessions). Disable an account to end every session immediately. | `GET /api/auth/session` with the old cookie gives 401. |
 | `RESEND_API_KEY` (when configured) | Create a new key in Resend, set it on Render, redeploy, then revoke the old key in Resend. | An invitation email arrives. |
+| `PASS_DELIVERY_KEY` (when configured) | Wait until every event's Pass emails card shows 0 waiting, generate 32 random bytes (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`), set it on Render, redeploy. Emails still waiting under the old key fail with "could not be decrypted"; use "Send again" (reissues those passes). | `/api/health` reports `passEmail: true`; a test pass email reaches "Accepted by provider". |
 
 ## Durable switch-over
 

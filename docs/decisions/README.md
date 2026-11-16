@@ -15,6 +15,7 @@ Each record states the context, the decision, its consequences and the alternati
 | [0009](0009-durable-storage.md) | Durable storage: SQLite single writer on a persistent disk (not PostgreSQL) | accepted; durable hosting awaits owner approval |
 | [0010](0010-enrollment-recovery-email.md) | One-time scanner enrollment, account recovery without impersonation, optional transactional email | accepted |
 | [0011](0011-event-templates.md) | Event templates (built-in and private saved) and the live operations dashboard | accepted |
+| [0012](0012-pass-email-outbox.md) | Attendee pass email: sealed outbox (AES-256-GCM), rate-limited worker with idempotent retries, bounded shutdown drain | accepted; supersedes the "pass email not implemented" line of 0010 |
 | [0013](0013-scanner-readiness-and-door-assistance.md) | Scanner readiness check, camera test code, door attendee lookup with scan method, installable scanner (PWA) | accepted |
 
 Related: [architecture.md](../architecture.md), [threat-model.md](../threat-model.md), [testing.md](../testing.md).

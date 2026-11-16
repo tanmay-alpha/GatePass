@@ -4,6 +4,7 @@ import type { EventSummary, IssuedPass } from '../../shared/types';
 import { toCsv } from '../csv';
 import { errorMessage } from '../ui';
 import { BadgeSheet } from './BadgeSheet';
+import { EmailIssuedPasses } from './DeliveriesSection';
 import { adminQrUrl } from './http';
 
 const MAX_CARDS = 60;
@@ -58,6 +59,7 @@ export function IssuedPasses({ event, passes, policyNames, onClose }: Props) {
           </p>
         </div>
         <div className="actions">
+          <EmailIssuedPasses eventId={event.id} passes={passes} />
           <button className="btn btn-secondary btn-small" onClick={downloadCsv}>
             <Download size={14} aria-hidden /> CSV of links
           </button>

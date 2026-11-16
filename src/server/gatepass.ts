@@ -30,6 +30,7 @@ import { AttendeeAssist } from './assist';
 import { listAudit, recordAudit } from './audit';
 import { toCsv } from './csv';
 import { SCHEMA_VERSION, schemaVersion, transaction, type Database } from './db';
+import { PassDeliveries } from './deliveries';
 import { httpError } from './http';
 import type { Mailer } from './mailer';
 import { operationsSummary } from './operations';
@@ -45,8 +46,10 @@ export interface GatePassOptions {
   now?: () => Date;
   /** Injected for tests; defaults to 256-bit random tokens. */
   generateToken?: () => string;
-  /** Transactional email for invitations and password resets; disabled when absent. */
+  /** Transactional email for invitations, password resets and pass emails; disabled when absent. */
   mailer?: Mailer;
+  /** PASS_DELIVERY_KEY: seals pass links waiting in the email outbox. Passes cannot be emailed without it. */
+  passDeliveryKey?: Buffer | null;
 }
 
 export interface EventInput {
@@ -70,6 +73,8 @@ export interface IssueInput {
   count?: number;
   expiresAt?: string;
   policyId?: string;
+  /** Queue an email with the pass link to every attendee with an address (src/server/deliveries.ts). */
+  emailPasses?: boolean;
 }
 
 export interface ImportInput {
@@ -77,6 +82,8 @@ export interface ImportInput {
   policyId?: string;
   expiresAt?: string;
   dryRun: boolean;
+  /** Queue an email with the pass link to every issued attendee with an address. */
+  emailPasses?: boolean;
 }
 
 export interface PassFilter {
@@ -119,6 +126,7 @@ export class GatePass {
   readonly accounts: Accounts;
   readonly templates: EventTemplates;
   readonly assist: AttendeeAssist;
+  readonly deliveries: PassDeliveries;
   private readonly now: () => Date;
   private readonly newToken: () => string;
   private readonly publicUrl: string;
@@ -134,6 +142,13 @@ export class GatePass {
     this.accounts = new Accounts(db, { now: this.now, publicUrl: this.publicUrl, generateToken: this.newToken, mailer: options.mailer });
     this.templates = new EventTemplates(db, { access: this.access, accounts: this.accounts, now: this.now, getEvent: (id) => this.getEvent(id) });
     this.assist = new AttendeeAssist(db, this.access, this.now);
+    this.deliveries = new PassDeliveries(db, {
+      now: this.now,
+      publicUrl: this.publicUrl,
+      generateToken: this.newToken,
+      key: options.passDeliveryKey,
+      emailEnabled: this.accounts.mailer.enabled
+    });
   }
 
   passUrl(token: string): string {
@@ -317,7 +332,10 @@ export class GatePass {
 
   issuePasses(eventId: string, input: IssueInput, actor: string): IssuedPass[] {
     const attendees: NonNullable<IssueInput['attendees']> = input.attendees?.length ? input.attendees : Array.from({ length: input.count ?? 1 }, () => ({}));
-    return transaction(this.db, () => this.insertPasses(eventId, attendees, input, actor, 'passes.issued'));
+    if (input.emailPasses) this.deliveries.assertAvailable();
+    const issued = transaction(this.db, () => this.insertPasses(eventId, attendees, input, actor, 'passes.issued'));
+    if (input.emailPasses) this.deliveries.notify();
+    return issued;
   }
 
   /**
@@ -355,7 +373,11 @@ export class GatePass {
       const issued = this.insertPasses(eventId, accepted, input, actor, 'passes.imported');
       return { dryRun: false, accepted: accepted.length, rejected, issued };
     };
-    return input.dryRun ? run() : transaction(this.db, run);
+    if (input.emailPasses) this.deliveries.assertAvailable();
+    if (input.dryRun) return run();
+    const report = transaction(this.db, run);
+    if (input.emailPasses) this.deliveries.notify();
+    return report;
   }
 
   getPass(id: string): Pass {
@@ -807,7 +829,7 @@ export class GatePass {
   private insertPasses(
     eventId: string,
     attendees: Array<{ name?: string | null; email?: string | null }>,
-    input: { expiresAt?: string; policyId?: string },
+    input: { expiresAt?: string; policyId?: string; emailPasses?: boolean },
     actor: string,
     action: string
   ): IssuedPass[] {
@@ -844,6 +866,7 @@ export class GatePass {
       };
     });
     this.audit(eventId, actor, action, null, { count: issued.length, policyId: input.policyId ?? null, passIds: issued.map((pass) => pass.id) });
+    if (input.emailPasses) this.deliveries.queueIssuedInTransaction(eventId, issued, actor);
     return issued;
   }
 

@@ -8,6 +8,7 @@ import { renderQr } from '../qr/renderer';
 import type { AccountUser, DesignConfig, EventPermission, SessionInfo } from '../shared/types';
 import { SESSION_ABSOLUTE_MS } from './accounts';
 import { attendeeQuerySchema } from './assist';
+import { bulkDeliverySchema, deliveryFilterSchema, deliveryIdsSchema, singleDeliverySchema } from './deliveries';
 import type { AuthenticatedScanner, GatePass } from './gatepass';
 import { bearerToken, errorHandler, FailureThrottle, httpError, type Middleware, rateLimit } from './http';
 import { renderPassPage } from './pass-page';
@@ -83,7 +84,8 @@ const issueSchema = z
     attendees: z.array(attendee).min(1).max(500).optional(),
     count: z.number().int().min(1).max(500).optional(),
     expiresAt: isoDateTime.optional(),
-    policyId: id.optional()
+    policyId: id.optional(),
+    emailPasses: z.boolean().optional()
   })
   .refine((value) => !(value.attendees && value.count), 'Provide attendees or count, not both');
 // Import rows are validated row by row by the service (invalid rows are reported, not fatal).
@@ -91,7 +93,8 @@ const importSchema = z.strictObject({
   rows: z.array(z.strictObject({ name: z.string().max(1000).nullish(), email: z.string().max(1000).nullish() })).min(1).max(2000),
   policyId: id.optional(),
   expiresAt: isoDateTime.optional(),
-  dryRun: z.boolean()
+  dryRun: z.boolean(),
+  emailPasses: z.boolean().optional()
 });
 const bulkRevokeSchema = z.strictObject({ passIds: z.array(id).min(1).max(500) });
 const passFilterSchema = z.object({
@@ -418,6 +421,8 @@ export function createApp({
         signup: allowSignup,
         ...(demoMode ? { demo: true } : {}),
         email: service.accounts.mailer.enabled,
+        // Present only with email on: pass emails also need PASS_DELIVERY_KEY (src/server/deliveries.ts).
+        ...(service.accounts.mailer.enabled ? { passEmail: service.deliveries.available } : {}),
         build: { commit: buildCommit, schema }
       });
     } catch (error) {
@@ -738,6 +743,26 @@ export function createApp({
   });
   app.post('/api/passes/:passId/reissue', requireAccount, requireEvent('passes'), (req, res) => {
     res.json(service.reissuePass(req.params.passId, actor(res)));
+  });
+
+  // Pass email outbox (src/server/deliveries.ts): routes only queue; the background worker sends.
+  const deliveryLimit = limit(60);
+  app.get('/api/events/:eventId/deliveries', requireAccount, requireEvent('view'), (req, res) => {
+    res.json(service.deliveries.list(eventOf(res), deliveryFilterSchema.parse(req.query)));
+  });
+  app.post('/api/events/:eventId/deliveries', requireAccount, requireEvent('passes'), deliveryLimit, (req, res) => {
+    const input = bulkDeliverySchema.parse(req.body);
+    res.json(service.deliveries.queue(eventOf(res), input.passes, input.reissue === true, actor(res)));
+  });
+  app.post('/api/events/:eventId/passes/:passId/deliveries', requireAccount, requireEvent('passes'), deliveryLimit, (req, res) => {
+    res.status(201).json(service.deliveries.queuePass(eventOf(res), req.params.passId, singleDeliverySchema.parse(req.body ?? {}), actor(res)));
+  });
+  app.post('/api/events/:eventId/deliveries/retry', requireAccount, requireEvent('passes'), deliveryLimit, (req, res) => {
+    const input = deliveryIdsSchema.parse(req.body);
+    res.json(service.deliveries.retry(eventOf(res), input.deliveryIds, input.reissue === true, actor(res)));
+  });
+  app.post('/api/events/:eventId/deliveries/cancel', requireAccount, requireEvent('passes'), deliveryLimit, (req, res) => {
+    res.json(service.deliveries.cancel(eventOf(res), deliveryIdsSchema.parse(req.body).deliveryIds, actor(res)));
   });
 
   // Scanner devices
