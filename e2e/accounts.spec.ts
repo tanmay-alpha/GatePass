@@ -43,7 +43,7 @@ test('owner invites a manager who can issue passes but not manage the team or ex
   await expect(manager.getByRole('row', { name: new RegExp(owner.email) })).toContainText('Owner');
   await expect(manager.getByText('Only the owner can invite or remove managers.')).toBeVisible();
   await expect(manager.getByLabel('Manager email')).toHaveCount(0);
-  await expect(manager.getByRole('button', { name: /Remove|Make .* the owner/ })).toHaveCount(0);
+  await expect(manager.getByRole('button', { name: /Remove|Make owner/ })).toHaveCount(0);
 
   // Sign out returns to the sign-in screen, and the session is gone on reload.
   await manager.getByRole('button', { name: 'Max Manager' }).click();
@@ -67,7 +67,7 @@ test('CSV import previews rejected duplicates, and the attendance export lists t
   await page.getByLabel('Device label').fill('Import door');
   await page.getByRole('button', { name: 'Add device' }).click();
   const setupLink = await page.getByRole('region', { name: 'Setup for Import door' }).getByLabel('Setup link').inputValue();
-  const scannerKey = new URL(setupLink).hash.replace('#key=', '');
+  const setupCode = new URL(setupLink).hash.replace('#enroll=', '');
 
   await page.getByRole('tab', { name: 'Passes' }).click();
   await page.getByRole('button', { name: 'Import CSV' }).click();
@@ -86,7 +86,8 @@ test('CSV import previews rejected duplicates, and the attendance export lists t
   const alan = report.issued.find((pass) => pass.attendeeName === 'Turing, Alan');
   expect(alan).toBeDefined();
 
-  // Admit Alan at the door (a scanner device has no session cookie).
+  // Admit Alan at the door (a scanner device has no session cookie; it claims the one-time setup code first).
+  const { key: scannerKey } = await (await request.post('/api/scanner/enroll', { data: { code: setupCode } })).json();
   const redeemed = await request.post('/api/scanner/redeem', { headers: { Authorization: `Bearer ${scannerKey}` }, data: { code: alan?.passUrl } });
   expect((await redeemed.json()).outcome).toBe('admitted');
 
