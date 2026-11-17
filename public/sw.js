@@ -18,7 +18,7 @@ const VERSION = 'v2';
 const SHELL_CACHE = `gatepass-shell-${VERSION}`;
 const ASSET_CACHE = `gatepass-assets-${VERSION}`;
 const SHELL_URL = '/scan';
-/** Hashed assets from older releases pile up; keep the newest this many. */
+/** Hashed assets from older releases pile up; keep this many, dropping the oldest files this version does not use. */
 const MAX_ASSETS = 60;
 /** A navigation that takes longer than this falls back to the cached shell (venue Wi-Fi can hang). */
 const NAVIGATION_TIMEOUT_MS = 5000;
@@ -31,10 +31,16 @@ const PRECACHE = [];
 const isNetworkOnly = (url) => url.pathname === '/api' || url.pathname.startsWith('/api/') || url.pathname.startsWith('/p/');
 const isAsset = (url) => url.origin === self.location.origin && url.pathname.startsWith('/assets/') && !isNetworkOnly(url);
 
-async function trimAssets() {
+/**
+ * Drops the oldest cached files beyond MAX_ASSETS, but never one in PRECACHE or `keep`: files that did not change
+ * between releases (the decoder, fonts) were cached first and would otherwise be the first to go.
+ */
+async function trimAssets(keep = []) {
   const cache = await caches.open(ASSET_CACHE);
+  const needed = new Set([...PRECACHE, ...keep].filter((href) => typeof href === 'string' && href.startsWith('/assets/')).map((href) => new URL(href, self.location.origin).href));
   const keys = await cache.keys();
-  await Promise.all(keys.slice(0, Math.max(0, keys.length - MAX_ASSETS)).map((key) => cache.delete(key)));
+  const spare = keys.filter((key) => !needed.has(key.url));
+  await Promise.all(spare.slice(0, Math.max(0, keys.length - MAX_ASSETS)).map((key) => cache.delete(key)));
 }
 
 async function cacheAssets(urls) {
@@ -51,7 +57,7 @@ async function cacheAssets(urls) {
       // Offline or gone: the next load caches it.
     }
   }
-  await trimAssets();
+  await trimAssets(urls);
 }
 
 /** Stores a good shell page, the hashed assets it names and the precache list, so the next start works offline. */
