@@ -72,6 +72,8 @@ services:
       - key: MAIL_FROM
         sync: false
       # Optional: attendee pass email (docs/decisions/0012-pass-email-outbox.md). 32 random bytes, base64.
-      # Keep it out of backups; rotate only with an empty queue.
+      # Keep it out of backups. To rotate, set the new key here and the old one in PASS_DELIVERY_PREVIOUS_KEYS.
       - key: PASS_DELIVERY_KEY
         sync: false
+      - key: PASS_DELIVERY_PREVIOUS_KEYS
+        sync: false # comma-separated earlier keys during a rotation; empty otherwise
