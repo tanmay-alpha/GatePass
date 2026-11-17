@@ -159,16 +159,12 @@ function EventDay({ event, summary, emails }: { event: EventSummary; summary: Op
     action: !devices.length || (live && idle) ? { tab: 'access', label: devices.length ? 'Check devices' : 'Add a device' } : undefined
   });
 
-  // Exact once the event is finished; while it runs the summary only has 5-minute buckets for the last hour.
-  const lastBucket = summary.recent.buckets.findLast((bucket) => bucket.admitted > 0);
-  const minutes = summary.recent.bucketMinutes;
-  const lastAdmission = summary.completion
-    ? summary.completion.lastAdmissionAt && time(summary.completion.lastAdmissionAt)
-    : lastBucket && `${time(lastBucket.bucketStart)}–${time(new Date(Date.parse(lastBucket.bucketStart) + minutes * 60_000).toISOString())}`;
+  // Recent (green) when it falls in the summary's last hour of buckets.
+  const recentAdmission = summary.recent.buckets.some((bucket) => bucket.admitted > 0);
   rows.push({
     label: 'Last admission',
-    value: lastAdmission || (summary.passes.redeemed ? 'Over an hour ago' : 'None yet'),
-    tone: lastBucket ? 'ok' : 'muted'
+    value: summary.lastAdmissionAt ? time(summary.lastAdmissionAt) : 'None yet',
+    tone: recentAdmission ? 'ok' : 'muted'
   });
 
   const { capacity } = summary;

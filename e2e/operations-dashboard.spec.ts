@@ -51,7 +51,9 @@ test('a lookup admission counts as assisted on the dashboard; a typed code does 
   // Times follow the browser's locale (12- or 24-hour clock).
   await expect(cell('Doors')).toContainText(/Open until \d{1,2}:\d{2}/);
   await expect(cell('Scanners')).toContainText('1 in use');
-  await expect(cell('Last admission')).toContainText(/\d{1,2}:\d{2}( [AP]M)?–\d{1,2}:\d{2}/);
+  // The exact time of the newest admission (OperationsSummary.lastAdmissionAt), not a 5-minute window.
+  await expect(cell('Last admission')).toContainText(/\d{1,2}:\d{2}/);
+  await expect(cell('Last admission')).not.toContainText('–');
   await expect(cell('Capacity')).toContainText('No event limit');
   // No pass emails were queued, so the strip has no email cell.
   await expect(cell('Pass emails')).toHaveCount(0);
