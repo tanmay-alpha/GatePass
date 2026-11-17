@@ -1,4 +1,6 @@
+import { readFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
+import { parseCsv } from '../src/client/csv';
 import { CSRF, signUp } from './support';
 
 // Operations tab on event day: the "Assisted admissions" tile counts admissions made through
@@ -59,6 +61,15 @@ test('a lookup admission counts as assisted on the dashboard; a typed code does 
   await expect(cell('Pass emails')).toHaveCount(0);
   // The refresh bar says when the figures were taken.
   await expect(page.getByText(/^Updated \d{2}:\d{2}:\d{2}/)).toBeVisible();
+
+  // The owner downloads the concise event summary: attendance and assisted admissions as on the tiles.
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Event summary CSV' }).click();
+  const [header, ...rows] = parseCsv(await readFile(await (await download).path(), 'utf8'));
+  expect(header).toEqual(['section', 'item', 'metric', 'value']);
+  const value = (section: string, metric: string) => rows.find((row) => row[0] === section && row[2] === metric)?.[3];
+  expect(value('attendance', 'admitted')).toBe('2');
+  expect(value('attendance', 'assisted_admissions')).toBe('1');
 });
 
 test('when a refresh fails the last figures stay on screen, marked stale, until a retry succeeds', async ({ page }) => {

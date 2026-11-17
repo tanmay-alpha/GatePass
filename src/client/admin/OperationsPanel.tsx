@@ -257,7 +257,7 @@ function Exports({ event }: { event: EventSummary }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
 
-  async function run(kind: 'attendance' | 'scans' | 'audit') {
+  async function run(kind: 'summary' | 'attendance' | 'scans' | 'audit') {
     setBusy(kind);
     setError('');
     try {
@@ -275,6 +275,7 @@ function Exports({ event }: { event: EventSummary }) {
         <span className="muted small">Export CSV:</span>
         {(
           [
+            ['summary', 'Event summary'],
             ['attendance', 'Attendance'],
             ['scans', 'Scans'],
             ['audit', 'Audit log']
