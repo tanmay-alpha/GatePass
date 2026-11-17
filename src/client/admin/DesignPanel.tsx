@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { defaultDesignConfig, logoGallery, templates } from '../../qr/design';
 import type { DesignConfig, EventSummary } from '../../shared/types';
-import { createQrDetector } from '../qr-detector';
 import { ErrorNote, SectionHead, errorMessage } from '../ui';
 import { adminApi, adminQrUrl } from './http';
 import { ARCHIVED_NOTE, can } from './model';
@@ -39,6 +38,8 @@ export function DesignPanel({ event, onChanged }: { event: EventSummary; onChang
         const image = new Image();
         image.src = url;
         await image.decode();
+        // Loaded on first use: the decoder is only needed on this tab, not on every admin page.
+        const { createQrDetector } = await import('../qr-detector');
         const detector = await createQrDetector();
         const found = await detector.detect(image);
         if (live) setCheck(found === SAMPLE_URL ? 'ok' : 'fail');
