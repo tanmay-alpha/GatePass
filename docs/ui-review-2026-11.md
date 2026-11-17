@@ -16,7 +16,7 @@ manager invitation; a first-time organizer with no events; a platform administra
 Reproduce (needs `npm run build` first):
 
 ```sh
-REVIEW_SHOTS=after npx playwright test e2e/visual-review.spec.ts --project=chromium
+REVIEW_SHOTS=review-2026-11/after npx playwright test e2e/visual-review.spec.ts --project=chromium
 npx playwright test e2e/a11y.spec.ts --project=chromium
 ```
 
@@ -70,3 +70,5 @@ Reported during the review, fixed once those workstreams had finished.
 | `PassesPanel.tsx` | The pass list card had no visible heading; it started with the search box (`before/event-passes-dark-768.png`). | Fixed: a "Passes" section head, and the card is labelled by it (`aria-labelledby="pass-list-title"`) (`after/event-passes-dark-768.png`). |
 | `ScannersSection.tsx` | In stacked device rows "Revoke" was a bordered button while "New setup link"/"Rotate key" were ghost buttons (`before/event-access-light-390.png`). | Fixed: Revoke is a ghost button in the danger colour, like "Disable" on the platform page; it stays red with a ban icon and still asks for confirmation (`after/event-access-light-390.png`). |
 | `EventForm.tsx`, `IssueForm.tsx`, `ImportPasses.tsx`, `SettingsPanel.tsx`, `SaveTemplateSection.tsx`, `PoliciesSection.tsx` | Same `aria-describedby` pattern as issue 5: ids of error messages that are only rendered after validation. | Fixed with one helper, `describedBy()` in `ui.tsx`, which keeps only the ids of rendered hints and errors; `AuthScreens.tsx` uses it too. `TemplatePicker.tsx` and the policy picker always render their hint, so they needed no change. |
+
+Third pass (event-day operations, safer live changes, event-day strip): `docs/ui-review-2026-11-pass3.md`.

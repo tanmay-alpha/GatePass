@@ -8,13 +8,16 @@ const OPERATOR_TOKEN = 'e2e-admin-token-0123456789abcdef';
 
 /** Signed-in browser states and links for the UI review specs (visual review and accessibility). */
 export interface ReviewSeed {
-  /** Organizer with two events, gates, passes, scans, devices and a pending invitation. */
+  /** Organizer with two events, gates, a capacity-limited policy, passes, scans, devices, a saved template and a pending invitation. */
   organizer: string;
   /** Organizer with no events (first-run overview). */
   newcomer: string;
   /** Platform administrator. */
   platformAdmin: string;
+  /** Organizer whose only event receives the passes issued by the issuance and badge screens, so they change no other screen. */
+  issuer: string;
   eventId: string;
+  issuerEventId: string;
   /** Attendee pass page path (`/p/<token>`). */
   passPath: string;
   /** Pending manager invitation (`/#/invite/<token>`). */
@@ -25,11 +28,15 @@ export interface Screen {
   name: string;
   path: (seed: ReviewSeed) => string;
   /** Storage state key; omitted = signed out. */
-  as?: 'organizer' | 'newcomer' | 'platformAdmin';
+  as?: 'organizer' | 'newcomer' | 'platformAdmin' | 'issuer';
   /** Visible once the screen has loaded. */
   ready: (page: Page) => Locator;
   /** Brings the screen into the state under review (an open menu or dialog). */
   prepare?: (page: Page) => Promise<void>;
+  /** Viewport widths for this screen when not every width applies (print media lays out on paper, not the viewport). */
+  widths?: number[];
+  /** Screenshot the viewport only: a modal sits where the page was scrolled to, which a full-page capture misplaces. */
+  viewportShot?: boolean;
 }
 
 const hour = 3_600_000;
@@ -97,17 +104,31 @@ async function createSeed(testInfo: TestInfo, dir: string): Promise<ReviewSeed> 
     ['Barbara Liskov', 'barbara@example.com']
   ].map(([name, email]) => ({ name, email }));
   const passes = await ok<Array<{ id: string; passUrl: string }>>(org.post(`/api/events/${event.id}/passes`, { data: { attendees } }));
+  const crew = await ok<Created>(org.post(`/api/events/${event.id}/policies`, { data: { name: 'Crew & suppliers', capacity: 10 } }));
+  const crewPasses = await ok<Array<{ passUrl: string }>>(
+    org.post(`/api/events/${event.id}/passes`, {
+      data: { policyId: crew.id, attendees: ['Stage crew: Jordan Lee', 'Catering: Priya Raman', 'Sound: Tomasz Wiśniewski'].map((name) => ({ name, email: '' })) }
+    })
+  );
   const device = await ok<{ enrollment: { url: string } }>(org.post(`/api/events/${event.id}/scanners`, { data: { label: 'Front door phone', gateId: gate.id } }));
   await ok(org.post(`/api/events/${event.id}/scanners`, { data: { label: 'Spare tablet' } }));
   const door = await playwrightRequest.newContext({ baseURL, extraHTTPHeaders: headers });
   const { key } = await ok<{ key: string }>(door.post('/api/scanner/enroll', { data: { code: new URL(device.enrollment.url).hash.replace('#enroll=', '') } }));
   const scan = (code: string) => ok(door.post('/api/scanner/redeem', { headers: { Authorization: `Bearer ${key}` }, data: { code } }));
   for (const pass of passes.slice(0, 3)) await scan(pass.passUrl);
+  for (const pass of crewPasses.slice(0, 2)) await scan(pass.passUrl);
   await scan(passes[0].passUrl); // duplicate
   await scan('not-a-gatepass-code'); // unknown
   await door.dispose();
   await ok(org.post(`/api/events/${event.id}/passes/revoke`, { data: { passIds: [passes[7].id] } }));
   const invite = await ok<{ url: string }>(org.post(`/api/events/${event.id}/invitations`, { data: { email: uniqueEmail('manager') } }));
+  await ok(org.post(`/api/events/${event.id}/save-template`, { data: { name: 'Waterfront festival', description: 'Two gates, crew policy with a capacity of 10, five-hour doors' } }));
+
+  const issuer = await account(baseURL, headers, 'Morgan Issuer');
+  const fair = await ok<Created>(
+    issuer.post('/api/events', { data: { name: 'Riverside Book Fair 2026', venue: 'Exhibition Hall B, Riverside Convention Centre', startsAt: iso(-hour), endsAt: iso(8 * hour), status: 'active' } })
+  );
+  await ok(issuer.post(`/api/events/${fair.id}/policies`, { data: { name: 'Exhibitor' } }));
 
   const newcomer = await account(baseURL, headers, 'Nova Newcomer');
 
@@ -121,10 +142,38 @@ async function createSeed(testInfo: TestInfo, dir: string): Promise<ReviewSeed> 
     organizer: await save(org, 'organizer'),
     newcomer: await save(newcomer, 'newcomer'),
     platformAdmin: await save(admin, 'platform-admin'),
+    issuer: await save(issuer, 'issuer'),
     eventId: event.id,
+    issuerEventId: fair.id,
     passPath: new URL(passes[3].passUrl).pathname,
     invitePath: `/${new URL(invite.url).hash}`
   };
+}
+
+/** Pasted CSV with one row of each kind the import refuses: an existing attendee, a missing name, a bad email and a duplicate. */
+const IMPORT_ROWS = [
+  'Name,Email',
+  'Chiamaka Okonkwo-Adebayo,chiamaka.okonkwo-adebayo@international-logistics-partners.example.org',
+  'Ada Lovelace,ada@example.com',
+  ',missing-name@example.com',
+  'Rosalind Franklin,not-an-email',
+  'Lin Wei,lin.wei@example.com',
+  'Lin Wei,lin.wei@example.com'
+].join('\n');
+
+const ISSUE_NAMES = ['Ngozi Adichie', 'Maximiliana Bartholomew-Featherstonehaugh', 'Haruki Murakami', 'Zadie Smith', 'Jorge Luis Borges', 'Wisława Szymborska'];
+
+/** Issues passes to the issuer's event; the response with the one-time links shows below the form. */
+async function issue(page: Page) {
+  await page.getByLabel('Attendees').fill(ISSUE_NAMES.join('\n'));
+  await page.getByRole('button', { name: /^Issue \d+ passes?$/ }).click();
+  await expect(page.getByRole('button', { name: 'Print passes' })).toBeVisible();
+}
+
+async function openBadges(page: Page) {
+  await issue(page);
+  await page.getByRole('button', { name: 'Print passes' }).click();
+  await expect(page.getByRole('region', { name: 'Print preview' }).getByRole('button', { name: 'Print', exact: true })).toBeEnabled({ timeout: 20_000 });
 }
 
 const eventTab = (id: string, label: string): Screen => ({
@@ -164,6 +213,7 @@ export const REVIEW_SCREENS: Screen[] = [
   },
   {
     name: 'change-password-dialog',
+    viewportShot: true,
     path: () => '/',
     as: 'organizer',
     ready: (page) => page.getByRole('link', { name: /Harbour Lights/ }).first(),
@@ -176,12 +226,140 @@ export const REVIEW_SCREENS: Screen[] = [
   },
   {
     name: 'confirm-dialog',
+    viewportShot: true,
     path: (seed) => `/#/events/${seed.eventId}/settings`,
     as: 'organizer',
     ready: (page) => page.getByRole('tab', { name: 'Settings', selected: true }),
     prepare: async (page) => {
       await page.getByRole('button', { name: 'End the event' }).click();
       await expect(page.getByRole('dialog')).toBeVisible();
+    }
+  },
+  {
+    name: 'skip-link',
+    viewportShot: true,
+    path: (seed) => `/#/events/${seed.eventId}`,
+    as: 'organizer',
+    ready: (page) => page.getByRole('tab', { name: 'Operations', selected: true }),
+    prepare: async (page) => {
+      await page.keyboard.press('Tab');
+    }
+  },
+  {
+    name: 'new-event',
+    path: () => '/',
+    as: 'organizer',
+    ready: (page) => page.getByRole('link', { name: /Harbour Lights/ }).first(),
+    prepare: async (page) => {
+      await page.getByRole('main').getByRole('button', { name: 'New event' }).click();
+      await expect(page.getByRole('heading', { name: 'New event', level: 1 })).toBeVisible();
+      await page.getByRole('combobox', { name: 'Start from' }).selectOption({ label: 'Waterfront festival' });
+      await expect(page.getByText('Two gates, crew policy with a capacity of 10, five-hour doors')).toBeVisible();
+    }
+  },
+  {
+    name: 'import-preview',
+    viewportShot: true,
+    path: (seed) => `/#/events/${seed.eventId}/passes`,
+    as: 'organizer',
+    ready: (page) => page.getByRole('tab', { name: 'Passes', selected: true }),
+    prepare: async (page) => {
+      await page.getByRole('button', { name: 'Import CSV' }).click();
+      await page.getByRole('dialog', { name: 'Import attendees from CSV' }).getByLabel('Or paste rows').fill(IMPORT_ROWS);
+      await page.getByRole('dialog').getByRole('button', { name: 'Preview import' }).click();
+      await expect(page.getByRole('dialog', { name: 'Check the import' })).toBeVisible();
+    }
+  },
+  { name: 'issued-passes', path: (seed) => `/#/events/${seed.issuerEventId}/passes`, as: 'issuer', ready: (page) => page.getByRole('tab', { name: 'Passes', selected: true }), prepare: issue },
+  {
+    name: 'badges-preview',
+    path: (seed) => `/#/events/${seed.issuerEventId}/passes`,
+    as: 'issuer',
+    ready: (page) => page.getByRole('tab', { name: 'Passes', selected: true }),
+    prepare: openBadges
+  },
+  {
+    name: 'badges-print',
+    path: (seed) => `/#/events/${seed.issuerEventId}/passes`,
+    as: 'issuer',
+    ready: (page) => page.getByRole('tab', { name: 'Passes', selected: true }),
+    prepare: async (page) => {
+      await openBadges(page);
+      await page.emulateMedia({ media: 'print' });
+    },
+    widths: [1280]
+  },
+  {
+    name: 'scanner-setup',
+    path: (seed) => `/#/events/${seed.eventId}/access`,
+    as: 'organizer',
+    ready: (page) => page.getByRole('tab', { name: 'Access', selected: true }),
+    prepare: async (page) => {
+      await page.getByText('Camera test code', { exact: true }).click();
+      await expect(page.getByRole('img', { name: 'Camera test QR code' })).toBeVisible();
+      await page.getByRole('button', { name: 'New setup link for Spare tablet' }).click();
+      await page.getByRole('dialog').getByRole('button', { name: 'Create link' }).click();
+      await expect(page.getByRole('img', { name: 'Setup QR code for Spare tablet' })).toBeVisible();
+    }
+  },
+  {
+    name: 'revoke-scanner-dialog',
+    viewportShot: true,
+    path: (seed) => `/#/events/${seed.eventId}/access`,
+    as: 'organizer',
+    ready: (page) => page.getByRole('tab', { name: 'Access', selected: true }),
+    prepare: async (page) => {
+      await page.getByRole('button', { name: 'Revoke Front door phone' }).click();
+      await expect(page.getByRole('dialog')).toBeVisible();
+    }
+  },
+  {
+    name: 'delete-gate-dialog',
+    viewportShot: true,
+    path: (seed) => `/#/events/${seed.eventId}/access`,
+    as: 'organizer',
+    ready: (page) => page.getByRole('tab', { name: 'Access', selected: true }),
+    prepare: async (page) => {
+      await page.getByRole('button', { name: 'Delete gate Main entrance' }).click();
+      await expect(page.getByRole('dialog')).toBeVisible();
+    }
+  },
+  {
+    name: 'delete-policy-dialog',
+    viewportShot: true,
+    path: (seed) => `/#/events/${seed.eventId}/access`,
+    as: 'organizer',
+    ready: (page) => page.getByRole('tab', { name: 'Access', selected: true }),
+    prepare: async (page) => {
+      await page.getByRole('button', { name: 'Delete policy Crew & suppliers' }).click();
+      await expect(page.getByRole('dialog')).toBeVisible();
+    }
+  },
+  {
+    name: 'policy-capacity-error',
+    viewportShot: true,
+    path: (seed) => `/#/events/${seed.eventId}/access`,
+    as: 'organizer',
+    ready: (page) => page.getByRole('tab', { name: 'Access', selected: true }),
+    prepare: async (page) => {
+      await page.getByRole('button', { name: 'Edit policy Crew & suppliers' }).click();
+      const dialog = page.getByRole('dialog', { name: /Edit/ });
+      await dialog.getByLabel('Capacity').fill('1');
+      await dialog.getByRole('button', { name: 'Save policy' }).click();
+      await expect(dialog.getByText('2 people are already admitted, so capacity cannot be lower than 2.')).toBeVisible();
+    }
+  },
+  {
+    name: 'policy-change-confirm',
+    viewportShot: true,
+    path: (seed) => `/#/events/${seed.eventId}/access`,
+    as: 'organizer',
+    ready: (page) => page.getByRole('tab', { name: 'Access', selected: true }),
+    prepare: async (page) => {
+      await page.getByRole('button', { name: 'Edit policy Crew & suppliers' }).click();
+      await page.getByRole('dialog', { name: /Edit/ }).getByLabel('Capacity').fill('2');
+      await page.getByRole('dialog', { name: /Edit/ }).getByRole('button', { name: 'Save policy' }).click();
+      await expect(page.getByRole('dialog', { name: 'Change “Crew & suppliers” while the doors are open?' })).toBeVisible();
     }
   },
   { name: 'pass-page', path: (seed) => seed.passPath, ready: (page) => page.getByRole('img', { name: 'QR code' }) },
@@ -210,6 +388,7 @@ export async function openContext(browser: Browser, testInfo: TestInfo, seed: Re
 /** Loads the screen fresh at `width` and waits until its content, fonts and data requests have settled. */
 export async function showAt(page: Page, seed: ReviewSeed, screen: Screen, width: number): Promise<void> {
   await page.setViewportSize({ width, height: 900 });
+  await page.emulateMedia({ media: null });
   await page.goto('about:blank');
   await page.goto(screen.path(seed));
   await expect(screen.ready(page)).toBeVisible();

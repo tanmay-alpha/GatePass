@@ -23,7 +23,7 @@ for (const screen of REVIEW_SCREENS) {
       const context = await openContext(browser, testInfo, seed, screen, scheme);
       const page = await context.newPage();
       const found: string[] = [];
-      for (const width of WIDTHS) {
+      for (const width of screen.widths ?? WIDTHS) {
         await showAt(page, seed, screen, width);
         const { violations } = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
         for (const violation of violations) {
