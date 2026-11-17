@@ -70,7 +70,9 @@ export function AttendeeFinder({ scannerKey, timeZone, online, checking, onAdmit
       } catch (err) {
         if (id !== latest.current) return;
         if (err instanceof ApiError && err.status === 401) return onUnauthorized();
-        if (err instanceof ApiError && err.status === 429) setError(`Too many searches. Wait ${err.retryAfter ?? 'a few'} seconds and try again.`);
+        // A wait of more than a minute is the device's 24-hour search budget, whose message says what to do instead.
+        if (err instanceof ApiError && err.status === 429)
+          setError(err.retryAfter !== null && err.retryAfter > 60 ? err.message : `Too many searches. Wait ${err.retryAfter ?? 'a few'} seconds and try again.`);
         else setError(err instanceof Error ? err.message : 'Search failed.');
       } finally {
         if (id === latest.current) setSearching(false);
@@ -125,7 +127,7 @@ export function AttendeeFinder({ scannerKey, timeZone, online, checking, onAdmit
           </button>
         </div>
         <p id="finder-help" className="manual-help">
-          {online ? 'For a lost or unreadable QR code. At least 3 characters; email must be the full address.' : 'Search needs a connection.'}
+          {online ? 'For a lost or unreadable QR code. The start of their first name or surname, their full email, or the pass reference; at least 3 characters.' : 'Search needs a connection.'}
         </p>
       </form>
       <ErrorNote message={error} />
@@ -162,8 +164,11 @@ export function AttendeeFinder({ scannerKey, timeZone, online, checking, onAdmit
               </li>
             );
           })}
-          {result.search.matches.length === 0 ? <li className="history-empty">No pass for this event matches “{result.query}”.</li> : null}
-          {result.search.more ? <li className="history-empty">More passes match. Add more of the name to narrow it down.</li> : null}
+          {result.search.more ? (
+            <li className="history-empty">Too many passes match “{result.query}”. Add more of the name (first name and surname), or search by email or reference.</li>
+          ) : result.search.matches.length === 0 ? (
+            <li className="history-empty">No pass for this event matches “{result.query}”.</li>
+          ) : null}
         </ul>
       ) : null}
       {dialog}

@@ -80,18 +80,50 @@ export function ScannerApp() {
     setSession(null);
   }, []);
 
+  /** A device key from an older link that waits for the server's acceptance before it replaces this phone's working key. */
+  const [candidate, setCandidate] = useState('');
+
   /**
-   * Starts using a setup code or key. A setup code replaces the key this phone already holds only
-   * once the server has accepted it: a used or expired link must not leave a working scanner without a key.
+   * Starts using a setup code or key. Neither replaces the key this phone already holds until the
+   * server has accepted it: a used, expired or invalid link must not leave a working scanner without a key.
    */
   const adopt = useCallback((credential: Credential) => {
     setReplacement(null);
     setError('');
     if (credential.kind === 'code') return setCode(credential.value);
+    if (localStorage.getItem(KEY_STORAGE)) return setCandidate(credential.value);
     localStorage.setItem(KEY_STORAGE, credential.value);
     setSession(null);
     setKey(credential.value);
   }, []);
+
+  useEffect(() => {
+    if (!candidate) return;
+    let live = true;
+    api<ScannerSession>('/api/scanner/session', { bearer: candidate, timeoutMs: SESSION_TIMEOUT_MS, onSlow: () => live && setSlow(true) })
+      .then((value) => {
+        if (!live) return;
+        localStorage.setItem(KEY_STORAGE, candidate);
+        setKey(candidate);
+        setSession(value);
+      })
+      .catch((err) => {
+        if (!live) return;
+        setKept(
+          err instanceof ApiError && err.status === 401
+            ? 'That scanner key is not valid or has been revoked, so this phone keeps its current setup. Ask the organiser for a new setup link if you meant to change it.'
+            : `Could not check the new scanner key (${errorMessage(err)}), so this phone keeps its current setup. Open the link again once the connection is back.`
+        );
+      })
+      .finally(() => {
+        if (!live) return;
+        setCandidate('');
+        setSlow(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [candidate]);
 
   // Claim a one-time setup code. The phone sends a claim secret with it and
   // keeps both in localStorage until the server answers: if the answer is
@@ -205,6 +237,15 @@ export function ScannerApp() {
             Continue with the current setup
           </button>
         </div>
+      </main>
+    );
+  }
+  if (candidate) {
+    return (
+      <main className="scanner scanner-center">
+        <p className="muted" role="status">
+          {slow ? WAKING_MESSAGE : 'Checking the new setup…'}
+        </p>
       </main>
     );
   }

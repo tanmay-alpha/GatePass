@@ -52,20 +52,35 @@ a second screen or prints it.
 
 - Scanner bearer key only (revoked or unknown key → 401); the device's own event
   only (passes of other events are invisible by name, email or reference).
-- `q` is trimmed, 3–100 characters. Matches: name substring (LIKE wildcards
-  escaped), exact email (case-insensitive; an email fragment matches nothing, so
-  addresses cannot be enumerated), or reference prefix (3–8 hex characters).
-  At most 10 results plus `more`.
+- `q` is trimmed, 3–100 characters. Matches: names by word start (every word of
+  the query must start a word of the name; hyphens count as word breaks, LIKE
+  wildcards are escaped, case folding is ASCII only as in SQLite's LIKE), exact
+  email (case-insensitive; an email fragment matches nothing, so addresses
+  cannot be enumerated), or reference prefix (3–8 hex characters). A search
+  matching more than 10 passes returns none of them, only `more: true` ("add
+  the surname, or search by email or reference").
 - Each match carries the printed reference, name, masked email (`a***@e***.org`),
   pass state with admission time and gate, policy name, the advisory result of
   the same pure `evaluateAdmission` rules a scan would apply at this device now
   (wrong gate, too early, used…), and `ambiguous` when two passes share the
   8-character reference. Never a token, token hash, pass id or full email.
-- Rate limit: 30 searches per device per minute (per device, not per IP: gates
-  share NAT). The request log names only the route pattern, never the query.
+- Rate limits: 30 searches per device per minute (per device, not per IP: gates
+  share NAT), and 300 searches per device in any 24 hours, counted from the
+  audit log so a restart does not reset it (429 with `Retry-After` and a door
+  message; scanning and typing a reference keep working). The request log names
+  only the route pattern, never the query.
 - Each search writes an audit entry `scanner.attendee_lookup` (actor: the
   device) with the result count and references, never the query text, which may
-  be a person's name.
+  be a person's name. The search itself reads without the write lock; only the
+  audit row is written, in its own short transaction, so a search never delays
+  a redemption on another connection.
+- Why these limits (Phase 5 review): a stolen door-phone key could page through
+  the guest list at 10 names a request. Word-start matching and "too broad →
+  nothing" mean each answer names at most 10 people who match something
+  specific; the daily budget caps a stolen key at 300 searches (and leaves each
+  in the audit log for the organiser, who revokes the device). A door that
+  admits a few thousand people with a few per cent lost QR codes needs well under
+  300 searches; a device that runs out still admits by scan or reference.
 - There is no admit endpoint. "Admit" in the UI sends the reference through
   `POST /api/scanner/redeem` with a fresh requestId: the same transaction,
   capacity claims, policy and gate checks, scan row and feed entry as any scan.
@@ -97,6 +112,20 @@ the organiser and is not a security control.
   60 entries; everything else, in particular `/api/*` and `/p/*`, is not handled
   by the worker at all (network only). No verdict, session or pass page can come
   from a cache.
+- Since Phase 5 the admin and the scanner are separate chunks (`main.tsx`
+  imports one or the other), and the QR decoder is a third, loaded when a camera
+  first starts. The shell page names only the shared entry, so the build
+  (`vite.config.ts`, `scannerPrecache`) writes the scanner's chunks, its CSS, the
+  fonts and the WebAssembly decoder into `dist/client/sw.js` as `PRECACHE`; the
+  worker caches them on install and on every good navigation. The list changes
+  with every release that changes those files, so the browser installs the new
+  worker. Cache version `v2`: activation drops the `v1` caches of the
+  single-bundle app.
+- Session freshness: the station re-checks `GET /api/scanner/session` when the
+  app comes back on screen (`visibilitychange`, `pageshow` from the
+  back/forward cache) and when the connection returns, besides the one-minute
+  heartbeat, so a device revoked or moved while the phone was locked is signed
+  out or updated at once rather than at its next scan.
 - The UI separates the two states: "App: Loaded (offline copy)" versus "Server
   verification: Available / Unavailable — do not admit anyone"; the offline
   banner says the app is loaded but passes need the server.

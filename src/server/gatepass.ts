@@ -812,8 +812,10 @@ export class GatePass {
     if (token) return this.db.prepare(`SELECT ${PASS_COLUMNS} ${PASS_FROM} WHERE p.token_hash = ?`).get(hashToken(token)) as Row | undefined;
     const reference = code.trim();
     if (!REFERENCE.test(reference)) return undefined;
+    // `+p.event_id` keeps SQLite on the id range (one or two rows): without statistics it would otherwise read
+    // every pass of the event through passes_event_idx, inside the write lock (about 14 ms at 25,000 passes).
     const rows = this.db
-      .prepare(`SELECT ${PASS_COLUMNS} ${PASS_FROM} WHERE p.event_id = ? AND p.id >= ? AND p.id < ? LIMIT 2`)
+      .prepare(`SELECT ${PASS_COLUMNS} ${PASS_FROM} WHERE +p.event_id = ? AND p.id >= ? AND p.id < ? LIMIT 2`)
       .all(eventId, reference.toLowerCase(), `${reference.toLowerCase()}g`) as Row[];
     return rows.length === 1 ? rows[0] : undefined;
   }

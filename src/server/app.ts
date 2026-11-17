@@ -832,9 +832,16 @@ export function createApp({
   });
 
   // Door assistance for a lost or unreadable QR code (src/server/assist.ts): own event only, masked emails,
-  // never tokens. Admitting goes through /api/scanner/redeem with the reference. Limited per device.
+  // never tokens. Admitting goes through /api/scanner/redeem with the reference. Limited per device: 30 a
+  // minute here, and a 24-hour search budget in the service (429 with Retry-After).
   app.get('/api/scanner/attendees', requireScanner, limit(30, (_req, res) => `scanner-assist:${scannerOf(res).id}`), (req, res) => {
-    res.json(service.assist.search(scannerOf(res), attendeeQuerySchema.parse(req.query).q));
+    const { q } = attendeeQuerySchema.parse(req.query);
+    try {
+      res.json(service.assist.search(scannerOf(res), q));
+    } catch (error) {
+      if (error instanceof Error && 'retryAfter' in error) res.setHeader('Retry-After', String(error.retryAfter));
+      throw error;
+    }
   });
 
   app.use('/api', (_req, _res, next) => next(httpError(404, 'Not found')));

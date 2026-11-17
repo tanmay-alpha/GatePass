@@ -227,7 +227,12 @@ test.describe('installable scanner (service worker allowed)', () => {
   test('caches the app shell only; offline, the app opens and says server verification is unavailable', async ({ page, context, browserName }) => {
     test.skip(browserName !== 'chromium', 'Offline start from the service worker is checked in Chromium');
     const sent = redeemBodies(context);
+    const assets: string[] = [];
+    context.on('request', (request) => assets.push(new URL(request.url()).pathname));
     await openDoor(page);
+    // The scanner page loads the scanner chunk, never the admin app's.
+    expect(assets.some((p) => /\/ScannerApp-[\w-]+\.js$/.test(p))).toBe(true);
+    expect(assets.filter((p) => p.includes('AdminApp'))).toEqual([]);
     await expect(page.locator('link[rel="manifest"]')).toHaveAttribute('href', '/manifest.webmanifest');
     expect(await (await page.request.get('/manifest.webmanifest')).json()).toMatchObject({ start_url: '/scan', scope: '/scan' });
 
@@ -243,12 +248,57 @@ test.describe('installable scanner (service worker allowed)', () => {
     const cached = await cachedPaths();
     expect(cached.some((p) => /^\/assets\/.+\.js$/.test(p))).toBe(true);
     expect(cached.filter((p) => p.startsWith('/api') || p.startsWith('/p/'))).toEqual([]);
+    // The scanner app, its CSS and the QR decoder are chunks the shell page does not name: the build writes them into the worker, which caches them on install.
+    const precache: string[] = JSON.parse(/const PRECACHE = (\[.*\]);/.exec(await (await page.request.get('/sw.js')).text())![1]);
+    for (const chunk of [/\/ScannerApp-[\w-]+\.js$/, /\/ScannerApp-[\w-]+\.css$/, /\/qr-detector-[\w-]+\.js$/, /\.wasm$/]) expect(precache.some((p) => chunk.test(p)), String(chunk)).toBe(true);
+    expect(precache.filter((p) => p.includes('AdminApp') || !p.startsWith('/assets/'))).toEqual([]);
+    const missing = async () => {
+      const paths = await cachedPaths();
+      return precache.filter((p) => !paths.includes(p));
+    };
+    await expect.poll(missing, { timeout: 20_000 }).toEqual([]);
 
     await context.setOffline(true);
     await page.reload();
+    // This text is rendered by the scanner chunk: the cold start loaded it from the worker's cache.
     await expect(page.getByText('App loaded (offline copy). Server verification unavailable')).toBeVisible();
     await expect(page.getByRole('alertdialog')).toHaveCount(0);
     expect(sent).toEqual([]);
     await context.setOffline(false);
+  });
+
+  test('a phone that loses its connection before the camera ever started still runs the camera test: the decoder comes from the cache', async ({ playwright, browserName, organizer }, testInfo) => {
+    test.skip(browserName !== 'chromium', 'Fake camera capture from a file is a Chromium feature');
+    const video = testCodeVideo(TEST_CODE);
+    const browser = await playwright.chromium.launch({
+      headless: testInfo.project.use.headless ?? true,
+      args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${video}`]
+    });
+    try {
+      const { viewport, userAgent, deviceScaleFactor, isMobile, hasTouch, extraHTTPHeaders, baseURL } = testInfo.project.use;
+      const context = await browser.newContext({ viewport, userAgent, deviceScaleFactor, isMobile, hasTouch, extraHTTPHeaders, baseURL, storageState: organizer, permissions: ['camera'], serviceWorkers: 'allow' });
+      const sent = redeemBodies(context);
+      const page = await context.newPage();
+      await openDoor(page);
+      await expect(page.locator('.readiness-shell')).toContainText('Loaded · opens offline');
+      const decoderCached = () =>
+        page.evaluate(async () => {
+          const paths: string[] = [];
+          for (const name of await caches.keys()) for (const entry of await (await caches.open(name)).keys()) paths.push(new URL(entry.url).pathname);
+          return paths.some((p) => /\/qr-detector-[\w-]+\.js$/.test(p)) && paths.some((p) => p.endsWith('.wasm'));
+        });
+      await expect.poll(decoderCached, { timeout: 20_000 }).toBe(true);
+
+      // The decoder has never been fetched by this page; the network goes away before the camera starts.
+      await context.setOffline(true);
+      await page.getByRole('button', { name: 'Test camera' }).click();
+      await expect(check(page, 'diagnostic')).toContainText('Passed', { timeout: 20_000 });
+      await expect(page.getByText(/^Decoder: (native|wasm)$/)).toBeVisible();
+      expect(sent).toEqual([]);
+      await context.close();
+    } finally {
+      await browser.close();
+      rmSync(path.dirname(video), { recursive: true, force: true });
+    }
   });
 });
