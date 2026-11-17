@@ -8,13 +8,21 @@
 /* In-app preview: one sheet on a scaled sheet of paper. */
 .sheet-preview { display: grid; gap: var(--space-3); padding: var(--space-3); background: var(--surface-2); border-radius: var(--radius-sm); }
 .sheet-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); }
-.sheet-controls .segmented button { white-space: nowrap; }
+.sheet-per-page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.sheet-per-page .segmented button { min-width: 40px; }
 .sheet-preview > p { margin: 0; }
 .sheet-paper { --preview-scale: 0.5; width: calc(210mm * var(--preview-scale)); height: calc(297mm * var(--preview-scale)); margin-inline: auto; overflow: hidden; background: #fff; box-shadow: var(--shadow-pop); }
 .sheet-paper-scale { width: 210mm; height: 297mm; padding: 10mm; transform: scale(var(--preview-scale)); transform-origin: top left; }
 .sheet-pager { display: flex; align-items: center; justify-content: center; gap: var(--space-2); font-size: var(--text-sm); }
 @media (max-width: 480px) {
   .sheet-paper { --preview-scale: 0.38; }
+}
+/* 0.38 is 302 px wide, more than a 320-375 px screen has inside the card. */
+@media (max-width: 400px) {
+  .sheet-paper { --preview-scale: 0.3; }
+}
+@media (max-width: 860px), (pointer: coarse) {
+  .sheet-per-page .segmented button { min-width: var(--touch); }
 }
 
 /* The full run, outside #root: laid out off-screen so images load, and the only thing printed. */
