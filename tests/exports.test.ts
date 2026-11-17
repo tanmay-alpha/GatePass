@@ -195,7 +195,8 @@ describe('streamed CSV exports', () => {
         res.on('data', (chunk: Buffer) => {
           parts.push(chunk);
           res.pause();
-          setTimeout(() => res.resume(), 2);
+          // 10 ms per read (≈ 80 reads of a 5 MB file): the download outlasts the 40 redemptions even on a fast CI runner.
+          setTimeout(() => res.resume(), 10);
         });
         res.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
       });
