@@ -185,13 +185,20 @@ function EventDay({ event, summary, emails }: { event: EventSummary; summary: Op
         }
   );
 
-  if (emails && emails.queued + emails.sending + emails.accepted + emails.failed + emails.cancelled > 0) {
+  if (emails && emails.queued + emails.sending + emails.accepted + emails.failed + emails.cancelled + emails.unconfirmed > 0) {
     const waiting = emails.queued + emails.sending;
+    const parts = [
+      waiting ? `${waiting} waiting` : '',
+      emails.failed ? `${emails.failed} failed` : '',
+      emails.unconfirmed ? `${emails.unconfirmed} may have been sent` : '',
+      !waiting && !emails.failed && !emails.unconfirmed ? `${emails.accepted} accepted by provider` : ''
+    ];
+    const attention = emails.failed + emails.unconfirmed;
     rows.push({
       label: 'Pass emails',
-      value: [waiting ? `${waiting} waiting` : '', emails.failed ? `${emails.failed} failed` : '', !waiting && !emails.failed ? `${emails.accepted} accepted by provider` : ''].filter(Boolean).join(' · '),
-      tone: emails.failed ? 'bad' : waiting ? 'info' : 'ok',
-      action: emails.failed ? { tab: 'passes', label: 'Resolve failed emails' } : undefined
+      value: parts.filter(Boolean).join(' · '),
+      tone: attention ? 'bad' : waiting ? 'info' : 'ok',
+      action: attention ? { tab: 'passes', label: 'Resolve pass emails' } : undefined
     });
   }
 
