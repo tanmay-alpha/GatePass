@@ -2,7 +2,8 @@ import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 
-const PORT = '3410';
+// E2E_PORT lets several checkouts (git worktrees) run the suite at the same time.
+const PORT = process.env.E2E_PORT ?? '3410';
 // E2E_BASE_URL runs the same specs against an already deployed instance
 // (which must allow self-registration: the specs sign up fresh organizer
 // accounts); otherwise a local built server is started.
