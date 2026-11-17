@@ -1,6 +1,6 @@
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { maskEmail } from '../src/server/assist';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ASSIST_DAILY_LIMIT, maskEmail } from '../src/server/assist';
 import { diagnosticPayload } from '../src/shared/diagnostic';
 import { createHarness, enroll, scan, seedEvent, type Harness } from './helpers';
 
@@ -68,7 +68,7 @@ describe('door attendee search', () => {
     expect(response.headers['cache-control']).toBe('no-store');
   });
 
-  it('requires at least 3 characters and caps results at 10', async () => {
+  it('requires at least 3 characters, and a search matching more than 10 passes shows none of them', async () => {
     const { event, scannerKey } = await door();
     expect((await find(scannerKey, 'ab').expect(400)).body.error).toContain('at least 3 characters');
     expect((await find(scannerKey, '  ab  ').expect(400)).body.error).toContain('at least 3 characters');
@@ -77,9 +77,90 @@ describe('door attendee search', () => {
       .admin(request(h.app).post(`/api/events/${event.id}/passes`))
       .send({ attendees: Array.from({ length: 12 }, (_, i) => ({ name: `Guest ${String(i).padStart(2, '0')}` })) })
       .expect(201);
-    const many = (await find(scannerKey, 'Guest').expect(200)).body;
-    expect(many.matches).toHaveLength(10);
-    expect(many.more).toBe(true);
+    // Too broad to be one person: no names at all, only "refine the search". A door phone's key cannot page through the guest list.
+    expect((await find(scannerKey, 'Guest').expect(200)).body).toEqual({ matches: [], more: true });
+    const narrowed = (await find(scannerKey, 'guest 05').expect(200)).body;
+    expect(narrowed.more).toBe(false);
+    expect(narrowed.matches.map((m: { attendeeName: string }) => m.attendeeName)).toEqual(['Guest 05']);
+    const audit = (await h.admin(request(h.app).get(`/api/events/${event.id}/audit`)).query({ action: 'scanner.attendee_lookup' }).expect(200)).body;
+    expect(audit.map((entry: { details: unknown }) => entry.details)).toContainEqual({ results: 0, more: true, references: [] });
+  });
+
+  it('matches names from the start of a word only, every word of the query', async () => {
+    const { event, scannerKey } = await door();
+    await h.admin(request(h.app).post(`/api/events/${event.id}/passes`)).send({ attendees: [{ name: 'Jean-Luc Picard' }] }).expect(201);
+    const names = async (q: string) => (await find(scannerKey, q).expect(200)).body.matches.map((m: { attendeeName: string }) => m.attendeeName);
+    expect(await names('lov')).toEqual(['Ada Lovelace', 'Byron Lovelace']);
+    expect(await names('LOVELACE ada')).toEqual(['Ada Lovelace']);
+    expect(await names('ada lov')).toEqual(['Ada Lovelace']);
+    expect(await names('luc')).toEqual(['Jean-Luc Picard']);
+    // Fragments from the middle of a name do not match: no fishing with common letter runs.
+    expect(await names('ove')).toEqual([]);
+    expect(await names('ace')).toEqual([]);
+    expect(await names('da ove')).toEqual([]);
+  });
+
+  it('answers adversarial queries without errors, wildcards or matches from other events', async () => {
+    const { scannerKey } = await door();
+    for (const q of ['%%%', '___', '\\\\\\', "'; DROP TABLE passes; --", 'x'.repeat(100), '🙂🙂🙂', 'Ādá Łovelace', 'a b c d e f g h i j k', '%a%', 'a_a']) {
+      const body = (await find(scannerKey, q).expect(200)).body;
+      expect(body, q).toEqual({ matches: [], more: false });
+    }
+    await find(scannerKey, 'x'.repeat(101)).expect(400);
+  });
+
+  it('marks passes sharing a printed reference as ambiguous, and the reference admits neither', async () => {
+    const { event, scannerKey, named } = await door();
+    // A second pass whose id starts with the same 8 characters (1 in 4 billion by chance; forced here).
+    const twin = `${named[2].id.slice(0, 8)}-0000-4000-8000-000000000000`;
+    h.db
+      .prepare('INSERT INTO passes (id, event_id, token_hash, attendee_name, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(twin, event.id, 'f'.repeat(64), 'Grace Twin', '2030-06-02T00:00:00.000Z', h.clock.current.toISOString());
+    const found = (await find(scannerKey, reference(named[2])).expect(200)).body.matches;
+    expect(found.map((m: { attendeeName: string; ambiguous: boolean }) => [m.attendeeName, m.ambiguous])).toEqual([
+      ['Grace Hopper', true],
+      ['Grace Twin', true]
+    ]);
+    expect((await scan(h, scannerKey, reference(named[2])).expect(200)).body.outcome).toBe('invalid');
+    expect((await h.admin(request(h.app).get(`/api/events/${event.id}`)).expect(200)).body.redeemedCount).toBe(0);
+  });
+
+  it('allows each device 300 searches in any 24 hours, counted from the audit log; then 429 with a door message', async () => {
+    const { event, scannerKey, scannerId, named } = await door();
+    const scanner = h.service.authenticateScanner(scannerKey)!;
+    for (let i = 0; i < ASSIST_DAILY_LIMIT - 1; i++) h.service.assist.search(scanner, 'Grace');
+    h.clock.advance(3_600_000);
+    await find(scannerKey, 'Grace').expect(200);
+    const refused = await find(scannerKey, 'Grace').expect(429);
+    expect(refused.body.error).toContain('used its 300 attendee searches for the last 24 hours');
+    // The first 299 searches stop counting 23 hours from now.
+    expect(Number(refused.headers['retry-after'])).toBe(23 * 3600);
+    // Refusals are not searches: nothing more is logged or counted.
+    const logged = () => Number((h.db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'scanner.attendee_lookup' AND entity_id = ?").get(scannerId) as { n: number }).n);
+    expect(logged()).toBe(ASSIST_DAILY_LIMIT);
+    // Another device keeps its own budget, and this one still admits by reference.
+    const second = (await h.admin(request(h.app).post(`/api/events/${event.id}/scanners`)).send({ label: 'Door 2' }).expect(201)).body;
+    await find(await enroll(h.app, second), 'Grace').expect(200);
+    expect((await scan(h, scannerKey, reference(named[2])).expect(200)).body.outcome).toBe('admitted');
+    // A day after the first searches, they stop counting.
+    h.clock.advance(23 * 3_600_000);
+    await find(scannerKey, 'Grace').expect(200);
+    expect(logged()).toBe(ASSIST_DAILY_LIMIT + 1);
+  });
+
+  it('reads passes without holding the write lock; only the audit row is written', async () => {
+    const { scannerKey } = await door();
+    const prepare = h.db.prepare.bind(h.db);
+    const states: Array<[string, boolean]> = [];
+    vi.spyOn(h.db, 'prepare').mockImplementation((sql: string) => {
+      states.push([sql.includes('INSERT INTO audit_log') ? 'audit' : sql.includes('FROM passes p') ? 'search' : 'other', h.db.isTransaction]);
+      return prepare(sql);
+    });
+    await find(scannerKey, 'Grace').expect(200);
+    expect(states.filter(([what]) => what !== 'other')).toEqual([
+      ['search', false],
+      ['audit', true]
+    ]);
   });
 
   it('treats LIKE wildcards literally', async () => {
@@ -264,5 +345,21 @@ describe('scan method (camera, manual, lookup)', () => {
     const operations = (await h.admin(request(h.app).get(`/api/events/${event.id}/operations`)).expect(200)).body;
     expect(operations.assistedAdmissions).toBe(1);
     expect(operations.totals).toMatchObject({ scans: 4, admitted: 1 });
+  });
+
+  it('changes nothing about the other rules either: a lookup admit is refused for revoked passes, outside the entry window and when check-in is closed', async () => {
+    const { event, scannerKey, passes } = await seedEvent(h, 3);
+    const lookup = async (pass: { id: string }) => (await redeem(scannerKey, { code: reference(pass), method: 'lookup' }).expect(200)).body.outcome;
+    await h.admin(request(h.app).post(`/api/passes/${passes[0].id}/revoke`)).expect(200);
+    expect(await lookup(passes[0])).toBe('revoked');
+    const later = (await h.admin(request(h.app).post(`/api/events/${event.id}/policies`)).send({ name: 'Late entry', opensAt: '2030-06-01T21:00:00.000Z' }).expect(201)).body;
+    await h.admin(request(h.app).patch(`/api/passes/${passes[1].id}`)).send({ policyId: later.id }).expect(200);
+    expect(await lookup(passes[1])).toBe('too_early');
+    await h.admin(request(h.app).patch(`/api/events/${event.id}`)).send({ status: 'ended' }).expect(200);
+    expect(await lookup(passes[2])).toBe('event_closed');
+    expect((await h.admin(request(h.app).get(`/api/events/${event.id}`)).expect(200)).body.redeemedCount).toBe(0);
+    // The door's search shows the same refusals, before anyone presses Admit.
+    const found = (await request(h.app).get('/api/scanner/attendees').query({ q: reference(passes[1]) }).set('Authorization', `Bearer ${scannerKey}`).expect(200)).body.matches;
+    expect(found[0].check).toEqual({ admit: false, outcome: 'event_closed' });
   });
 });
