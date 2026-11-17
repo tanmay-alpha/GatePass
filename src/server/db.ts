@@ -374,6 +374,68 @@ const migrations: string[] = [
   -- or the reference of a pass found with "Find attendee". Informational only;
   -- admission rules ignore it. NULL for older clients and rows.
   ALTER TABLE scans ADD COLUMN method TEXT CHECK (method IS NULL OR method IN ('camera', 'manual', 'lookup'));
+  `,
+  // 6 — pass email outbox: emails that may have been sent, attempt timing, fair claims
+  // (docs/decisions/0012-pass-email-outbox.md)
+  `
+  -- 'unconfirmed': an attempt may have reached the provider, but it could no
+  -- longer be repeated safely (the provider de-duplicates a request id for 24
+  -- hours only), so the email may or may not have been sent. Final, like
+  -- 'failed': the sealed link is erased.
+  -- last_attempt_at: when the latest provider request started (the one in
+  -- flight while 'sending'). uncertain_since: when the first attempt that may
+  -- have reached the provider started; it is not repeated 23 hours after.
+  -- SQLite cannot change a CHECK in place, so the table is rebuilt, keeping
+  -- its rowids (they order "sent again since"). Nothing references it.
+  CREATE TABLE pass_deliveries_v6 (
+    id              TEXT PRIMARY KEY,
+    event_id        TEXT NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
+    pass_id         TEXT NOT NULL REFERENCES passes(id) ON DELETE RESTRICT,
+    recipient       TEXT NOT NULL CHECK (length(recipient) BETWEEN 3 AND 254),
+    token_hash      TEXT NOT NULL CHECK (length(token_hash) = 64),
+    status          TEXT NOT NULL CHECK (status IN ('queued', 'sending', 'accepted', 'failed', 'cancelled', 'unconfirmed')),
+    attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at TEXT,
+    sealed_link     BLOB,
+    link_expires_at TEXT,
+    provider_id     TEXT,
+    last_error      TEXT CHECK (last_error IS NULL OR length(last_error) <= 300),
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    accepted_at     TEXT,
+    last_attempt_at TEXT,
+    uncertain_since TEXT,
+    CHECK (status IN ('queued', 'sending') OR sealed_link IS NULL)
+  ) STRICT;
+  -- Before this version every retry looked alike: a waiting email that was
+  -- already tried, or was being sent when the server stopped, may have
+  -- reached the provider at any attempt, so it counts as uncertain since it
+  -- was queued (the earliest possible attempt). The one in flight started
+  -- when it was claimed (updated_at).
+  INSERT INTO pass_deliveries_v6 (rowid, id, event_id, pass_id, recipient, token_hash, status, attempts, next_attempt_at, sealed_link, link_expires_at,
+                                  provider_id, last_error, created_by, created_at, updated_at, accepted_at, last_attempt_at, uncertain_since)
+    SELECT rowid, id, event_id, pass_id, recipient, token_hash, status, attempts, next_attempt_at, sealed_link, link_expires_at,
+           provider_id, last_error, created_by, created_at, updated_at, accepted_at,
+           CASE WHEN status = 'sending' THEN updated_at END,
+           CASE WHEN status = 'sending' OR (status = 'queued' AND attempts > 0) THEN created_at END
+    FROM pass_deliveries;
+  DROP TABLE pass_deliveries;
+  ALTER TABLE pass_deliveries_v6 RENAME TO pass_deliveries;
+  CREATE INDEX pass_deliveries_due_idx ON pass_deliveries(status, next_attempt_at);
+  CREATE INDEX pass_deliveries_event_idx ON pass_deliveries(event_id, created_at);
+  CREATE INDEX pass_deliveries_pass_idx ON pass_deliveries(pass_id);
+  CREATE UNIQUE INDEX pass_deliveries_open_idx ON pass_deliveries(pass_id) WHERE status IN ('queued', 'sending');
+  -- Fair claims take events in turn: which events have due emails, and each
+  -- one's next email, without reading every waiting row (25,000 waiting:
+  -- about 1.7 ms instead of 23-41 ms per claim, inside the claim transaction).
+  CREATE INDEX pass_deliveries_waiting_idx ON pass_deliveries(event_id, next_attempt_at) WHERE status = 'queued';
+  -- The daily per-address limit counts only the addresses being emailed,
+  -- inside the issuance transaction (25,000 rows today: about 1 ms instead of 44-98 ms).
+  CREATE INDEX pass_deliveries_recipient_idx ON pass_deliveries(lower(recipient), created_at);
+  CREATE TRIGGER pass_deliveries_event_insert BEFORE INSERT ON pass_deliveries
+    WHEN (SELECT event_id FROM passes WHERE id = NEW.pass_id) IS NOT NEW.event_id
+    BEGIN SELECT RAISE(ABORT, 'delivery pass belongs to another event'); END;
   `
 ];
 

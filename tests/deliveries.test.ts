@@ -4,51 +4,12 @@ import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/server/config';
 import { DeliveryWorker, LinkSealer, RECIPIENT_DAILY_LIMIT, type DeliveryWorkerOptions } from '../src/server/deliveries';
-import { composeEmail, resendMailer, type MailAttempt, type MailMessage, type Mailer } from '../src/server/mailer';
-import type { EmailReport, IssuedPass, PassDelivery } from '../src/shared/types';
+import { composeEmail, resendMailer, type MailAttempt, type Mailer } from '../src/server/mailer';
+import type { IssuedPass, PassDelivery } from '../src/shared/types';
+import { FakeProvider } from './mail-fakes';
 import { createHarness, EVENT_INPUT, type Harness } from './helpers';
 
 const PASSWORD = 'correct horse battery';
-
-type Script = MailAttempt | 'accept' | 'accept-but-time-out';
-
-/**
- * Provider double with the property the outbox relies on: a request with an
- * idempotency key it has already accepted is not sent again, it answers with
- * the first message id. `script` decides each answer in order; then `accept`.
- */
-class FakeProvider implements Mailer {
-  readonly enabled = true;
-  readonly calls: Array<{ message: MailMessage; at: number }> = [];
-  /** Messages the provider actually accepted, by idempotency key. */
-  readonly accepted = new Map<string, { id: string; message: MailMessage }>();
-  script: Script[] = [];
-  private waiting: { count: number; resolve: () => void } | null = null;
-
-  /** Resolves once `count` requests have arrived. */
-  callsReached(count: number): Promise<void> {
-    if (this.calls.length >= count) return Promise.resolve();
-    const { promise, resolve } = Promise.withResolvers<void>();
-    this.waiting = { count, resolve };
-    return promise;
-  }
-
-  async send(message: MailMessage): Promise<EmailReport> {
-    const result = await this.attempt(message);
-    return result.status === 'accepted' ? { status: 'sent', providerId: result.providerId } : { status: 'failed', error: result.error };
-  }
-
-  async attempt(message: MailMessage): Promise<MailAttempt> {
-    this.calls.push({ message, at: performance.now() });
-    if (this.waiting && this.calls.length >= this.waiting.count) this.waiting.resolve();
-    const step = this.script.shift() ?? 'accept';
-    if (step !== 'accept' && step !== 'accept-but-time-out') return step;
-    const key = message.idempotencyKey ?? `call-${this.calls.length}`;
-    if (!this.accepted.has(key)) this.accepted.set(key, { id: `msg_${this.accepted.size + 1}`, message });
-    if (step === 'accept-but-time-out') return { status: 'retry', error: 'The email provider did not answer in time.' };
-    return { status: 'accepted', providerId: this.accepted.get(key)!.id };
-  }
-}
 
 const KEY = randomBytes(32);
 let h: Harness;
@@ -131,7 +92,8 @@ describe('pass email outbox', () => {
     expect(auditActions()).toEqual(['pass.email_queued', 'pass.email_accepted', 'pass.email_accepted']);
 
     const list = (await h.admin(request(h.app).get(`/api/events/${event.id}/deliveries`)).expect(200)).body;
-    expect(list.counts).toEqual({ queued: 0, sending: 0, accepted: 2, failed: 0, cancelled: 0, retrying: 0 });
+    expect(list.counts).toEqual({ queued: 0, sending: 0, accepted: 2, failed: 0, cancelled: 0, unconfirmed: 0, retrying: 0 });
+    expect(list.paused).toBeNull();
     expect(list.deliveries.map((d: PassDelivery) => [d.attendeeName, d.status])).toEqual([
       ['Linus', 'accepted'],
       ['Ada', 'accepted']
@@ -200,8 +162,9 @@ describe('pass email outbox', () => {
 
   it('gives up after the attempt limit with exponential backoff, then reports the failure', async () => {
     const provider = setup();
-    const unreachable: MailAttempt = { status: 'retry', error: 'The email provider could not be reached.' };
-    provider.script = [unreachable, unreachable, unreachable];
+    // Definite failures (the provider refused the credentials): nothing can have been sent, so the email ends `failed`.
+    const badKey: MailAttempt = { status: 'retry', error: 'The email provider refused the message (invalid_api_key).', ambiguous: false };
+    provider.script = [badKey, badKey, badKey];
     const event = await createEvent();
     await issue(event.id, [{ email: 'ada@example.com' }]);
     const sender = worker(provider, { maxAttempts: 3 });
@@ -213,13 +176,13 @@ describe('pass email outbox', () => {
     expect(rows()[0].next_attempt_at).toBe(new Date(h.clock.current.getTime() + 60_000).toISOString());
     h.clock.advance(60_000);
     await sender.runOnce();
-    expect(rows()[0]).toMatchObject({ status: 'failed', attempts: 3, sealed_link: null, last_error: 'The email provider could not be reached. Gave up after 3 attempts.' });
+    expect(rows()[0]).toMatchObject({ status: 'failed', attempts: 3, sealed_link: null, last_error: 'The email provider refused the message (invalid_api_key). Gave up after 3 attempts.' });
     expect(new Set(provider.calls.map((call) => call.message.idempotencyKey)).size).toBe(1);
   });
 
   it('does not count a rate-limited attempt and waits for the provider’s Retry-After', async () => {
     const provider = setup();
-    provider.script = [{ status: 'retry', error: 'The email provider refused the message (rate_limit_exceeded).', throttled: true, retryAfterMs: 2_000 }];
+    provider.script = [{ status: 'retry', error: 'The email provider refused the message (rate_limit_exceeded).', ambiguous: false, throttled: true, retryAfterMs: 2_000 }];
     const event = await createEvent();
     await issue(event.id, [{ email: 'ada@example.com' }]);
     const sender = worker(provider);
@@ -289,7 +252,7 @@ describe('pass email outbox', () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const infos = vi.spyOn(console, 'log').mockImplementation(() => {});
     const provider = setup();
-    provider.script = [{ status: 'retry', error: 'The email provider could not be reached.' }];
+    provider.script = [{ status: 'retry', error: 'The email provider could not be reached.', ambiguous: true }];
     const event = await createEvent();
     const [pass] = await issue(event.id, [{ name: 'Ada', email: 'ada.private@example.com' }]);
     h.db.exec('PRAGMA wal_checkpoint(FULL)');
@@ -313,7 +276,7 @@ describe('pass email outbox', () => {
 
   it('cancels only waiting emails and makes a backing-off email due now on retry', async () => {
     const provider = setup();
-    provider.script = [{ status: 'retry', error: 'The email provider could not be reached.' }];
+    provider.script = [{ status: 'retry', error: 'The email provider could not be reached.', ambiguous: true }];
     const event = await createEvent();
     await issue(event.id, [{ email: 'a@example.com' }, { email: 'b@example.com' }]);
     const sender = worker(provider);
@@ -408,6 +371,20 @@ describe('pass email outbox', () => {
     expect(rows()).toHaveLength(RECIPIENT_DAILY_LIMIT);
     const [extra] = await issue(event.id, [{ email: 'group@example.com' }], false);
     await h.admin(request(h.app).post(`/api/events/${event.id}/passes/${extra.id}/deliveries`)).send({ token: extra.token }).expect(429);
+  });
+
+  it('counts an address with non-ASCII capitals against the daily cap like the database does (imports accept such addresses)', async () => {
+    setup();
+    const address = 'Ärzte.Team@Example.com';
+    for (let i = 0; i < RECIPIENT_DAILY_LIMIT; i += 1) {
+      const event = await createEvent();
+      await h.admin(request(h.app).post(`/api/events/${event.id}/passes/import`)).send({ rows: [{ email: address }], dryRun: false, emailPasses: true }).expect(201);
+    }
+    expect(rows()).toHaveLength(RECIPIENT_DAILY_LIMIT);
+    const event = await createEvent();
+    const refused = await h.admin(request(h.app).post(`/api/events/${event.id}/passes/import`)).send({ rows: [{ email: address }], dryRun: false, emailPasses: true }).expect(429);
+    expect(refused.body.error).toMatch(/Issue without email/);
+    expect(rows()).toHaveLength(RECIPIENT_DAILY_LIMIT);
   });
 
   it('never duplicates passes when email fails', async () => {
@@ -559,7 +536,7 @@ describe('mail adapter and configuration', () => {
     const controller = new AbortController();
     const pending = hanging.attempt!(message, controller.signal);
     controller.abort();
-    expect(await pending).toEqual({ status: 'retry', error: 'Sending was interrupted by a server shutdown; the provider may have accepted it.' });
+    expect(await pending).toEqual({ status: 'retry', ambiguous: true, error: 'Sending was interrupted by a server shutdown; the provider may have accepted it.' });
   });
 
   it('validates PASS_DELIVERY_KEY and RESEND_API_URL', () => {

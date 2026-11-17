@@ -50,6 +50,8 @@ export interface GatePassOptions {
   mailer?: Mailer;
   /** PASS_DELIVERY_KEY: seals pass links waiting in the email outbox. Passes cannot be emailed without it. */
   passDeliveryKey?: Buffer | null;
+  /** PASS_DELIVERY_PREVIOUS_KEYS: open links sealed before a key rotation. */
+  passDeliveryPreviousKeys?: readonly Buffer[];
 }
 
 export interface EventInput {
@@ -149,6 +151,7 @@ export class GatePass {
       publicUrl: this.publicUrl,
       generateToken: this.newToken,
       key: options.passDeliveryKey,
+      previousKeys: options.passDeliveryPreviousKeys,
       emailEnabled: this.accounts.mailer.enabled
     });
   }

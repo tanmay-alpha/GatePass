@@ -1,6 +1,6 @@
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { DeliveryActionResult, DeliveryCounts, DeliveryList, DeliverySkipReason, DeliveryStatus, PassDelivery } from '../shared/types';
+import type { DeliveryActionResult, DeliveryCounts, DeliveryList, DeliveryPause, DeliverySkipReason, DeliveryStatus, PassDelivery } from '../shared/types';
 import { recordAudit } from './audit';
 import { transaction, type Database } from './db';
 import { httpError } from './http';
@@ -13,13 +13,17 @@ import { extractPassToken, generateToken, hashToken } from './tokens';
 // per attendee with an address, inside the issuance transaction: no network
 // call ever runs inside a database transaction. Passes store only token
 // hashes, so the raw link the email needs is kept sealed (AES-256-GCM, key
-// from PASS_DELIVERY_KEY) until the row reaches a final state.
+// from PASS_DELIVERY_KEY, older keys from PASS_DELIVERY_PREVIOUS_KEYS) until
+// the row reaches a final state.
 //
-// `DeliveryWorker` sends due rows one at a time at a fixed maximum rate. A
-// row moves queued → sending in a short transaction before the provider call
-// and to accepted / failed / queued (retry) after it. The delivery id is the
-// provider idempotency key, so a retry after a timeout or a crash cannot send
-// a second message. Recipients and links are never logged.
+// `DeliveryWorker` sends due rows one at a time at a fixed maximum rate,
+// taking events in turn. A row moves queued → sending in a short transaction
+// before the provider call and to accepted / failed / unconfirmed / queued
+// (retry) after it. The delivery id is the provider idempotency key, so a
+// retry after a timeout or a crash does not send a second message while the
+// provider remembers the key (24 hours). Past that window an attempt that may
+// have reached the provider is never repeated: the email ends `unconfirmed`
+// and the organizer decides. Recipients and links are never logged.
 
 type Row = Record<string, unknown>;
 
@@ -30,7 +34,16 @@ const MAX_ERROR = 300;
 export const RECIPIENT_DAILY_LIMIT = 10;
 const DAY_MS = 24 * 60 * 60_000;
 
-const STATUSES = ['queued', 'sending', 'accepted', 'failed', 'cancelled'] as const satisfies readonly DeliveryStatus[];
+/** How long the provider de-duplicates a repeated idempotency key (Resend: 24 hours, https://resend.com/docs/dashboard/emails/idempotency-keys). */
+export const PROVIDER_DEDUP_WINDOW_MS = DAY_MS;
+/**
+ * An attempt that may have reached the provider is repeated automatically
+ * only this long after it started: the provider's window minus one hour for
+ * the request's own duration and clock drift between us and the provider.
+ */
+export const SAFE_RETRY_WINDOW_MS = PROVIDER_DEDUP_WINDOW_MS - 60 * 60_000;
+
+const STATUSES = ['queued', 'sending', 'accepted', 'failed', 'cancelled', 'unconfirmed'] as const satisfies readonly DeliveryStatus[];
 
 /** Why a queued email can no longer be sent, or NULL. Needs `d` (delivery), `p` (pass), `r` (redemption) and `:now`. */
 const STALE_SQL = `CASE
@@ -43,15 +56,26 @@ END`;
 /** A later email exists for the same pass (rowid follows insertion order). Needs `d` (delivery). */
 const SUPERSEDED_SQL = 'EXISTS (SELECT 1 FROM pass_deliveries n WHERE n.pass_id = d.pass_id AND n.rowid > d.rowid)';
 
-const STALE_MESSAGE: Record<string, string> = {
-  redeemed: 'Not sent: the pass was used at the door first.',
-  revoked: 'Not sent: the pass was revoked.',
-  reissued: 'Not sent: the pass was reissued, so this email carried a link that no longer works.',
-  expired: 'Not sent: the pass expired first.'
+const STALE_REASON: Record<string, string> = {
+  redeemed: 'the pass was used at the door first.',
+  revoked: 'the pass was revoked.',
+  reissued: 'the pass was reissued, so this email carried a link that no longer works.',
+  expired: 'the pass expired first.'
 };
 
-const INTERRUPTED = 'Sending was interrupted by a server restart; it is retried with the same request id, so the provider sends it at most once.';
-const UNREADABLE = 'The stored link could not be decrypted with the current PASS_DELIVERY_KEY (was the key changed?). Send a new link.';
+/** Why a waiting email was cancelled; it may still have been sent when an earlier attempt was ambiguous. */
+function staleMessage(row: Row): string {
+  const reason = STALE_REASON[row.stale as string];
+  return row.uncertain_since ? `Not sent again: ${reason} An earlier attempt may still have reached the provider.` : `Not sent: ${reason}`;
+}
+
+const INTERRUPTED =
+  'Sending was interrupted by a server restart; the provider may have accepted it. It is retried with the same request id, which the provider de-duplicates for 24 hours; after that it is not sent again.';
+const UNREADABLE =
+  'The stored link could not be decrypted with PASS_DELIVERY_KEY or PASS_DELIVERY_PREVIOUS_KEYS (was the key changed without keeping the old one?). Send a new link.';
+/** Appended to an `unconfirmed` email's reason. */
+const MAY_HAVE_SENT = 'The provider may already have sent it: check its log, or send a new link (the attendee may get two emails; only the newest link works).';
+const WINDOW_PASSED = `Not retried: more than 23 hours passed since an attempt that may have reached the provider, which de-duplicates for 24 hours only. ${MAY_HAVE_SENT}`;
 
 // ------------------------------------------------------------ request schemas
 
@@ -77,42 +101,77 @@ export const deliveryFilterSchema = z.object({
 
 // ------------------------------------------------------------ sealing
 
-const SEAL_VERSION = 1;
+/** Schema-5 links: version ‖ IV ‖ tag ‖ ciphertext, sealed with the one key there was. Still opened. */
+const SEAL_V1 = 1;
+/** version ‖ key id ‖ IV ‖ tag ‖ ciphertext: the key id says which configured key opens it. */
+const SEAL_V2 = 2;
+const KEY_ID_BYTES = 8;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
-const HEADER_BYTES = 1 + IV_BYTES + TAG_BYTES;
 
-/** Binds a ciphertext to its row: a sealed link copied into another delivery or pass does not open. */
-function additionalData(deliveryId: string, passId: string): Buffer {
-  return Buffer.from(`gatepass:pass-delivery:v${SEAL_VERSION}:${deliveryId}:${passId}`, 'utf8');
+/** Names a key without revealing it: the first 8 bytes of SHA-256 over a domain-separation prefix and the key. */
+function keyId(key: Buffer): Buffer {
+  return createHash('sha256').update('gatepass:pass-delivery-key-id\0').update(key).digest().subarray(0, KEY_ID_BYTES);
 }
 
-/** AES-256-GCM with a random 96-bit IV per link. Layout: version (1) ‖ IV (12) ‖ tag (16) ‖ ciphertext. */
+/** Binds a ciphertext to its row and, from version 2, to its version and key id: a sealed link copied into another delivery or pass does not open. */
+function additionalData(version: number, id: Buffer | null, deliveryId: string, passId: string): Buffer {
+  return Buffer.from(`gatepass:pass-delivery:v${version}:${id ? `${id.toString('hex')}:` : ''}${deliveryId}:${passId}`, 'utf8');
+}
+
+/** `body` is IV ‖ tag ‖ ciphertext; null when the key, the additional data or any byte does not match. */
+function decrypt(key: Buffer, body: Buffer, aad: Buffer): string | null {
+  if (body.length <= IV_BYTES + TAG_BYTES) return null;
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, body.subarray(0, IV_BYTES), { authTagLength: TAG_BYTES });
+    decipher.setAAD(aad);
+    decipher.setAuthTag(body.subarray(IV_BYTES, IV_BYTES + TAG_BYTES));
+    return Buffer.concat([decipher.update(body.subarray(IV_BYTES + TAG_BYTES)), decipher.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * AES-256-GCM with a random 96-bit IV per link, sealed under the active key
+ * (PASS_DELIVERY_KEY). Layout: version 2 (1) ‖ key id (8) ‖ IV (12) ‖ tag (16)
+ * ‖ ciphertext. Opens version 2 with the configured key its id names, and
+ * version 1 with the active key, then each previous key
+ * (PASS_DELIVERY_PREVIOUS_KEYS).
+ */
 export class LinkSealer {
-  constructor(private readonly key: Buffer) {
-    if (key.length !== 32) throw new Error('PASS_DELIVERY_KEY must be 32 bytes');
+  private readonly keys: Array<{ id: Buffer; key: Buffer }>;
+  /** What every link sealed now starts with: the version and the active key id. */
+  readonly header: Buffer;
+
+  constructor(active: Buffer, previous: readonly Buffer[] = []) {
+    if ([active, ...previous].some((key) => key.length !== 32)) throw new Error('Pass delivery keys must be 32 bytes');
+    this.keys = [active, ...previous].map((key) => ({ id: keyId(key), key }));
+    this.header = Buffer.concat([Buffer.from([SEAL_V2]), this.keys[0].id]);
   }
 
   seal(link: string, deliveryId: string, passId: string): Buffer {
+    const { id, key } = this.keys[0];
     const iv = randomBytes(IV_BYTES);
-    const cipher = createCipheriv('aes-256-gcm', this.key, iv, { authTagLength: TAG_BYTES });
-    cipher.setAAD(additionalData(deliveryId, passId));
+    const cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: TAG_BYTES });
+    cipher.setAAD(additionalData(SEAL_V2, id, deliveryId, passId));
     const body = Buffer.concat([cipher.update(link, 'utf8'), cipher.final()]);
-    return Buffer.concat([Buffer.from([SEAL_VERSION]), iv, cipher.getAuthTag(), body]);
+    return Buffer.concat([this.header, iv, cipher.getAuthTag(), body]);
   }
 
-  /** The link, or null when the blob was sealed with another key, for another row, or altered. */
+  /** The link, or null when no configured key sealed it, it was sealed for another row, or it was altered. */
   open(blob: Uint8Array, deliveryId: string, passId: string): string | null {
     const data = Buffer.from(blob);
-    if (data.length <= HEADER_BYTES || data[0] !== SEAL_VERSION) return null;
-    try {
-      const decipher = createDecipheriv('aes-256-gcm', this.key, data.subarray(1, 1 + IV_BYTES), { authTagLength: TAG_BYTES });
-      decipher.setAAD(additionalData(deliveryId, passId));
-      decipher.setAuthTag(data.subarray(1 + IV_BYTES, HEADER_BYTES));
-      return Buffer.concat([decipher.update(data.subarray(HEADER_BYTES)), decipher.final()]).toString('utf8');
-    } catch {
-      return null;
+    if (data[0] === SEAL_V2) {
+      const entry = this.keys.find(({ id }) => id.equals(data.subarray(1, 1 + KEY_ID_BYTES)));
+      return entry ? decrypt(entry.key, data.subarray(1 + KEY_ID_BYTES), additionalData(SEAL_V2, entry.id, deliveryId, passId)) : null;
     }
+    if (data[0] !== SEAL_V1) return null;
+    for (const { key } of this.keys) {
+      const link = decrypt(key, data.subarray(1), additionalData(SEAL_V1, null, deliveryId, passId));
+      if (link !== null) return link;
+    }
+    return null;
   }
 }
 
@@ -125,6 +184,8 @@ export interface PassDeliveriesOptions {
   generateToken?: () => string;
   /** PASS_DELIVERY_KEY. Without it passes cannot be emailed (links are never stored in clear). */
   key?: Buffer | null;
+  /** PASS_DELIVERY_PREVIOUS_KEYS: open links sealed before a key rotation. */
+  previousKeys?: readonly Buffer[];
   /** A mail provider is configured. */
   emailEnabled: boolean;
 }
@@ -169,12 +230,15 @@ export class PassDeliveries {
   private readonly sealer: LinkSealer | null;
   private readonly newToken: () => string;
   private listener: () => void = () => {};
+  /** Fair claims: when each event was last served (a running count); reset on restart, which is harmless. */
+  private readonly served = new Map<string, number>();
+  private serves = 0;
 
   constructor(
     private readonly db: Database,
     private readonly options: PassDeliveriesOptions
   ) {
-    this.sealer = options.key ? new LinkSealer(options.key) : null;
+    this.sealer = options.key ? new LinkSealer(options.key, options.previousKeys) : null;
     this.newToken = options.generateToken ?? generateToken;
   }
 
@@ -338,32 +402,64 @@ export class PassDeliveries {
          ORDER BY d.created_at DESC, d.rowid DESC LIMIT :limit OFFSET :offset`
       )
       .all({ ...params, limit: filter.limit ?? 50, offset: filter.offset ?? 0 }) as Row[];
-    const counts: DeliveryCounts = { queued: 0, sending: 0, accepted: 0, failed: 0, cancelled: 0, retrying: 0 };
+    const counts: DeliveryCounts = { queued: 0, sending: 0, accepted: 0, failed: 0, cancelled: 0, unconfirmed: 0, retrying: 0 };
     for (const row of this.db
       .prepare(
-        `SELECT d.status, COUNT(*) AS n, SUM(d.status = 'queued' AND d.attempts > 0) AS retrying, SUM(${SUPERSEDED_SQL}) AS superseded
+        `SELECT d.status, COUNT(*) AS n, SUM(d.status = 'queued' AND d.last_error IS NOT NULL) AS retrying, SUM(${SUPERSEDED_SQL}) AS superseded
          FROM pass_deliveries d WHERE d.event_id = ? GROUP BY d.status`
       )
       .all(eventId) as Row[]) {
-      // A failed email that was sent again since no longer needs attention.
-      counts[row.status as DeliveryStatus] = Number(row.n) - (row.status === 'failed' ? Number(row.superseded) : 0);
+      // A failed or unconfirmed email that was sent again since no longer needs attention.
+      counts[row.status as DeliveryStatus] = Number(row.n) - (row.status === 'failed' || row.status === 'unconfirmed' ? Number(row.superseded) : 0);
       if (row.status === 'queued') counts.retrying = Number(row.retrying);
     }
-    return { deliveries: rows.map(toDelivery), total, counts };
+    return { deliveries: rows.map(toDelivery), total, counts, paused: counts.queued + counts.sending > 0 ? this.pausedBy() : null };
   }
 
   // ---------------------------------------------------------------- worker steps
 
-  /** Rows a crash left in `sending` go back to the queue, keeping their id (the idempotency key). */
+  /**
+   * Rows a crash left in `sending` go back to the queue, keeping their id
+   * (the idempotency key). The interrupted attempt may have reached the
+   * provider, so the row is uncertain since that attempt started.
+   */
   recoverInterrupted(): number {
     const now = this.timestamp();
     return transaction(this.db, () =>
       Number(
         this.db
-          .prepare("UPDATE pass_deliveries SET status = 'queued', next_attempt_at = ?, updated_at = ?, last_error = ? WHERE status = 'sending'")
+          .prepare(
+            `UPDATE pass_deliveries SET status = 'queued', next_attempt_at = ?, updated_at = ?, last_error = ?, uncertain_since = COALESCE(uncertain_since, last_attempt_at, updated_at)
+             WHERE status = 'sending'`
+          )
           .run(now, now, INTERRUPTED).changes
       )
     );
+  }
+
+  /**
+   * After a key rotation: re-seals every waiting link that is not sealed
+   * under the active key yet (older seal version or a previous key), in one
+   * transaction. Links no configured key opens stay as they are and are
+   * failed when claimed. Returns counts only.
+   */
+  resealWaiting(): { resealed: number; unreadable: number } {
+    const sealer = this.sealer;
+    if (!sealer) return { resealed: 0, unreadable: 0 };
+    return transaction(this.db, () => {
+      const rows = this.db
+        .prepare("SELECT id, pass_id, sealed_link FROM pass_deliveries WHERE status = 'queued' AND sealed_link IS NOT NULL AND substr(sealed_link, 1, ?) <> ?")
+        .all(sealer.header.length, sealer.header) as Row[];
+      const update = this.db.prepare('UPDATE pass_deliveries SET sealed_link = ? WHERE id = ?');
+      let resealed = 0;
+      for (const row of rows) {
+        const link = sealer.open(row.sealed_link as Uint8Array, row.id as string, row.pass_id as string);
+        if (link === null) continue;
+        update.run(sealer.seal(link, row.id as string, row.pass_id as string), row.id as string);
+        resealed += 1;
+      }
+      return { resealed, unreadable: rows.length - resealed };
+    });
   }
 
   /** Cancels waiting emails whose link can no longer be used (pass used, revoked, reissued or expired) and erases their sealed links. */
@@ -371,11 +467,11 @@ export class PassDeliveries {
     return transaction(this.db, () => {
       const rows = this.db
         .prepare(
-          `SELECT * FROM (SELECT d.id, d.event_id, d.pass_id, ${STALE_SQL} AS stale FROM pass_deliveries d JOIN passes p ON p.id = d.pass_id
+          `SELECT * FROM (SELECT d.id, d.event_id, d.pass_id, d.uncertain_since, ${STALE_SQL} AS stale FROM pass_deliveries d JOIN passes p ON p.id = d.pass_id
            LEFT JOIN redemptions r ON r.pass_id = d.pass_id WHERE d.status = 'queued') WHERE stale IS NOT NULL`
         )
         .all({ now: this.timestamp() }) as Row[];
-      for (const row of rows) this.close(row, 'cancelled', STALE_MESSAGE[row.stale as string], SYSTEM, row.stale as string);
+      for (const row of rows) this.close(row, 'cancelled', staleMessage(row), SYSTEM, row.stale as string);
       return rows.length;
     });
   }
@@ -385,23 +481,37 @@ export class PassDeliveries {
     return ((this.db.prepare("SELECT MIN(next_attempt_at) AS due FROM pass_deliveries WHERE status = 'queued'").get() as Row).due as string | null) ?? null;
   }
 
-  /** Moves the next due email to `sending` and returns it with its unsealed message. Stale or unreadable rows are closed on the way. */
+  /**
+   * Moves the next due email to `sending` and returns it with its unsealed
+   * message. Events with due emails take turns (the one served longest ago
+   * first, then the earliest due), so one large import does not hold back
+   * other events; within an event, emails go in queue order. Stale or
+   * unreadable rows, and rows that can no longer be repeated safely, are
+   * closed on the way without contacting the provider.
+   */
   claim(): DeliveryJob | null {
     const sealer = this.sealer;
     if (!sealer) return null;
     return transaction(this.db, () => {
       const now = this.timestamp();
+      const unsafeBefore = new Date(this.options.now().getTime() - SAFE_RETRY_WINDOW_MS).toISOString();
       for (;;) {
+        const eventId = this.nextEvent(now);
+        if (!eventId) return null;
         const row = this.db
           .prepare(
             `SELECT d.*, ${STALE_SQL} AS stale, p.attendee_name, e.name AS event_name, e.venue, e.time_zone, e.starts_at
              FROM pass_deliveries d JOIN passes p ON p.id = d.pass_id JOIN events e ON e.id = d.event_id LEFT JOIN redemptions r ON r.pass_id = d.pass_id
-             WHERE d.status = 'queued' AND d.next_attempt_at <= :now ORDER BY d.next_attempt_at, d.created_at LIMIT 1`
+             WHERE d.status = 'queued' AND d.event_id = :eventId AND d.next_attempt_at <= :now ORDER BY d.next_attempt_at, d.rowid LIMIT 1`
           )
-          .get({ now }) as Row | undefined;
-        if (!row) return null;
+          .get({ eventId, now }) as Row;
         if (row.stale) {
-          this.close(row, 'cancelled', STALE_MESSAGE[row.stale as string], SYSTEM, row.stale as string);
+          this.close(row, 'cancelled', staleMessage(row), SYSTEM, row.stale as string);
+          continue;
+        }
+        // The provider forgets the request id after 24 hours: repeating an attempt that may have reached it could send a second email.
+        if (row.uncertain_since && (row.uncertain_since as string) <= unsafeBefore) {
+          this.close(row, 'unconfirmed', WINDOW_PASSED, SYSTEM);
           continue;
         }
         const link = row.sealed_link ? sealer.open(row.sealed_link as Uint8Array, row.id as string, row.pass_id as string) : null;
@@ -417,8 +527,10 @@ export class PassDeliveries {
           this.close(row, 'failed', `The email could not be composed: ${error instanceof Error ? error.message : String(error)}`, SYSTEM);
           continue;
         }
-        this.db.prepare("UPDATE pass_deliveries SET status = 'sending', attempts = attempts + 1, updated_at = ? WHERE id = ?").run(now, row.id as string);
-        return { id: row.id as string, eventId: row.event_id as string, passId: row.pass_id as string, attempts: Number(row.attempts) + 1, message };
+        this.db.prepare("UPDATE pass_deliveries SET status = 'sending', attempts = attempts + 1, last_attempt_at = ?, updated_at = ? WHERE id = ?").run(now, now, row.id as string);
+        this.serves += 1;
+        this.served.set(eventId, this.serves);
+        return { id: row.id as string, eventId, passId: row.pass_id as string, attempts: Number(row.attempts) + 1, message };
       }
     });
   }
@@ -436,23 +548,44 @@ export class PassDeliveries {
     });
   }
 
-  markFailed(job: DeliveryJob, error: string): void {
-    transaction(this.db, () => {
-      const row = this.db.prepare("SELECT id, event_id, pass_id FROM pass_deliveries WHERE id = ? AND status = 'sending'").get(job.id) as Row | undefined;
-      if (row) this.close(row, 'failed', error, SYSTEM);
+  /**
+   * Final failure (refused, or out of attempts). `unconfirmed` when this
+   * attempt (`ambiguous`) or an earlier one may have reached the provider,
+   * `failed` when none can have. Returns the status recorded.
+   */
+  markFailed(job: DeliveryJob, error: string, ambiguous: boolean): 'failed' | 'unconfirmed' | null {
+    return transaction(this.db, () => {
+      const row = this.db
+        .prepare(
+          `UPDATE pass_deliveries SET uncertain_since = CASE WHEN ? THEN COALESCE(uncertain_since, last_attempt_at) ELSE uncertain_since END
+           WHERE id = ? AND status = 'sending' RETURNING id, event_id, pass_id, uncertain_since`
+        )
+        .get(ambiguous ? 1 : 0, job.id) as Row | undefined;
+      if (!row) return null;
+      if (!row.uncertain_since) {
+        this.close(row, 'failed', error, SYSTEM);
+        return 'failed';
+      }
+      this.close(row, 'unconfirmed', `${error} ${MAY_HAVE_SENT}`, SYSTEM);
+      return 'unconfirmed';
     });
   }
 
-  /** Back to the queue with the same id, due after `delayMs`. A throttled attempt (rate limit) is not counted. */
-  reschedule(job: DeliveryJob, error: string, delayMs: number, countAttempt: boolean): void {
+  /**
+   * Back to the queue with the same id, due after `delayMs`. A throttled
+   * attempt (rate limit) is not counted. An `ambiguous` attempt makes the row
+   * uncertain since that attempt started (unless it already was).
+   */
+  reschedule(job: DeliveryJob, error: string, delayMs: number, attempt: { counted: boolean; ambiguous: boolean }): void {
     transaction(this.db, () => {
       const now = this.now();
       this.db
         .prepare(
-          `UPDATE pass_deliveries SET status = 'queued', attempts = attempts - ?, next_attempt_at = ?, last_error = ?, updated_at = ?
+          `UPDATE pass_deliveries SET status = 'queued', attempts = attempts - ?, next_attempt_at = ?, last_error = ?, updated_at = ?,
+             uncertain_since = CASE WHEN ? THEN COALESCE(uncertain_since, last_attempt_at) ELSE uncertain_since END
            WHERE id = ? AND status = 'sending'`
         )
-        .run(countAttempt ? 0 : 1, new Date(now.getTime() + delayMs).toISOString(), truncate(error), now.toISOString(), job.id);
+        .run(attempt.counted ? 0 : 1, new Date(now.getTime() + delayMs).toISOString(), truncate(error), now.toISOString(), attempt.ambiguous ? 1 : 0, job.id);
     });
   }
 
@@ -462,6 +595,25 @@ export class PassDeliveries {
     const event = this.db.prepare('SELECT status FROM events WHERE id = ?').get(eventId) as Row | undefined;
     if (!event) throw httpError(404, 'Event not found');
     if (event.status === 'ended' || event.status === 'archived') throw httpError(409, `Passes of an ${event.status as string} event cannot be emailed.`);
+  }
+
+  /** Of the events with a due email, the one served longest ago (never served first), then the earliest due. */
+  private nextEvent(now: string): string | null {
+    const due = this.db
+      .prepare("SELECT event_id, MIN(next_attempt_at) AS due FROM pass_deliveries WHERE status = 'queued' GROUP BY event_id HAVING due <= ?")
+      .all(now) as Row[];
+    let best: { eventId: string; served: number; due: string } | null = null;
+    for (const row of due) {
+      const candidate = { eventId: row.event_id as string, served: this.served.get(row.event_id as string) ?? 0, due: row.due as string };
+      if (!best || candidate.served < best.served || (candidate.served === best.served && candidate.due < best.due)) best = candidate;
+    }
+    return best?.eventId ?? null;
+  }
+
+  /** Why this server cannot send waiting emails, or null. */
+  private pausedBy(): DeliveryPause | null {
+    if (!this.options.emailEnabled) return 'no_provider';
+    return this.sealer ? null : 'no_key';
   }
 
   /** Must run inside a transaction. */
@@ -477,7 +629,7 @@ export class PassDeliveries {
     const recipient = pass.attendee_email as string | null;
     if (!recipient) return 'no_email';
     if (this.db.prepare("SELECT 1 FROM pass_deliveries WHERE pass_id = ? AND status IN ('queued', 'sending')").get(passId)) return 'already_queued';
-    if (over.has(recipient.toLowerCase())) return 'recipient_limit';
+    if (over.has(foldCase(recipient))) return 'recipient_limit';
     let link: string;
     if (token !== undefined) {
       if (hashToken(token) !== pass.token_hash) return 'link_changed';
@@ -502,17 +654,21 @@ export class PassDeliveries {
     return deliveryId;
   }
 
-  /** Addresses (lower case) whose pass emails in the last 24 hours plus `recipients` would exceed the daily limit. */
+  /** Addresses (case-folded) whose pass emails in the last 24 hours plus `recipients` would exceed the daily limit. */
   private overRecipientLimit(recipients: string[]): Set<string> {
     const wanted = new Map<string, number>();
-    for (const recipient of recipients) wanted.set(recipient.toLowerCase(), (wanted.get(recipient.toLowerCase()) ?? 0) + 1);
+    for (const recipient of recipients) wanted.set(foldCase(recipient), (wanted.get(foldCase(recipient)) ?? 0) + 1);
     if (wanted.size === 0) return new Set();
     const since = new Date(this.now().getTime() - DAY_MS).toISOString();
+    // Only the addresses asked about, through pass_deliveries_recipient_idx: this runs inside the issuance transaction.
     const sent = new Map(
-      (this.db.prepare('SELECT lower(recipient) AS recipient, COUNT(*) AS n FROM pass_deliveries WHERE created_at > ? GROUP BY lower(recipient)').all(since) as Row[]).map((row) => [
-        row.recipient as string,
-        Number(row.n)
-      ])
+      (
+        this.db
+          .prepare(
+            'SELECT lower(recipient) AS recipient, COUNT(*) AS n FROM pass_deliveries WHERE lower(recipient) IN (SELECT value FROM json_each(?)) AND created_at > ? GROUP BY lower(recipient)'
+          )
+          .all(JSON.stringify([...wanted.keys()]), since) as Row[]
+      ).map((row) => [row.recipient as string, Number(row.n)])
     );
     return new Set([...wanted].filter(([recipient, count]) => (sent.get(recipient) ?? 0) + count > RECIPIENT_DAILY_LIMIT).map(([recipient]) => recipient));
   }
@@ -531,14 +687,15 @@ export class PassDeliveries {
   }
 
   /** Final state: the sealed link is erased in the same statement. */
-  private close(row: Row, status: 'failed' | 'cancelled', message: string, actor: string, reason?: string): void {
+  private close(row: Row, status: 'failed' | 'cancelled' | 'unconfirmed', message: string, actor: string, reason?: string): void {
     const closed = this.db
-      .prepare('UPDATE pass_deliveries SET status = ?, sealed_link = NULL, next_attempt_at = NULL, last_error = ?, updated_at = ? WHERE id = ? RETURNING attempts')
+      .prepare('UPDATE pass_deliveries SET status = ?, sealed_link = NULL, next_attempt_at = NULL, last_error = ?, updated_at = ? WHERE id = ? RETURNING attempts, uncertain_since')
       .get(status, truncate(message), this.timestamp(), row.id as string) as Row;
-    this.audit(row.event_id as string, actor, status === 'failed' ? 'pass.email_failed' : 'pass.email_cancelled', row.pass_id as string, {
+    this.audit(row.event_id as string, actor, `pass.email_${status}`, row.pass_id as string, {
       deliveryId: row.id,
       attempts: Number(closed.attempts),
-      ...(status === 'failed' ? { error: truncate(message) } : { reason })
+      ...(status === 'cancelled' ? { reason } : { error: truncate(message) }),
+      ...(status === 'unconfirmed' ? { uncertainSince: closed.uncertain_since } : {})
     });
   }
 
@@ -562,6 +719,11 @@ function truncate(message: string): string {
   return message.length > MAX_ERROR ? `${message.slice(0, MAX_ERROR - 1)}…` : message;
 }
 
+/** Addresses are counted case-insensitively the way SQLite's lower() folds them: ASCII letters only. */
+function foldCase(address: string): string {
+  return address.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+}
+
 function toDelivery(row: Row): PassDelivery {
   return {
     id: row.id as string,
@@ -571,6 +733,8 @@ function toDelivery(row: Row): PassDelivery {
     status: row.status as DeliveryStatus,
     attempts: Number(row.attempts),
     nextAttemptAt: (row.next_attempt_at as string | null) ?? null,
+    lastAttemptAt: (row.last_attempt_at as string | null) ?? null,
+    uncertainSince: (row.uncertain_since as string | null) ?? null,
     lastError: (row.last_error as string | null) ?? null,
     providerId: (row.provider_id as string | null) ?? null,
     createdAt: row.created_at as string,
@@ -605,7 +769,7 @@ function passEmail(row: Row, link: string): MailMessage {
 export interface DeliveryWorkerOptions {
   /** Provider requests per second at most. */
   perSecond: number;
-  /** Counted attempts before an email is marked failed. */
+  /** Counted attempts before an email is closed (`failed`, or `unconfirmed` when an attempt may have reached the provider). */
   maxAttempts: number;
   /** Longest wait between checks when nothing is due (stale rows are also swept this often). */
   idleMs?: number;
@@ -620,10 +784,33 @@ export function backoffMs(attempts: number): number {
 }
 
 /**
+ * Worker-wide pause after `consecutive` rate-limit answers in a row: 1 s,
+ * 2 s, 4 s … capped at 10 minutes, or longer when the provider asks. An
+ * exhausted daily or monthly quota answers 429 to every request until it
+ * resets; this keeps the worker from asking once a second meanwhile.
+ */
+function throttleWaitMs(consecutive: number, retryAfterMs: number | undefined): number {
+  return Math.max(retryAfterMs ?? 0, Math.min(1_000 * 2 ** (consecutive - 1), 600_000));
+}
+
+/**
+ * Server start-up: the worker when this server can send pass emails (start
+ * it once listening). Without one, emails a crash left in `sending` are
+ * queued again anyway, so they read as waiting while sending is paused
+ * (`DeliveryList.paused`) and organizers can cancel them.
+ */
+export function deliveryWorkerFor(outbox: PassDeliveries, mailer: Mailer, options: DeliveryWorkerOptions): DeliveryWorker | null {
+  if (outbox.available) return new DeliveryWorker(outbox, mailer, options);
+  outbox.recoverInterrupted();
+  return null;
+}
+
+/**
  * Sends due pass emails one at a time, at most `perSecond` provider requests
- * a second. `stop()` stops claiming and resolves once the email in flight has
- * been recorded; `abort()` cancels that request (recorded as an ambiguous
- * attempt, retried with the same idempotency key) so shutdown stays bounded.
+ * a second, taking events in turn. `stop()` stops claiming and resolves once
+ * the email in flight has been recorded; `abort()` cancels that request
+ * (recorded as an ambiguous attempt, retried with the same idempotency key
+ * within the provider's window) so shutdown stays bounded.
  */
 export class DeliveryWorker {
   private stopping = false;
@@ -633,6 +820,8 @@ export class DeliveryWorker {
   private stopWake: (() => void) | null = null;
   private nextStartAt = 0;
   private lastSweepAt = Number.NEGATIVE_INFINITY;
+  /** Rate-limit answers in a row; any other answer resets it. */
+  private throttled = 0;
   private readonly log: (entry: Record<string, unknown>) => void;
 
   constructor(
@@ -643,11 +832,16 @@ export class DeliveryWorker {
     this.log = options.log ?? ((entry) => console.log(JSON.stringify(entry)));
   }
 
-  /** Re-queues rows a crash left in `sending`, then runs until `stop()`. */
+  /** Re-queues rows a crash left in `sending`, re-seals waiting links after a key rotation, then runs until `stop()`. */
   start(): void {
     if (this.loop || this.stopping) return;
     const recovered = this.outbox.recoverInterrupted();
     if (recovered) this.log({ level: 'warn', msg: 'pass emails interrupted by a restart were queued again', count: recovered });
+    const { resealed, unreadable } = this.outbox.resealWaiting();
+    if (resealed || unreadable) {
+      // Counts only: once a deploy logs nothing here, PASS_DELIVERY_PREVIOUS_KEYS can be removed.
+      this.log({ level: unreadable ? 'warn' : 'info', msg: 'pass email links re-sealed under the active key', resealed, unreadable });
+    }
     this.outbox.onQueued(() => this.notify());
     this.loop = this.run();
   }
@@ -688,7 +882,7 @@ export class DeliveryWorker {
       result = await attemptSend(this.mailer, job.message, controller.signal);
     } catch (error) {
       this.log({ level: 'error', msg: 'pass email send threw', deliveryId: job.id, error: error instanceof Error ? error.name : 'unknown' });
-      result = { status: 'retry', error: 'The email provider could not be reached.' };
+      result = { status: 'retry', error: 'The email provider could not be reached.', ambiguous: true };
     } finally {
       this.inFlight = null;
     }
@@ -698,24 +892,26 @@ export class DeliveryWorker {
 
   private settle(job: DeliveryJob, result: MailAttempt, interrupted: boolean): void {
     if (result.status === 'accepted') {
+      this.throttled = 0;
       this.outbox.markAccepted(job, result.providerId);
       return;
     }
     let outcome: string;
-    if (result.status === 'refused') {
-      this.outbox.markFailed(job, result.error);
-      outcome = 'failed';
-    } else if (result.throttled) {
-      const wait = result.retryAfterMs ?? 1000;
-      this.outbox.reschedule(job, result.error, wait, false);
+    if (result.status === 'retry' && result.throttled) {
+      this.throttled += 1;
+      const wait = throttleWaitMs(this.throttled, result.retryAfterMs);
+      this.outbox.reschedule(job, result.error, wait, { counted: false, ambiguous: false });
       this.nextStartAt = Math.max(this.nextStartAt, performance.now() + wait);
       outcome = 'throttled';
-    } else if (job.attempts >= this.options.maxAttempts) {
-      this.outbox.markFailed(job, `${result.error} Gave up after ${job.attempts} attempts.`);
-      outcome = 'failed';
     } else {
-      this.outbox.reschedule(job, result.error, interrupted ? 0 : backoffMs(job.attempts), true);
-      outcome = 'retry';
+      this.throttled = 0;
+      const ambiguous = result.status === 'retry' && result.ambiguous;
+      if (result.status === 'refused') outcome = this.outbox.markFailed(job, result.error, false) ?? 'gone';
+      else if (job.attempts >= this.options.maxAttempts) outcome = this.outbox.markFailed(job, `${result.error} Gave up after ${job.attempts} attempts.`, ambiguous) ?? 'gone';
+      else {
+        this.outbox.reschedule(job, result.error, interrupted ? 0 : backoffMs(job.attempts), { counted: true, ambiguous });
+        outcome = 'retry';
+      }
     }
     this.log({ level: 'warn', msg: 'pass email not accepted', deliveryId: job.id, attempt: job.attempts, outcome });
   }
