@@ -40,7 +40,8 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run smoke:qr
-      - run: npm audit --audit-level=high
+      # High and critical advisories fail the build; reviewed dev-only exceptions expire (scripts/audit.mjs).
+      - run: npm run audit:ci
 
   e2e:
     runs-on: ubuntu-latest
