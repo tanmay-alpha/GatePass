@@ -23,7 +23,11 @@ export const attendeeQuerySchema = z.object({
 
 const HEX_PREFIX = /^[0-9a-f]{3,8}$/i;
 const LIKE_ESCAPE = /[\\%_]/g;
+const ASCII = /^[\x00-\x7f]*$/;
+const WORD_SEPARATOR = /[\s-]/;
 const LOOKUP_ACTION = 'scanner.attendee_lookup';
+/** SQL function, registered on the connection, for query words with non-ASCII letters (see `search`). */
+const UNICODE_MATCH_SQL = 'gatepass_name_words_start';
 
 type Row = Record<string, unknown>;
 
@@ -53,7 +57,19 @@ export class AttendeeAssist {
     private readonly db: Database,
     private readonly access: AccessControl,
     private readonly now: () => Date
-  ) {}
+  ) {
+    // 1 when each space-separated word of `words` (lower-case) starts a word of `name`, in JavaScript's Unicode case folding.
+    db.function(UNICODE_MATCH_SQL, { deterministic: true }, (name, words) => {
+      if (typeof name !== 'string' || typeof words !== 'string') return 0;
+      const folded = name.toLowerCase();
+      return words.split(' ').every((word) => {
+        for (let at = folded.indexOf(word); at !== -1; at = folded.indexOf(word, at + 1)) if (at === 0 || WORD_SEPARATOR.test(folded[at - 1])) return true;
+        return false;
+      })
+        ? 1
+        : 0;
+    });
+  }
 
   search(scanner: AuthenticatedScanner, query: string): AttendeeSearch {
     const q = query.trim();
@@ -62,16 +78,26 @@ export class AttendeeAssist {
     this.assertBudget(scanner, at);
 
     const reference = HEX_PREFIX.test(q) ? q.toLowerCase() : null;
-    const words = [...new Set(q.toLowerCase().split(/\s+/))].slice(0, MAX_WORDS);
-    // `' ' || name` with hyphens as spaces: each word of the query must start a word of the name ("lov" finds "Ada Lovelace", "luc" finds "Jean-Luc").
-    const nameMatch = words.map((_, i) => `(' ' || replace(p.attendee_name, '-', ' ')) LIKE :w${i} ESCAPE '\\'`).join(' AND ');
+    // Each word of the query must start a word of the name ("lov" finds "Ada Lovelace"); hyphens separate words on
+    // both sides, so "luc" and "Jean-Luc" both find "Jean-Luc Picard".
+    const words = [...new Set(q.toLowerCase().split(/[\s-]+/).filter(Boolean))].slice(0, MAX_WORDS);
+    // SQLite's LIKE folds the case of ASCII letters only: a lower-cased "émile" or "анна" never matches the stored
+    // "Émile" or "Анна". ASCII words keep the fast LIKE; words with other letters go through the JavaScript
+    // function, after the LIKE terms, so it runs only on the rows they leave (on every row when all words need it).
+    const ascii = words.filter((word) => ASCII.test(word));
+    const unicode = words.filter((word) => !ASCII.test(word));
+    const nameTerms = [
+      ...ascii.map((_, i) => `(' ' || replace(p.attendee_name, '-', ' ')) LIKE :w${i} ESCAPE '\\'`),
+      ...(unicode.length ? [`${UNICODE_MATCH_SQL}(p.attendee_name, :unicode)`] : [])
+    ];
     const params: Record<string, string | number | null> = {
       eventId: scanner.eventId,
       email: q.includes('@') ? q.toLowerCase() : null,
       reference,
       limit: ASSIST_MAX_RESULTS + 1
     };
-    words.forEach((word, i) => (params[`w${i}`] = `% ${word.replace(LIKE_ESCAPE, (c) => `\\${c}`)}%`));
+    ascii.forEach((word, i) => (params[`w${i}`] = `% ${word.replace(LIKE_ESCAPE, (c) => `\\${c}`)}%`));
+    if (unicode.length) params.unicode = unicode.join(' ');
     // No ORDER BY: the scan stops at the first match too many, so a broad query costs no more than a narrow one.
     // `+o.event_id` keeps the reference count on the id range (a few rows) instead of every pass of the event.
     const rows = this.db
@@ -82,7 +108,7 @@ export class AttendeeAssist {
                 (SELECT COUNT(*) FROM passes o WHERE +o.event_id = p.event_id AND o.id >= substr(p.id, 1, 8) AND o.id < substr(p.id, 1, 8) || 'g') AS same_reference
          FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id
          WHERE p.event_id = :eventId
-           AND ((${nameMatch})
+           AND ((${nameTerms.length ? nameTerms.join(' AND ') : '0'})
                 OR (:email IS NOT NULL AND lower(p.attendee_email) = :email)
                 OR (:reference IS NOT NULL AND p.id >= :reference AND p.id < :reference || 'g'))
          LIMIT :limit`

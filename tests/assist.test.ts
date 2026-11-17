@@ -100,9 +100,34 @@ describe('door attendee search', () => {
     expect(await names('da ove')).toEqual([]);
   });
 
+  it('matches a hyphenated name typed as written, and names starting with non-ASCII capitals, in any case', async () => {
+    const { event, scannerKey } = await door();
+    await h
+      .admin(request(h.app).post(`/api/events/${event.id}/passes`))
+      .send({ attendees: [{ name: 'Jean-Luc Picard' }, { name: 'Émile Zola' }, { name: 'Анна Каренина' }, { name: 'ŁUKASZ NOWAK' }] })
+      .expect(201);
+    const names = async (q: string) => (await find(scannerKey, q).expect(200)).body.matches.map((m: { attendeeName: string }) => m.attendeeName);
+    expect(await names('Jean-Luc')).toEqual(['Jean-Luc Picard']);
+    expect(await names('jean-luc pic')).toEqual(['Jean-Luc Picard']);
+    expect(await names('Émile')).toEqual(['Émile Zola']);
+    expect(await names('émile zo')).toEqual(['Émile Zola']);
+    expect(await names('Анна')).toEqual(['Анна Каренина']);
+    expect(await names('карен')).toEqual(['Анна Каренина']);
+    expect(await names('łukasz')).toEqual(['ŁUKASZ NOWAK']);
+    // Still word starts only.
+    expect(await names('mile')).toEqual([]);
+    expect(await names('арен')).toEqual([]);
+  });
+
+  it('refuses a whitespace-only query like a short one', async () => {
+    const { scannerKey } = await door();
+    expect((await find(scannerKey, '      ').expect(400)).body.error).toContain('at least 3 characters');
+    expect((await find(scannerKey, '\t\t\t\t').expect(400)).body.error).toContain('at least 3 characters');
+  });
+
   it('answers adversarial queries without errors, wildcards or matches from other events', async () => {
     const { scannerKey } = await door();
-    for (const q of ['%%%', '___', '\\\\\\', "'; DROP TABLE passes; --", 'x'.repeat(100), '🙂🙂🙂', 'Ādá Łovelace', 'a b c d e f g h i j k', '%a%', 'a_a']) {
+    for (const q of ['%%%', '___', '\\\\\\', "'; DROP TABLE passes; --", 'x'.repeat(100), '🙂🙂🙂', 'Ādá Łovelace', 'a b c d e f g h i j k', '%a%', 'a_a', '---', '-- --']) {
       const body = (await find(scannerKey, q).expect(200)).body;
       expect(body, q).toEqual({ matches: [], more: false });
     }
