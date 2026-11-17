@@ -5,3 +5,7 @@
 # loadConfig() in the configuration test. Never a real key; replaced by a run-time placeholder since.
 621ab3c06d7114340b24c12967011d18e9162867:tests/account-recovery.test.ts:generic-api-key:332
 621ab3c06d7114340b24c12967011d18e9162867:tests/account-recovery.test.ts:generic-api-key:333
+#
+# Commit 24db7ee, docs/deployment-runbook.md: prose ("the key enrolled on v5, `gatepass.db.pre-v6.bak`") read as a
+# generic API key; the flagged value is a backup file name. Reworded in the next commit.
+24db7ee16493348bd9dba586cc73fcdefa107ab7:docs/deployment-runbook.md:generic-api-key:211
