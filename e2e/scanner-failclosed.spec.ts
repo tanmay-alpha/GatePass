@@ -212,6 +212,19 @@ test('re-opening a used setup link on a working scanner keeps its key: the phone
   await expect(verdict(page)).toHaveAccessibleName('Admit');
 });
 
+test('opening an older key link with an invalid key on a working scanner keeps its key: the phone can still scan', async ({ page }) => {
+  const door = await openDoor(page);
+  await page.goto('about:blank');
+  await page.goto(`/scan#key=gps_${'x'.repeat(43)}`);
+
+  await page.getByRole('alertdialog', { name: "Replace this scanner's setup?" }).getByRole('button', { name: 'Use the new setup' }).click();
+  await expect(page.getByText('this phone keeps its current setup')).toBeVisible();
+  await page.getByRole('button', { name: 'Continue with the current setup' }).click();
+
+  await scan(page, door.passes[0].passUrl);
+  await expect(verdict(page)).toHaveAccessibleName('Admit');
+});
+
 test('a device revoked mid-session is signed out at its next server answer (401), without admitting', async ({ page }) => {
   const door = await openDoor(page);
   await page.route(REDEEM, (route) => route.abort('failed'));
