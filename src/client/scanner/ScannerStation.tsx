@@ -4,7 +4,7 @@ import { isDiagnosticPayload, isValidDiagnosticCode } from '../../shared/diagnos
 import type { EventStatus, ScanMethod, ScannerSession, ScanResult } from '../../shared/types';
 import { api, ApiError } from '../api';
 import { useConfirm } from '../dialog';
-import { createQrDetector, type DecoderPath, type QrDetector } from '../qr-detector';
+import type { DecoderPath, QrDetector } from '../qr-detector';
 import { ErrorNote } from '../ui';
 import { AttendeeFinder } from './AttendeeFinder';
 import { beep, loadMuted, saveMuted, unlockAudio } from './beep';
@@ -263,7 +263,8 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
         setStreaming(true);
         // Device labels are only readable once permission was granted.
         listCameras(navigator.mediaDevices).then((found) => !stopped && setCameras(found), () => undefined);
-        detectorRef.current ??= await createQrDetector();
+        // The decoder (and its WebAssembly fallback) is its own chunk, fetched when a camera first starts.
+        detectorRef.current ??= await (await import('../qr-detector')).createQrDetector();
         const detector = detectorRef.current;
         setDecoderPath(detector.path);
         const tick = async () => {
@@ -378,23 +379,40 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
     };
   }, [online, scannerKey, onUnauthorized]);
 
-  // Back online: check the connection straight away rather than at the next heartbeat.
+  // Back online, or back on screen (screen unlocked, app reopened from the background or the
+  // back/forward cache): check the session straight away rather than at the next heartbeat, so a
+  // device revoked, moved to another gate or whose event closed meanwhile does not keep showing
+  // the old setup. Scans are always judged by the server; this keeps the screen honest too.
+  const recheck = useCallback(() => {
+    api<ScannerSession>('/api/scanner/session', { bearer: scannerKey, timeoutMs: HEARTBEAT_TIMEOUT_MS }).then(
+      (value) => {
+        setSession(value);
+        setQuality('good');
+      },
+      (err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) onUnauthorized();
+        else setQuality('slow');
+      }
+    );
+  }, [scannerKey, onUnauthorized]);
   const wasOnline = useRef(online);
   useEffect(() => {
-    if (online && !wasOnline.current) {
-      api<ScannerSession>('/api/scanner/session', { bearer: scannerKey, timeoutMs: HEARTBEAT_TIMEOUT_MS }).then(
-        (value) => {
-          setSession(value);
-          setQuality('good');
-        },
-        (err: unknown) => {
-          if (err instanceof ApiError && err.status === 401) onUnauthorized();
-          else setQuality('slow');
-        }
-      );
-    }
+    if (online && !wasOnline.current) recheck();
     wasOnline.current = online;
-  }, [online, scannerKey, onUnauthorized]);
+  }, [online, recheck]);
+  useEffect(() => {
+    const resume = (event: Event) => {
+      if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+      if (event.type === 'pageshow' && !(event as PageTransitionEvent).persisted) return;
+      recheck();
+    };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('pageshow', resume);
+    return () => {
+      document.removeEventListener('visibilitychange', resume);
+      window.removeEventListener('pageshow', resume);
+    };
+  }, [recheck]);
 
   useEffect(
     () => () => {
