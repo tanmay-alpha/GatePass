@@ -164,4 +164,32 @@ describe('scripts/release-check.ts', () => {
     const result = await run({ GATED_COMMIT: NEW });
     expect(result.code).toBe(2);
   });
+
+  // Vercel Deployment Protection (Vercel Authentication) answers an anonymous
+  // request with a 302 to vercel.com/sso-api, not 401/403: seen on the PR #15
+  // previews on 2026-11-17.
+  it('treats a Vercel SSO redirect on the preview as protected, but not any other redirect', async () => {
+    serve(NEW);
+    let location = '';
+    const preview = createServer((_req, res) => {
+      res.writeHead(302, { Location: location });
+      res.end();
+    });
+    const { promise, resolve } = Promise.withResolvers<string>();
+    preview.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(preview.address() as AddressInfo).port}`));
+    const previewUrl = await promise;
+    try {
+      location = 'https://vercel.com/sso-api?url=https%3A%2F%2Fx.vercel.app%2Fapi%2Fhealth&nonce=n';
+      const sso = await run({ PREVIEW_URL: previewUrl });
+      expect(sso.stdout).toMatch(/PASS {2}preview deployment does not reach a backend: HTTP 302/);
+      expect(sso.code).toBe(0);
+
+      location = 'https://example.com/elsewhere';
+      const other = await run({ PREVIEW_URL: previewUrl });
+      expect(other.stdout).toMatch(/FAIL {2}preview deployment does not reach a backend: HTTP 302/);
+      expect(other.code).toBe(1);
+    } finally {
+      preview.close();
+    }
+  });
 });
