@@ -168,6 +168,100 @@ describe('streamed CSV exports', () => {
     }
     expect(exportEntries(eventId)).toEqual([]);
   });
+
+  it('answers door redemptions and the dashboard between the chunks of a large export streaming to a slow client', async () => {
+    const { eventId, scanners, live } = seedEvent(h.db, { passes: 25_000, now: h.clock.now(), seed: 11 });
+    // When the server reads each chunk of the export.
+    const chunkTimes: number[] = [];
+    const open = h.service.openExport.bind(h.service);
+    vi.spyOn(h.service, 'openExport').mockImplementation(async (...args) => {
+      const exported = await open(...args);
+      return { ...exported, next: () => (chunkTimes.push(performance.now()), exported.next()) };
+    });
+    const server = http.createServer(h.app).listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    const { port } = server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      // The client reads the export slowly (a phone on venue Wi-Fi), so the server streams it over many turns. A real
+      // delay on purpose: the subject is how the server interleaves socket back-pressure with other requests.
+      const { promise: downloading, resolve: firstBytes } = Promise.withResolvers<void>();
+      const { promise: exported, resolve, reject } = Promise.withResolvers<string>();
+      const req = http.get({ port, host: '127.0.0.1', path: exportPath(eventId, 'attendance'), headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } });
+      req.on('error', reject);
+      req.on('response', (res) => {
+        const parts: Buffer[] = [];
+        res.once('data', () => firstBytes());
+        res.on('data', (chunk: Buffer) => {
+          parts.push(chunk);
+          res.pause();
+          setTimeout(() => res.resume(), 2);
+        });
+        res.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
+      });
+      await downloading;
+
+      const latencies: number[] = [];
+      const answeredAt: number[] = [];
+      const doors = (async () => {
+        for (const pass of live.slice(0, 40)) {
+          const started = performance.now();
+          const response = await fetch(`${base}/api/scanner/redeem`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${scanners[10].key}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: pass.token })
+          });
+          expect((await response.json()).outcome).toBe('admitted');
+          latencies.push(performance.now() - started);
+          answeredAt.push(performance.now());
+        }
+      })();
+      const dashboards = Promise.all(
+        Array.from({ length: 3 }, async () => {
+          const response = await fetch(`${base}/api/events/${eventId}/operations`, { headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } });
+          expect(response.status).toBe(200);
+        })
+      );
+      const [body] = await Promise.all([exported, doors, dashboards]);
+
+      // The server kept producing the export while it answered the doors: most redemptions came between two chunks
+      // (a synchronous export would have produced every row before the first redemption was read).
+      const between = answeredAt.filter((at) => at > chunkTimes[0] && at < chunkTimes.at(-1)!);
+      expect(between.length).toBeGreaterThan(30);
+      // Generous bound for a loaded CI machine: the door never waits for a whole export or dashboard pass.
+      expect(Math.max(...latencies)).toBeLessThan(1_000);
+      const [header, ...rows] = parseCsv(body);
+      expect(header[0]).toBe('pass_id');
+      expect(rows).toHaveLength(25_000);
+      expect(exportEntries(eventId)[0].details).toEqual({ kind: 'attendance', rows: 25_000 });
+      expect(Number((h.db.prepare('SELECT COUNT(*) AS n FROM redemptions r JOIN passes p ON p.id = r.pass_id WHERE p.event_id = ?').get(eventId) as Row).n)).toBe(
+        Number((h.db.prepare("SELECT COUNT(*) AS n FROM scans WHERE event_id = ? AND outcome = 'admitted'").get(eventId) as Row).n)
+      );
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }, 60_000);
+
+  it('neutralises formula payloads in attendee names end to end, and the file parses back to the stored names', async () => {
+    const event = (await h.admin(request(h.app).post('/api/events')).send({ name: '=cmd|\' /C calc\'!A0', startsAt: '2030-06-01T18:00:00.000Z', endsAt: '2030-06-01T23:00:00.000Z' }).expect(201))
+      .body;
+    const payloads = ["=cmd|' /C calc'!A0", '@SUM(1)', '\t=1+1', '\r=1+1', '＝1+1', '-2+3', '+1', ' =1+1', 'Bob;=1+1', 'Ada "Countess" Lovelace, Esq.'];
+    await h
+      .admin(request(h.app).post(`/api/events/${event.id}/passes`))
+      .send({ attendees: payloads.map((name) => ({ name })) })
+      .expect(201);
+    const stored = (h.db.prepare('SELECT attendee_name FROM passes WHERE event_id = ? ORDER BY rowid').all(event.id) as Array<{ attendee_name: string }>).map((row) => row.attendee_name);
+    for (const kind of ['attendance', 'summary'] as const) {
+      const [, ...rows] = parseCsv(await download(event.id, kind));
+      for (const row of rows) {
+        for (const cell of row) expect(cell, `${kind}: ${JSON.stringify(cell)}`).not.toMatch(/^(?:[\t\r]|\s*[=+\-@\uFF1D\uFF0B\uFF0D\uFF20])/);
+      }
+      if (kind === 'attendance') {
+        // A cell is the stored value, with a leading apostrophe only where a spreadsheet would run it.
+        expect(rows.map((row) => row[2].replace(/^'/, ''))).toEqual(stored);
+      }
+    }
+  });
 });
 
 describe('streamCsv', () => {
