@@ -36,7 +36,11 @@ test('a first-time organiser is guided from a new event to "Ready for doors"', a
   await expect(page.getByLabel('Device label')).toBeFocused();
   await page.getByLabel('Device label').fill('Front door phone');
   await page.getByRole('button', { name: 'Add device' }).click();
-  const setupLink = await page.getByRole('region', { name: 'Setup for Front door phone' }).getByLabel('Setup link').inputValue();
+  const devicePanel = page.getByRole('region', { name: 'Setup for Front door phone' });
+  // On a phone the panel stacks far below the button; it is brought into view and takes focus.
+  await expect(devicePanel.getByRole('heading', { name: 'Set up “Front door phone”' })).toBeInViewport();
+  await expect(devicePanel).toBeFocused();
+  const setupLink = await devicePanel.getByLabel('Setup link').inputValue();
   // A device that has not opened its link cannot scan yet, so the step stays open…
   await expect(setup).toContainText('4 of 7');
   await expect(setup).toContainText('no phone has opened its setup link yet');
