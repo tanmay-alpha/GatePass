@@ -1,12 +1,13 @@
 import { Ban, KeyRound, Plus, Smartphone } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import type { EventSummary, Gate, Scanner, ScannerSetupLink } from '../../shared/types';
-import { useConfirm } from '../dialog';
+import type { AdmissionPolicy, EventSummary, Gate, Scanner, ScannerSetupLink } from '../../shared/types';
+import { Consequences, useConfirm } from '../dialog';
 import { ErrorNote, SectionHead, TableMessage, ToneBadge, errorMessage } from '../ui';
-import { formatShortInZone, zoneLabel } from '../time';
+import { formatShortInZone, formatTimeInZone, zoneLabel } from '../time';
 import { CopyField } from './CopyField';
-import { LIVE_POLL_MS, usePolling, useResource } from './hooks';
+import { LIVE_POLL_MS, usePolling, type Resource } from './hooks';
 import { adminApi, adminQrUrl } from './http';
+import { canScan, deviceStop, doorsOpen } from './live-impact';
 import { can } from './model';
 import { ScannerTestCode } from './ScannerTestCode';
 import { useToast } from './toast';
@@ -34,9 +35,17 @@ const setupOf = (result: ScannerSetupLink, rotated: boolean): Setup => ({
   rotated
 });
 
+interface Props {
+  event: EventSummary;
+  gates: Gate[];
+  /** Policy windows widen the time the doors are open. */
+  policies: AdmissionPolicy[];
+  scanners: Resource<Scanner[]>;
+  onChanged: () => Promise<void>;
+}
+
 /** Door devices: each gets its own event-scoped key, optionally bound to one gate. */
-export function ScannersSection({ event, gates, onChanged }: { event: EventSummary; gates: Gate[]; onChanged: () => Promise<void> }) {
-  const scanners = useResource<Scanner[]>(`/api/events/${event.id}/scanners`);
+export function ScannersSection({ event, gates, policies, scanners, onChanged }: Props) {
   const [label, setLabel] = useState('');
   const [gateId, setGateId] = useState('');
   const [setup, setSetup] = useState<Setup | null>(null);
@@ -86,12 +95,20 @@ export function ScannersSection({ event, gates, onChanged }: { event: EventSumma
     }
   }
 
+  /** While the doors are open, taking a working device away is confirmed against what it means for its door. */
+  function stopsDoor(scanner: Scanner): string[] {
+    return doorsOpen(event, policies) && canScan(scanner) ? deviceStop(scanner, scanners.data ?? [], (iso) => formatTimeInZone(iso, zone)) : [];
+  }
+
   async function revoke(scanner: Scanner) {
+    const impact = stopsDoor(scanner);
+    const lead = 'The device is signed out on its next request and cannot scan again with this key. Its past scans stay in the history. To use the device again, add it as a new scanner.';
     const ok = await confirm({
-      title: `Revoke “${scanner.label}”?`,
-      body: 'The device is signed out on its next request and cannot scan again with this key. Its past scans stay in the history. To use the device again, add it as a new scanner.',
+      title: impact.length ? `Revoke “${scanner.label}” while the doors are open?` : `Revoke “${scanner.label}”?`,
+      body: impact.length ? <Consequences lead={lead} items={impact} /> : lead,
       confirmLabel: 'Revoke device',
-      danger: true
+      danger: true,
+      acknowledge: impact.length ? 'I understand this device stops admitting now.' : undefined
     });
     if (!ok) return;
     setPending(scanner.id);
@@ -109,12 +126,15 @@ export function ScannersSection({ event, gates, onChanged }: { event: EventSumma
 
   async function rotate(scanner: Scanner) {
     const enrolled = scanner.setup === 'enrolled' || scanner.setup === 'legacy';
+    const impact = stopsDoor(scanner);
+    const lead = enrolled
+      ? 'The current key stops working immediately and the device is signed out on its next scan. You get a new one-time setup link to open on the device. History and gate binding stay the same.'
+      : 'Any earlier setup link for this device stops working. History and gate binding stay the same.';
     const ok = await confirm({
       title: enrolled ? `Replace the key for “${scanner.label}”?` : `New setup link for “${scanner.label}”?`,
-      body: enrolled
-        ? 'The current key stops working immediately and the device is signed out on its next scan. You get a new one-time setup link to open on the device. History and gate binding stay the same.'
-        : 'Any earlier setup link for this device stops working. History and gate binding stay the same.',
-      confirmLabel: enrolled ? 'Rotate key' : 'Create link'
+      body: impact.length ? <Consequences lead={lead} items={impact} /> : lead,
+      confirmLabel: enrolled ? 'Rotate key' : 'Create link',
+      acknowledge: impact.length ? 'I understand this device stops admitting until it is set up again.' : undefined
     });
     if (!ok) return;
     setPending(scanner.id);
@@ -238,6 +258,14 @@ function ScannerState({ scanner, zone }: { scanner: Scanner; zone: string }) {
 
 function ScannerSetup({ label, gateName, setupUrl, expiresAt, rotated, onClose }: Setup & { onClose: () => void }) {
   const [src, setSrc] = useState('');
+  const panel = useRef<HTMLElement>(null);
+
+  // On a phone the panel stacks below the device list and the camera test code, out of sight of the button
+  // that opened it: bring it into view and move focus to it, so the link and its Copy button come next.
+  useEffect(() => {
+    panel.current?.scrollIntoView({ block: 'nearest' });
+    panel.current?.focus({ preventScroll: true });
+  }, [setupUrl]);
   const [qrError, setQrError] = useState('');
 
   useEffect(() => {
@@ -257,7 +285,7 @@ function ScannerSetup({ label, gateName, setupUrl, expiresAt, rotated, onClose }
   }, [setupUrl]);
 
   return (
-    <section className="card setup" role="region" aria-label={`Setup for ${label}`}>
+    <section ref={panel} className="card setup" role="region" aria-label={`Setup for ${label}`} tabIndex={-1}>
       <SectionHead title={rotated ? `New key for “${label}”` : `Set up “${label}”`} description={gateName ?? 'Any gate'} />
       <div className="setup-qr">{src ? <img src={src} alt={`Setup QR code for ${label}`} /> : <div className="qr-placeholder">{qrError ? <span className="small">{qrError}</span> : null}</div>}</div>
       <p className="muted small setup-note">
