@@ -218,11 +218,12 @@ describe('scanner PWA', () => {
 
   /**
    * Runs sw.js with a precache list written in (as the build's scannerPrecache plugin does) over
-   * in-memory caches. `existing` names caches left by earlier versions.
+   * in-memory caches. `existing` names caches left by earlier versions; `assets` fills this version's asset cache, oldest first.
    */
-  function installableWorker(precache: string[], existing: string[] = []) {
+  function installableWorker(precache: string[], existing: string[] = [], assets: string[] = []) {
     const handlers: Record<string, Handler> = {};
     const stores = new Map<string, Map<string, unknown>>(existing.map((name) => [name, new Map()]));
+    if (assets.length) stores.set('gatepass-assets-v2', new Map(assets.map((asset) => [new URL(asset, PUBLIC_URL).href, {}])));
     const url = (input: string | { url: string }) => (typeof input === 'string' ? input : input.url);
     const open = async (name: string) => {
       if (!stores.has(name)) stores.set(name, new Map());
@@ -291,6 +292,19 @@ describe('scanner PWA', () => {
     const worker = installableWorker([], ['gatepass-shell-v1', 'gatepass-assets-v1', 'gatepass-shell-v2', 'unrelated-cache']);
     await worker.run('activate');
     expect(Object.keys(worker.cached()).sort()).toEqual(['gatepass-shell-v2', 'unrelated-cache']);
+  });
+
+  it('keeps the files this version needs when the asset cache is full of older releases: only stale files are dropped', async () => {
+    // A phone that took many releases: the decoder and fonts never changed, so they are the oldest entries.
+    const unchanged = ['/assets/zxing_reader-abc.wasm', '/assets/qr-detector-abc.js', '/assets/inter-latin-abc.woff2'];
+    const stale = Array.from({ length: 57 }, (_, i) => `/assets/ScannerApp-old${i}.js`);
+    const worker = installableWorker(['/assets/index-abc.js', '/assets/index-abc.css', '/assets/ScannerApp-new.js', ...unchanged], [], [...unchanged, ...stale]);
+    await worker.run('install');
+    const cached = worker.cached()['gatepass-assets-v2'];
+    expect(cached).toHaveLength(60);
+    expect(cached).toEqual(expect.arrayContaining(['/assets/index-abc.js', '/assets/index-abc.css', '/assets/ScannerApp-new.js', ...unchanged]));
+    // The three oldest stale files made room.
+    expect(cached.filter((file) => stale.slice(0, 3).includes(file))).toEqual([]);
   });
 
   describe('served by the app', () => {

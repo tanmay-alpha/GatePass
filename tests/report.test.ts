@@ -108,6 +108,29 @@ describe('post-event report', () => {
     await h.admin(api().get('/api/events/00000000-0000-4000-a000-000000000000/exports/summary.csv')).expect(404);
   });
 
+  it('reports an ended and then archived event with its figures intact, and later scans refused at the door count only as denials', async () => {
+    const { event, n } = await scenario();
+    const [late] = await post(`/api/events/${event.id}/passes`, { count: 1 });
+    const before: EventReport = (await h.admin(api().get(`/api/events/${event.id}/report`)).expect(200)).body;
+    await h.admin(api().patch(`/api/events/${event.id}`)).send({ status: 'ended' }).expect(200);
+    // A door scan after the end is refused and recorded as a denial; no admission is added.
+    expect((await scan(h, n.key, late.token)).body.outcome).toBe('event_closed');
+    expect((await scan(h, n.key, 'not-a-pass')).body.outcome).toBe('invalid');
+    await h.admin(api().patch(`/api/events/${event.id}`)).send({ status: 'archived' }).expect(200);
+    const after: EventReport = (await h.admin(api().get(`/api/events/${event.id}/report`)).expect(200)).body;
+    expect(after.event.status).toBe('archived');
+    expect(after.passes).toEqual(before.passes);
+    expect(after.attendance).toEqual(before.attendance);
+    expect(after.peak).toEqual(before.peak);
+    expect(after.denials).toEqual([
+      { outcome: 'invalid', count: 2 },
+      { outcome: 'already_redeemed', count: 1 },
+      { outcome: 'event_closed', count: 1 },
+      { outcome: 'revoked', count: 1 }
+    ]);
+    await h.admin(api().get(`/api/events/${event.id}/exports/summary.csv`)).expect(200);
+  });
+
   it('exports the same figures as summary.csv and records the download', async () => {
     const { event } = await scenario();
     const report: EventReport = (await h.admin(api().get(`/api/events/${event.id}/report`)).expect(200)).body;

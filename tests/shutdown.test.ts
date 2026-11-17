@@ -41,9 +41,9 @@ interface ProviderRequest {
   text: string;
 }
 
-type Mode = 'accept' | 'fail' | 'hang';
+type Mode = 'accept' | 'fail' | 'hang' | 'accept-then-hang';
 
-/** Resend double: dedupes by Idempotency-Key like the real API, answers after `delayMs`, fails with 503 or never answers. */
+/** Resend double: dedupes by Idempotency-Key like the real API, answers after `delayMs`, fails with 503, never answers, or takes the message and never answers. */
 class FakeResend {
   mode: Mode = 'accept';
   delayMs = 0;
@@ -64,6 +64,10 @@ class FakeResend {
       if (this.waiter && this.requests.length >= this.waiter.count) this.waiter.resolve();
       const mode = this.mode;
       if (mode === 'hang') return;
+      if (mode === 'accept-then-hang') {
+        if (idempotencyKey && !this.accepted.has(idempotencyKey)) this.accepted.set(idempotencyKey, `re_${this.accepted.size + 1}`);
+        return;
+      }
       setTimeout(() => {
         if (mode === 'fail') {
           this.answers.push('failed');
@@ -420,6 +424,48 @@ describe('server process with pass emails in flight', () => {
     expect(second.output.join('')).not.toContain(pass.token);
     expect(second.output.join('')).not.toContain('ada@example.com');
     inspect(file, (db) => expect(verifyDatabase(db).violations).toEqual([]));
+  }, TEST_TIMEOUT);
+
+  it('SIGKILL after the provider took the email; restarted a day later: unconfirmed, never sent again', async () => {
+    const provider = await fakeResend();
+    provider.mode = 'accept-then-hang';
+    const file = tempFile();
+    const key = randomBytes(32).toString('base64');
+    const first = await startServer(file, provider, key);
+    const pass = await issueWithEmail(first, 'ada@example.com');
+    await provider.requestsReached(1);
+    first.child.kill('SIGKILL');
+    await first.exit;
+    expect(provider.sent).toBe(1);
+    // The server stays down for 24 hours: the attempt started a day before the restart.
+    const dayAgo = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    inspect(file, (db) => {
+      expect(deliveries(db)[0]).toMatchObject({ status: 'sending', attempts: 1 });
+      db.prepare("UPDATE pass_deliveries SET last_attempt_at = ?, updated_at = ? WHERE status = 'sending'").run(dayAgo, dayAgo);
+    });
+
+    provider.mode = 'accept';
+    const second = await startServer(file, provider, key);
+    const settled = Date.now() + 10_000;
+    let counts = { unconfirmed: 0 };
+    while (counts.unconfirmed !== 1) {
+      if (Date.now() > settled) throw new Error('the interrupted email was never closed');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      counts = (await call<{ counts: { unconfirmed: number } }>(second, 'GET', `/api/events/${pass.eventId}/deliveries`)).counts;
+    }
+    second.child.kill('SIGKILL');
+    await second.exit;
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.sent).toBe(1);
+    inspect(file, (db) => {
+      expect(deliveries(db)[0]).toMatchObject({ status: 'unconfirmed', sealed_link: null });
+      expect(actions(db)).toContain('pass.email_unconfirmed');
+      expect(verifyDatabase(db).violations).toEqual([]);
+    });
+    for (const output of [first.output.join(''), second.output.join('')]) {
+      expect(output).not.toContain(pass.token);
+      expect(output).not.toContain('ada@example.com');
+    }
   }, TEST_TIMEOUT);
 
   posixOnly('SIGTERM with a slow provider: the pass email and a reset email finish and are audited before the database closes (exit 0)', async () => {

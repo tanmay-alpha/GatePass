@@ -516,15 +516,19 @@ export class PassDeliveries {
         }
         const link = row.sealed_link ? sealer.open(row.sealed_link as Uint8Array, row.id as string, row.pass_id as string) : null;
         const token = link ? extractPassToken(link) : null;
-        if (!link || !token || hashToken(token) !== row.token_hash) {
-          this.close(row, 'failed', UNREADABLE, SYSTEM);
-          continue;
+        let message: MailMessage | null = null;
+        let failure = UNREADABLE;
+        if (link && token && hashToken(token) === row.token_hash) {
+          try {
+            message = passEmail(row, link);
+          } catch (error) {
+            failure = `The email could not be composed: ${error instanceof Error ? error.message : String(error)}`;
+          }
         }
-        let message: MailMessage;
-        try {
-          message = passEmail(row, link);
-        } catch (error) {
-          this.close(row, 'failed', `The email could not be composed: ${error instanceof Error ? error.message : String(error)}`, SYSTEM);
+        if (!message) {
+          // Cannot be sent again; an earlier attempt that may have reached the provider still may have been sent.
+          if (row.uncertain_since) this.close(row, 'unconfirmed', `${failure} ${MAY_HAVE_SENT}`, SYSTEM);
+          else this.close(row, 'failed', failure, SYSTEM);
           continue;
         }
         this.db.prepare("UPDATE pass_deliveries SET status = 'sending', attempts = attempts + 1, last_attempt_at = ?, updated_at = ? WHERE id = ?").run(now, now, row.id as string);

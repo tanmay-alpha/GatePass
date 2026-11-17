@@ -213,6 +213,28 @@ describe('rotating PASS_DELIVERY_KEY with emails waiting', () => {
     expect(newer).toMatchObject({ status: 'accepted', recipient: 'linus@example.com' });
     expect(rotated.provider.calls.map((call) => call.message.text.includes(linus.passUrl))).toEqual([true]);
   });
+
+  it('without the old key, an email whose earlier attempt may have reached the provider ends unconfirmed, not failed', async () => {
+    const { file } = await waitingUnderA(['ada@example.com']);
+    const first = boot(file, { key: A });
+    // The provider took the message but its answer was lost: the email waits for a retry with the same request id.
+    first.provider.script = ['accept-but-time-out'];
+    await first.worker.runOnce();
+    expect(rows(first.db)[0]).toMatchObject({ status: 'queued', attempts: 1 });
+    expect(first.provider.sent).toBe(1);
+    await first.close();
+
+    clock.advance(60_000); // past the 30 s backoff
+    const rotated = boot(file, { key: B });
+    await drain(rotated);
+    const [row] = rows(rotated.db);
+    expect(row).toMatchObject({ status: 'unconfirmed', sealed_link: null });
+    expect(row.last_error).toMatch(UNREADABLE);
+    expect(row.last_error).toMatch(/may already have sent it/);
+    expect(rotated.provider.calls).toEqual([]);
+    const list = (await rotated.get(`/api/events/${eventId}/deliveries`).expect(200)).body as DeliveryList;
+    expect(list.counts).toMatchObject({ failed: 0, unconfirmed: 1 });
+  });
 });
 
 describe('restoring a backup with emails waiting', () => {
