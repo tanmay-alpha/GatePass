@@ -71,6 +71,9 @@ describe('operations dashboard aggregates', () => {
     expect(summary.outcomes).toEqual({ admitted: 5, wrong_gate: 1, already_redeemed: 1, revoked: 1, invalid: 9 });
     expect(summary.passes).toEqual({ issued: 8, active: 2, redeemed: 5, revoked: 1, expired: 0 });
     expect(summary.attendance).toEqual({ expected: 7, admitted: 5, rate: 5 / 7 });
+    // The newest admission (General 2 by the roaming scanner at 18:37), not the newest scan (18:50, invalid codes).
+    expect(summary.lastAdmissionAt).toBe('2030-06-01T18:37:00.000Z');
+    expect(h.db.prepare('SELECT MAX(redeemed_at) AS at FROM redemptions').get()).toEqual({ at: summary.lastAdmissionAt });
     expect(summary.capacity).toEqual({ limit: 10, admitted: 5, remaining: 5 });
     expect(summary.gates).toEqual([
       { id: expect.any(String), name: 'North', admitted: 2, denied: 0, lastScanAt: '2030-06-01T18:30:00.000Z' },
@@ -104,6 +107,13 @@ describe('operations dashboard aggregates', () => {
     // VIP 1's two gates (18:30) are older than the 60-minute pattern window now.
     expect(later.alerts.some((alert) => alert.kind === 'multi_gate')).toBe(false);
     expect(later.recent.buckets.every((b) => b.admitted + b.denied === 0)).toBe(true);
+  });
+
+  it('has no last admission before the first one', async () => {
+    const event = await post('/api/events', EVENT_INPUT);
+    const scanner = await scannerAt(event.id, 'Door', null);
+    expect((await scan(h, scanner.key, 'not-a-pass')).body.outcome).toBe('invalid');
+    expect((await ops(event.id)).lastAdmissionAt).toBeNull();
   });
 
   it('warns about devices that went silent while the doors are open, and stops once the event ended', async () => {
@@ -172,23 +182,23 @@ describe('operations dashboard aggregates', () => {
       "INSERT INTO scans (event_id, scanner_id, gate_id, pass_id, outcome, created_at) VALUES (?, ?, (SELECT gate_id FROM scanners WHERE id = ?), ?, 'already_redeemed', ?)"
     );
     for (const at of ['2030-06-01T18:49:00.000Z', '2030-06-01T18:50:00.000Z']) duplicate.run(event.id, s.id, s.id, vip0, at);
-    const alertsFor = (iso: string) =>
-      operationsSummary(h.db, h.service.access, h.service.getEvent(event.id), new Date(iso))
-        .alerts.filter((alert) => alert.passId === vip0)
+    const alertsFor = async (iso: string) =>
+      (await operationsSummary(h.db, h.service.access, h.service.getEvent(event.id), new Date(iso))).alerts
+        .filter((alert) => alert.passId === vip0)
         .map((alert) => [alert.kind, alert.count]);
 
-    expect(alertsFor('2030-06-01T18:50:00.000Z').sort()).toEqual([
+    expect((await alertsFor('2030-06-01T18:50:00.000Z')).sort()).toEqual([
       ['multi_gate', 2],
       ['repeated_duplicate', 2]
     ]);
     // 19:30 still includes 18:30 (the window is inclusive); at 19:31 the North admission has left it, both South duplicates have not.
-    expect(alertsFor('2030-06-01T19:30:00.000Z').sort()).toEqual([
+    expect((await alertsFor('2030-06-01T19:30:00.000Z')).sort()).toEqual([
       ['multi_gate', 2],
       ['repeated_duplicate', 2]
     ]);
-    expect(alertsFor('2030-06-01T19:31:00.000Z')).toEqual([['repeated_duplicate', 2]]);
+    expect(await alertsFor('2030-06-01T19:31:00.000Z')).toEqual([['repeated_duplicate', 2]]);
     // 19:49:30: only the 18:50 duplicate is inside, and one is not a pattern.
-    expect(alertsFor('2030-06-01T19:49:30.000Z')).toEqual([]);
+    expect(await alertsFor('2030-06-01T19:49:30.000Z')).toEqual([]);
     expect(ALERT_RULES.patternWindowMinutes).toBe(60);
   });
 
@@ -246,7 +256,7 @@ describe('operations dashboard at scale', () => {
     return event;
   }
 
-  it('answers from indexes on a 10k-pass event (EXPLAIN QUERY PLAN) within budget', () => {
+  it('answers from indexes on a 10k-pass event (EXPLAIN QUERY PLAN) within budget', async () => {
     const created = syntheticEvent();
     const event = h.service.getEvent(created.id);
 
@@ -266,9 +276,9 @@ describe('operations dashboard at scale', () => {
         };
       return { all: record('all'), get: record('get') };
     }) as typeof h.db.prepare;
-    const live = operationsSummary(h.db, h.service.access, event, new Date('2030-06-01T20:30:00.000Z'));
+    const live = await operationsSummary(h.db, h.service.access, event, new Date('2030-06-01T20:30:00.000Z'));
     phase = 'finished';
-    const finished = operationsSummary(h.db, h.service.access, event, new Date('2030-06-01T23:30:00.000Z'));
+    const finished = await operationsSummary(h.db, h.service.access, event, new Date('2030-06-01T23:30:00.000Z'));
     h.db.prepare = prepare;
 
     expect(live.phase).toBe('live');
@@ -296,22 +306,22 @@ describe('operations dashboard at scale', () => {
     console.info(JSON.stringify({ msg: 'operations statements (live, first run)', slowest }));
 
     /** Median of 5 calls through the service; `fresh` moves the clock past the memo each time, so every call recomputes. */
-    const median = (at: string, fresh: boolean) => {
+    const median = async (at: string, fresh: boolean) => {
       h.clock.current = new Date(at);
-      h.service.operations(created.id);
+      await h.service.operations(created.id);
       const runs: number[] = [];
       for (let i = 0; i < 5; i += 1) {
         if (fresh) h.clock.advance(OPERATIONS_MEMO_MS);
         const started = performance.now();
-        h.service.operations(created.id);
+        await h.service.operations(created.id);
         runs.push(performance.now() - started);
       }
       return Math.round(runs.sort((a, b) => a - b)[2] * 100) / 100;
     };
     const timings = {
-      liveMedianMs: median('2030-06-01T20:30:00.000Z', true),
-      finishedMedianMs: median('2030-06-01T23:30:00.000Z', true),
-      memoHitMedianMs: median('2030-06-01T20:30:00.000Z', false)
+      liveMedianMs: await median('2030-06-01T20:30:00.000Z', true),
+      finishedMedianMs: await median('2030-06-01T23:30:00.000Z', true),
+      memoHitMedianMs: await median('2030-06-01T20:30:00.000Z', false)
     };
     console.info(JSON.stringify({ msg: 'operations timing', passes: 10_000, scans: 10_000, ...timings }));
     // Generous ceilings for slow CI machines; the dashboard polls every 5 s.
