@@ -216,6 +216,83 @@ describe('scanner PWA', () => {
     await expect(empty.fetchEvent(`${PUBLIC_URL}/scan`, { mode: 'navigate' }).mock.calls[0][0]).rejects.toThrow('Offline and no cached scanner app');
   });
 
+  /**
+   * Runs sw.js with a precache list written in (as the build's scannerPrecache plugin does) over
+   * in-memory caches. `existing` names caches left by earlier versions.
+   */
+  function installableWorker(precache: string[], existing: string[] = []) {
+    const handlers: Record<string, Handler> = {};
+    const stores = new Map<string, Map<string, unknown>>(existing.map((name) => [name, new Map()]));
+    const url = (input: string | { url: string }) => (typeof input === 'string' ? input : input.url);
+    const open = async (name: string) => {
+      if (!stores.has(name)) stores.set(name, new Map());
+      const store = stores.get(name)!;
+      return {
+        match: async (input: string | { url: string }) => store.get(url(input)),
+        put: async (input: string | { url: string }, response: unknown) => void store.set(url(input), response),
+        keys: async () => [...store.keys()].map((key) => ({ url: key })),
+        delete: async (input: string | { url: string }) => store.delete(url(input))
+      };
+    };
+    // Same-origin responses are type "basic"; the worker caches nothing else.
+    const reply = (body: string): unknown => ({ ok: true, type: 'basic', text: async () => body, clone: () => reply(body) });
+    const shell = '<script type="module" src="/assets/index-abc.js"></script><link rel="stylesheet" href="/assets/index-abc.css">';
+    const fetched: string[] = [];
+    const context = {
+      self: {
+        location: { origin: PUBLIC_URL },
+        addEventListener: (type: string, handler: Handler) => (handlers[type] = handler),
+        skipWaiting: async () => undefined,
+        clients: { claim: async () => undefined }
+      },
+      caches: { open, keys: async () => [...stores.keys()], delete: async (name: string) => stores.delete(name), match: async () => undefined },
+      fetch: async (input: string | { url: string }) => {
+        fetched.push(new URL(url(input), PUBLIC_URL).href);
+        return reply(url(input).endsWith('/scan') ? shell : 'asset');
+      },
+      URL,
+      Promise,
+      setTimeout,
+      Set
+    };
+    const source = readFileSync(path.join(root, 'sw.js'), 'utf8');
+    expect(source).toContain('const PRECACHE = [];');
+    vm.runInNewContext(source.replace('const PRECACHE = [];', `const PRECACHE = ${JSON.stringify(precache)};`), context);
+    return {
+      fetched,
+      async run(type: 'install' | 'activate') {
+        const pending: unknown[] = [];
+        handlers[type]({ waitUntil: (promise: unknown) => pending.push(promise) });
+        await Promise.all(pending);
+      },
+      cached: () => Object.fromEntries([...stores].map(([name, store]) => [name, [...store.keys()].map((key) => new URL(key, PUBLIC_URL).pathname)]))
+    };
+  }
+
+  it('installs the shell, the files it names and the build’s precache list (scanner chunks, decoder), and nothing outside /assets/ on this origin', async () => {
+    const worker = installableWorker([
+      '/assets/ScannerApp-abc.js',
+      '/assets/qr-detector-abc.js',
+      '/assets/zxing_reader-abc.wasm',
+      '/api/scanner/session',
+      '/p/abc',
+      'https://elsewhere.example/assets/x.js',
+      '//elsewhere.example/assets/y.js'
+    ]);
+    await worker.run('install');
+    expect(worker.cached()).toEqual({
+      'gatepass-shell-v2': ['/scan'],
+      'gatepass-assets-v2': ['/assets/index-abc.js', '/assets/index-abc.css', '/assets/ScannerApp-abc.js', '/assets/qr-detector-abc.js', '/assets/zxing_reader-abc.wasm']
+    });
+    expect(worker.fetched.filter((href) => !href.startsWith(`${PUBLIC_URL}/`) || /\/(api|p)\//.test(href))).toEqual([]);
+  });
+
+  it('activating this version drops the caches of older ones (v1 held the single-bundle app) and leaves other caches alone', async () => {
+    const worker = installableWorker([], ['gatepass-shell-v1', 'gatepass-assets-v1', 'gatepass-shell-v2', 'unrelated-cache']);
+    await worker.run('activate');
+    expect(Object.keys(worker.cached()).sort()).toEqual(['gatepass-shell-v2', 'unrelated-cache']);
+  });
+
   describe('served by the app', () => {
     let dir = '';
     afterEach(() => {

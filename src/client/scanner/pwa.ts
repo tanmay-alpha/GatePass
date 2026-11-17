@@ -4,8 +4,10 @@ import { useEffect, useState } from 'react';
  * Installs the scanner's service worker (public/sw.js, scope /scan) in
  * production builds. It caches the static app shell only; /api/* and /p/*
  * always go to the network, so no verdict can ever come from a cache.
- * Once it is active, the hashed files this page loaded before it took control
- * (fonts, the WebAssembly decoder) are handed to it to cache as well.
+ * The worker precaches the scanner's chunks and the QR decoder itself (the
+ * build writes the list into it); once it is active, the hashed files this page
+ * loaded before it took control (the fonts the page actually used) are handed
+ * to it to cache as well.
  */
 export function registerScannerWorker(): void {
   if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return;

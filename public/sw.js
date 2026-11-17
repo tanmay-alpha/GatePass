@@ -4,13 +4,17 @@
  * Caches only the static app shell, so a door phone can open the scanner
  * without a connection and show that it is offline:
  *   - navigations: network first; the last good /scan page is the offline fallback
- *   - /assets/*: cache first (file names carry a content hash, so they never change)
+ *   - /assets/*: cache first (file names carry a content hash, so they never change);
+ *     the files the shell page names and the PRECACHE list (the scanner's own
+ *     chunks, its CSS and the QR decoder, which the page loads by dynamic import)
+ *     are cached as soon as the worker installs
  *   - everything else, and in particular /api/* and /p/*: not handled here, so
  *     the browser goes to the network as if there were no service worker.
  * Verdicts, sessions and pass pages are never cached or answered from a cache:
  * every admission needs a live server answer (fail closed).
  */
-const VERSION = 'v1';
+// v2: the scanner and its decoder are separate chunks (precached); v1 caches held the single-bundle app.
+const VERSION = 'v2';
 const SHELL_CACHE = `gatepass-shell-${VERSION}`;
 const ASSET_CACHE = `gatepass-assets-${VERSION}`;
 const SHELL_URL = '/scan';
@@ -18,6 +22,11 @@ const SHELL_URL = '/scan';
 const MAX_ASSETS = 60;
 /** A navigation that takes longer than this falls back to the cached shell (venue Wi-Fi can hang). */
 const NAVIGATION_TIMEOUT_MS = 5000;
+/**
+ * Filled in by the build (vite.config.ts, scannerPrecache) with the hashed files
+ * the scanner needs besides those the shell page names. Empty in development.
+ */
+const PRECACHE = [];
 
 const isNetworkOnly = (url) => url.pathname === '/api' || url.pathname.startsWith('/api/') || url.pathname.startsWith('/p/');
 const isAsset = (url) => url.origin === self.location.origin && url.pathname.startsWith('/assets/') && !isNetworkOnly(url);
@@ -45,11 +54,11 @@ async function cacheAssets(urls) {
   await trimAssets();
 }
 
-/** Stores a good shell page and the hashed assets it names, so the next start works offline. */
+/** Stores a good shell page, the hashed assets it names and the precache list, so the next start works offline. */
 async function rememberShell(response) {
   const html = await response.clone().text();
   await (await caches.open(SHELL_CACHE)).put(SHELL_URL, response);
-  await cacheAssets([...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((match) => match[1]));
+  await cacheAssets([...[...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((match) => match[1]), ...PRECACHE]);
 }
 
 self.addEventListener('install', (event) => {
