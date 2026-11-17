@@ -417,6 +417,8 @@ export interface OperationsSummary {
   recent: { bucketMinutes: number; buckets: Array<{ bucketStart: string; admitted: number; denied: number }> };
   /** Admissions made from a "Find attendee" lookup (lost or unreadable QR code) rather than a scanned or typed code. */
   assistedAdmissions: number;
+  /** When the event's most recent admission happened; null before the first one. */
+  lastAdmissionAt: string | null;
   /** Present once the event is finished. */
   completion: OperationsCompletion | null;
 }
@@ -437,6 +439,40 @@ export interface OperationsCompletion {
   /** Scanner devices and gates that recorded at least one scan. */
   devicesUsed: number;
   gatesUsed: number;
+}
+
+/** GET /api/events/:eventId/report: post-event figures; the same numbers as `exports/summary.csv`. */
+export interface EventReport {
+  generatedAt: string;
+  event: { id: string; name: string; timeZone: string; startsAt: string; endsAt: string; status: EventStatus };
+  /** Every pass ever issued for the event, by current state (`issued` = the sum of the others). */
+  passes: { issued: number; active: number; redeemed: number; revoked: number; expired: number };
+  /** Admitted against the passes expected at the door (issued minus revoked before entry). */
+  attendance: { expected: number; admitted: number; rate: number | null };
+  /** Scans per gate; `id: null` groups scanners not bound to a gate. */
+  gates: Array<{ id: string | null; name: string; admitted: number; denied: number }>;
+  /**
+   * Busiest 15-minute period of admissions, ties to the earliest. `localStart`/`localEnd` are wall-clock
+   * times (`YYYY-MM-DDTHH:MM`) in the event's time zone, whose offsets are all whole quarter hours.
+   */
+  peak: { start: string; end: string; localStart: string; localEnd: string; timeZone: string; admitted: number } | null;
+  /** Every refused scan by outcome, most frequent first. */
+  denials: Array<{ outcome: Exclude<StoredScanOutcome, 'admitted'>; count: number }>;
+  /** Every scanner device of the event, including revoked ones. Times are null when the device never scanned or called in. */
+  scanners: Array<{
+    id: string;
+    label: string;
+    gateName: string | null;
+    revoked: boolean;
+    firstScanAt: string | null;
+    lastScanAt: string | null;
+    /** Newest of the last scan and the last heartbeat. */
+    lastContactAt: string | null;
+    scans: number;
+    admitted: number;
+  }>;
+  /** Admissions made from a "Find attendee" lookup rather than a scanned or typed code. */
+  assistedAdmissions: number;
 }
 
 /** POST /api/events/:eventId/passes/import */

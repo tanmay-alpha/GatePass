@@ -7,6 +7,7 @@ import type {
   EventPermission,
   EventRole,
   EventStatus,
+  EventReport,
   EventSummary,
   ImportReport,
   IssuedPass,
@@ -28,12 +29,11 @@ import { Accounts } from './accounts';
 import { evaluateAdmission } from './admission';
 import { AttendeeAssist } from './assist';
 import { listAudit, recordAudit } from './audit';
-import { toCsv } from './csv';
 import { SCHEMA_VERSION, schemaVersion, transaction, type Database } from './db';
 import { PassDeliveries } from './deliveries';
 import { httpError } from './http';
 import type { Mailer } from './mailer';
-import { OperationsMemo, operationsSummary } from './operations';
+import { eventReport, OperationsMemo, operationsEvent, type OperationsEvent, operationsSummary } from './operations';
 import { ROLE_PERMISSIONS, type Principal } from './permissions';
 import { AccessControl } from './policies';
 import { EventTemplates } from './templates';
@@ -100,6 +100,20 @@ export interface AuthenticatedScanner {
   gateId: string | null;
   label: string;
 }
+
+export type ExportKind = 'attendance' | 'scans' | 'audit' | 'summary';
+
+/** A CSV export opened by `GatePass.openExport` and written by `streamCsv`. */
+export interface CsvExport {
+  header: string[];
+  /** Data rows in the export, as recorded in its `export.downloaded` audit entry. */
+  rows: number;
+  /** The next rows in export order; empty when every row has been returned. Synchronous and bounded. */
+  next: () => unknown[][];
+}
+
+/** Rows read per export chunk: about 1–3 ms of work on a laptop, so a redeem waits at most that long behind a download. */
+export const EXPORT_CHUNK_ROWS = 500;
 
 type Row = Record<string, unknown>;
 
@@ -185,6 +199,11 @@ export class GatePass {
     const row = this.db.prepare('SELECT event_id FROM scanners WHERE id = ?').get(scannerId) as Row | undefined;
     if (!row) throw httpError(404, 'Scanner not found');
     return row.event_id as string;
+  }
+
+  /** 404 unless the event exists. One primary-key read, unlike `getEvent`, whose per-event counts cost O(passes + scans). */
+  private assertEvent(eventId: string): void {
+    if (!this.db.prepare('SELECT 1 FROM events WHERE id = ?').get(eventId)) throw httpError(404, 'Event not found');
   }
 
   // ---------------------------------------------------------------- events
@@ -315,19 +334,38 @@ export class GatePass {
 
   // ---------------------------------------------------------------- passes
 
-  /** Filtering, ordering and paging run in SQL; status is derived at read time. */
+  /**
+   * Filtering, ordering and paging run in SQL; status is derived at read time. Only the filters in use are
+   * part of the statement, so an unfiltered count reads `passes_event_idx` alone, and the page is picked by
+   * rowid first: an offset skips index entries, not joined rows.
+   */
   listPasses(eventId: string, filter: PassFilter = {}): { passes: Pass[]; total: number } {
-    this.getEvent(eventId);
+    this.assertEvent(eventId);
     const now = this.timestamp();
-    const q = filter.q ? `%${filter.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
-    const where = `WHERE p.event_id = :eventId
-      AND (:q IS NULL OR p.attendee_name LIKE :q ESCAPE '\\' OR p.attendee_email LIKE :q ESCAPE '\\' OR p.id LIKE :q ESCAPE '\\')
-      AND (:policyId IS NULL OR p.policy_id = :policyId)
-      AND (:status IS NULL OR ${PASS_STATUS_SQL} = :status)`;
-    const params = { eventId, q, now, policyId: filter.policyId ?? null, status: filter.status ?? null };
-    const total = Number((this.db.prepare(`SELECT COUNT(*) AS n ${PASS_FROM} ${where}`).get(params) as Row).n);
+    const conditions = ['p.event_id = :eventId'];
+    const params: Record<string, string | number> = { eventId };
+    if (filter.q) {
+      conditions.push(`(p.attendee_name LIKE :q ESCAPE '\\' OR p.attendee_email LIKE :q ESCAPE '\\' OR p.id LIKE :q ESCAPE '\\')`);
+      params.q = `%${filter.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    }
+    if (filter.policyId) {
+      conditions.push('p.policy_id = :policyId');
+      params.policyId = filter.policyId;
+    }
+    let from = 'FROM passes p';
+    if (filter.status) {
+      from = PASS_FROM;
+      conditions.push(`${PASS_STATUS_SQL} = :status`);
+      Object.assign(params, { status: filter.status, now });
+    }
+    const where = `${from} WHERE ${conditions.join(' AND ')}`;
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS n ${where}`).get(params) as Row).n);
     const rows = this.db
-      .prepare(`SELECT ${PASS_COLUMNS} ${PASS_FROM} ${where} ORDER BY p.created_at DESC, p.rowid DESC LIMIT :limit OFFSET :offset`)
+      .prepare(
+        `SELECT ${PASS_COLUMNS} FROM (SELECT p.rowid AS page_rowid ${where} ORDER BY p.created_at DESC, p.rowid DESC LIMIT :limit OFFSET :offset) page
+         JOIN passes p ON p.rowid = page.page_rowid LEFT JOIN redemptions r ON r.pass_id = p.id
+         ORDER BY p.created_at DESC, p.rowid DESC`
+      )
       .all({ ...params, limit: filter.limit ?? 1000, offset: filter.offset ?? 0 }) as Row[];
     return { passes: rows.map((row) => toPass(row, now)), total };
   }
@@ -680,7 +718,7 @@ export class GatePass {
   }
 
   listScans(eventId: string, options: { after?: number; limit?: number } = {}): ScanRecord[] {
-    this.getEvent(eventId);
+    this.assertEvent(eventId);
     const rows = this.db
       .prepare(
         `SELECT s.id, s.event_id, s.scanner_id, sc.label AS scanner_label, s.gate_id, g.name AS gate_name, s.pass_id, p.attendee_name, s.outcome, s.created_at, s.method
@@ -704,85 +742,174 @@ export class GatePass {
   }
 
   /** Served from a ≤2 s per-event memo (see `OperationsMemo`); the caller has already authorized the event. */
-  operations(eventId: string): OperationsSummary {
+  operations(eventId: string): Promise<OperationsSummary> {
     const now = this.now();
-    return this.operationsMemo.get(eventId, now, () => operationsSummary(this.db, this.access, this.getEvent(eventId), now));
+    return this.operationsMemo.get(eventId, now, () => operationsSummary(this.db, this.access, operationsEvent(this.db, eventId), now));
+  }
+
+  /** Post-event figures (`GET …/report`, `exports/summary.csv`); computed on request, not memoised. */
+  report(eventId: string): Promise<EventReport> {
+    return eventReport(this.db, this.access, operationsEvent(this.db, eventId), this.now());
   }
 
   listAudit(eventId: string, query: AuditQuery = {}): AuditEntry[] {
-    this.getEvent(eventId);
+    this.assertEvent(eventId);
     return listAudit(this.db, eventId, query);
   }
 
   // ---------------------------------------------------------------- exports
 
-  /** Every pass with its current state and where it was admitted. Recorded in the audit log by the caller's route. */
-  attendanceCsv(eventId: string, actor: string): string {
-    const event = this.getEvent(eventId);
+  /**
+   * Opens a CSV export for streaming (`streamCsv` in src/server/csv.ts). The export covers the rows that
+   * exist now: everything up to the current highest row id, so the audited row count is exact even while
+   * scans keep arriving. The `export.downloaded` entry, with that count, is written here, before the first
+   * byte leaves, as before streaming: a download that the client abandons is still on record. Each `next()`
+   * reads one keyset chunk of at most `EXPORT_CHUNK_ROWS` rows to completion, so no statement stays open
+   * between chunks; a row shows its state when its chunk was read (a pass admitted mid-download appears as
+   * redeemed if its chunk comes later).
+   */
+  async openExport(eventId: string, kind: ExportKind, actor: string): Promise<CsvExport> {
+    const event = operationsEvent(this.db, eventId);
+    const exported = kind === 'summary' ? await this.summaryExport(event.id) : this.tableExport(event, kind);
+    this.recordExport(event.id, actor, kind, exported.rows);
+    return exported;
+  }
+
+  private tableExport(event: OperationsEvent, kind: Exclude<ExportKind, 'summary'>): CsvExport {
     const now = this.timestamp();
-    const rows = this.db
-      .prepare(
-        `SELECT p.id, p.attendee_name, p.attendee_email, ap.name AS policy, p.created_at, p.expires_at, p.revoked_at, r.redeemed_at,
-                g.name AS gate, sc.label AS scanner, ${PASS_STATUS_SQL} AS status
-         FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id LEFT JOIN admission_policies ap ON ap.id = p.policy_id
-         LEFT JOIN gates g ON g.id = r.gate_id LEFT JOIN scanners sc ON sc.id = r.scanner_id
-         WHERE p.event_id = :eventId ORDER BY p.created_at, p.rowid`
-      )
-      .all({ eventId, now }) as Row[];
-    this.recordExport(event.id, actor, 'attendance', rows.length);
-    return toCsv(
-      ['pass_id', 'reference', 'attendee_name', 'attendee_email', 'policy', 'status', 'issued_at', 'expires_at', 'revoked_at', 'admitted_at', 'gate', 'scanner', 'time_zone'],
-      rows.map((row) => [
-        row.id,
-        (row.id as string).slice(0, 8).toUpperCase(),
-        row.attendee_name,
-        row.attendee_email,
-        row.policy,
-        row.status,
-        row.created_at,
-        row.expires_at,
-        row.revoked_at,
-        row.redeemed_at,
-        row.gate,
-        row.scanner,
-        event.timeZone
-      ])
-    );
+    const maxId = (table: string, column: string) => Number((this.db.prepare(`SELECT COALESCE(MAX(${column}), 0) AS id FROM ${table}`).get() as Row).id);
+    if (kind === 'attendance') {
+      const last = maxId('passes', 'rowid');
+      let after: { createdAt: string; rowid: number } = { createdAt: '', rowid: 0 };
+      return {
+        header: ['pass_id', 'reference', 'attendee_name', 'attendee_email', 'policy', 'status', 'issued_at', 'expires_at', 'revoked_at', 'admitted_at', 'gate', 'scanner', 'time_zone'],
+        rows: Number((this.db.prepare('SELECT COUNT(*) AS n FROM passes WHERE event_id = ? AND rowid <= ?').get(event.id, last) as Row).n),
+        next: () => {
+          const rows = this.db
+            .prepare(
+              `SELECT p.rowid AS row_key, p.id, p.attendee_name, p.attendee_email, ap.name AS policy, p.created_at, p.expires_at, p.revoked_at, r.redeemed_at,
+                      g.name AS gate, sc.label AS scanner, ${PASS_STATUS_SQL} AS status
+               FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id LEFT JOIN admission_policies ap ON ap.id = p.policy_id
+               LEFT JOIN gates g ON g.id = r.gate_id LEFT JOIN scanners sc ON sc.id = r.scanner_id
+               WHERE p.event_id = :eventId AND p.rowid <= :last AND (p.created_at, p.rowid) > (:createdAt, :rowid)
+               ORDER BY p.created_at, p.rowid LIMIT :limit`
+            )
+            .all({ eventId: event.id, now, last, createdAt: after.createdAt, rowid: after.rowid, limit: EXPORT_CHUNK_ROWS }) as Row[];
+          if (rows.length) after = { createdAt: rows.at(-1)!.created_at as string, rowid: Number(rows.at(-1)!.row_key) };
+          return rows.map((row) => [
+            row.id,
+            (row.id as string).slice(0, 8).toUpperCase(),
+            row.attendee_name,
+            row.attendee_email,
+            row.policy,
+            row.status,
+            row.created_at,
+            row.expires_at,
+            row.revoked_at,
+            row.redeemed_at,
+            row.gate,
+            row.scanner,
+            event.timeZone
+          ]);
+        }
+      };
+    }
+    if (kind === 'scans') {
+      const last = maxId('scans', 'id');
+      let after = 0;
+      return {
+        header: ['scan_id', 'time_utc', 'outcome', 'gate', 'scanner', 'pass_reference', 'attendee_name', 'method'],
+        rows: Number((this.db.prepare('SELECT COUNT(*) AS n FROM scans WHERE event_id = ? AND id <= ?').get(event.id, last) as Row).n),
+        next: () => {
+          const rows = this.db
+            .prepare(
+              `SELECT s.id, s.created_at, s.outcome, g.name AS gate, sc.label AS scanner, s.pass_id, p.attendee_name, s.method
+               FROM scans s JOIN scanners sc ON sc.id = s.scanner_id LEFT JOIN gates g ON g.id = s.gate_id LEFT JOIN passes p ON p.id = s.pass_id
+               WHERE s.event_id = ? AND s.id > ? AND s.id <= ? ORDER BY s.id LIMIT ?`
+            )
+            .all(event.id, after, last, EXPORT_CHUNK_ROWS) as Row[];
+          if (rows.length) after = Number(rows.at(-1)!.id);
+          return rows.map((row) => [
+            row.id,
+            row.created_at,
+            row.outcome,
+            row.gate,
+            row.scanner,
+            row.pass_id ? (row.pass_id as string).slice(0, 8).toUpperCase() : null,
+            row.attendee_name,
+            row.method
+          ]);
+        }
+      };
+    }
+    // Oldest first, every entry of the event (the previous export stopped at the newest 100,000).
+    const last = maxId('audit_log', 'id');
+    let after = 0;
+    return {
+      header: ['id', 'time_utc', 'actor', 'action', 'entity_id', 'details'],
+      rows: Number((this.db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE event_id = ? AND id <= ?').get(event.id, last) as Row).n),
+      next: () => {
+        // Actor labels as in listAudit (src/server/audit.ts): account email, device label, or the raw actor.
+        const rows = this.db
+          .prepare(
+            `SELECT a.id, a.created_at, COALESCE(u.email, sc.label, a.actor) AS actor_label, a.action, a.entity_id, a.details_json
+             FROM audit_log a
+             LEFT JOIN users u ON u.id = CASE WHEN a.actor LIKE 'user:%' THEN substr(a.actor, 6) END
+             LEFT JOIN scanners sc ON sc.id = CASE WHEN a.actor LIKE 'scanner:%' THEN substr(a.actor, 9) END
+             WHERE a.event_id = ? AND a.id > ? AND a.id <= ? ORDER BY a.id LIMIT ?`
+          )
+          .all(event.id, after, last, EXPORT_CHUNK_ROWS) as Row[];
+        if (rows.length) after = Number(rows.at(-1)!.id);
+        return rows.map((row) => [row.id, row.created_at, row.actor_label, row.action, row.entity_id, JSON.stringify(JSON.parse(row.details_json as string))]);
+      }
+    };
   }
 
-  scansCsv(eventId: string, actor: string): string {
-    this.getEvent(eventId);
-    const rows = this.db
-      .prepare(
-        `SELECT s.id, s.created_at, s.outcome, g.name AS gate, sc.label AS scanner, s.pass_id, p.attendee_name, s.method
-         FROM scans s JOIN scanners sc ON sc.id = s.scanner_id LEFT JOIN gates g ON g.id = s.gate_id LEFT JOIN passes p ON p.id = s.pass_id
-         WHERE s.event_id = ? ORDER BY s.id`
-      )
-      .all(eventId) as Row[];
-    this.recordExport(eventId, actor, 'scans', rows.length);
-    return toCsv(
-      ['scan_id', 'time_utc', 'outcome', 'gate', 'scanner', 'pass_reference', 'attendee_name', 'method'],
-      rows.map((row) => [
-        row.id,
-        row.created_at,
-        row.outcome,
-        row.gate,
-        row.scanner,
-        row.pass_id ? (row.pass_id as string).slice(0, 8).toUpperCase() : null,
-        row.attendee_name,
-        row.method
-      ])
-    );
-  }
-
-  auditCsv(eventId: string, actor: string): string {
-    this.getEvent(eventId);
-    const entries = listAudit(this.db, eventId, { limit: 100_000 });
-    this.recordExport(eventId, actor, 'audit', entries.length);
-    return toCsv(
-      ['id', 'time_utc', 'actor', 'action', 'entity_id', 'details'],
-      entries.reverse().map((entry) => [entry.id, entry.createdAt, entry.actorLabel, entry.action, entry.entityId, JSON.stringify(entry.details)])
-    );
+  /** The post-event report as `section,item,metric,value` rows: small, so it is built at once. */
+  private async summaryExport(eventId: string): Promise<CsvExport> {
+    const report = await this.report(eventId);
+    const rows: unknown[][] = [
+      ['event', report.event.name, 'time_zone', report.event.timeZone],
+      ['event', report.event.name, 'starts_at', report.event.startsAt],
+      ['event', report.event.name, 'ends_at', report.event.endsAt],
+      ['event', report.event.name, 'status', report.event.status],
+      ...Object.entries(report.passes).map(([metric, value]) => ['passes', '', metric, value]),
+      ['attendance', '', 'expected', report.attendance.expected],
+      ['attendance', '', 'admitted', report.attendance.admitted],
+      ['attendance', '', 'rate', report.attendance.rate === null ? null : report.attendance.rate.toFixed(4)],
+      ['attendance', '', 'assisted_admissions', report.assistedAdmissions]
+    ];
+    if (report.peak) {
+      rows.push(
+        ['peak', report.peak.timeZone, 'local_start', report.peak.localStart],
+        ['peak', report.peak.timeZone, 'local_end', report.peak.localEnd],
+        ['peak', 'UTC', 'start', report.peak.start],
+        ['peak', '', 'admitted', report.peak.admitted]
+      );
+    }
+    for (const gate of report.gates) rows.push(['gate', gate.name, 'admitted', gate.admitted], ['gate', gate.name, 'denied', gate.denied]);
+    for (const denial of report.denials) rows.push(['denial', denial.outcome, 'count', denial.count]);
+    for (const scanner of report.scanners) {
+      rows.push(
+        ['scanner', scanner.label, 'gate', scanner.gateName],
+        ['scanner', scanner.label, 'scans', scanner.scans],
+        ['scanner', scanner.label, 'admitted', scanner.admitted],
+        ['scanner', scanner.label, 'first_scan_at', scanner.firstScanAt],
+        ['scanner', scanner.label, 'last_scan_at', scanner.lastScanAt],
+        ['scanner', scanner.label, 'last_contact_at', scanner.lastContactAt],
+        ['scanner', scanner.label, 'revoked', scanner.revoked ? 'yes' : 'no']
+      );
+    }
+    let pending: unknown[][] = rows;
+    return {
+      header: ['section', 'item', 'metric', 'value'],
+      rows: rows.length,
+      next: () => {
+        const chunk = pending;
+        pending = [];
+        return chunk;
+      }
+    };
   }
 
   /**

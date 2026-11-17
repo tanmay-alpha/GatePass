@@ -192,6 +192,8 @@ describe('tenant isolation', () => {
       ['get', `/api/events/${event.id}/members`],
       ['post', `/api/events/${event.id}/invitations`, { email: 'bob@example.com' }],
       ['get', `/api/events/${event.id}/exports/attendance.csv`],
+      ['get', `/api/events/${event.id}/exports/summary.csv`],
+      ['get', `/api/events/${event.id}/report`],
       ['post', `/api/events/${event.id}/clone`, { name: 'Copy', startsAt: EVENT_INPUT.startsAt, endsAt: EVENT_INPUT.endsAt }]
     ];
     for (const [method, path, body] of probes) {
@@ -232,6 +234,7 @@ describe('event roles', () => {
     await manager.send('post', `/api/events/${event.id}/scanners`, { label: 'Door' }).expect(201);
     await manager.send('post', `/api/passes/${pass.id}/reissue`).expect(200);
     await manager.send('get', `/api/events/${event.id}/audit`).expect(200);
+    await manager.send('get', `/api/events/${event.id}/report`).expect(200);
 
     // Owner-only: 403 (the manager knows the event exists).
     const ownerId = (await owner.send('get', '/api/auth/session')).body.user.id;
@@ -246,6 +249,7 @@ describe('event roles', () => {
       ['get', `/api/events/${event.id}/exports/attendance.csv`],
       ['get', `/api/events/${event.id}/exports/scans.csv`],
       ['get', `/api/events/${event.id}/exports/audit.csv`],
+      ['get', `/api/events/${event.id}/exports/summary.csv`],
       ['get', '/api/platform/users'],
       ['post', '/api/platform/invitations', { email: 'x@example.com', role: 'platform_admin' }]
     ];
@@ -258,6 +262,7 @@ describe('event roles', () => {
 
     // The owner can do all of it.
     await owner.send('get', `/api/events/${event.id}/exports/attendance.csv`).expect(200);
+    await owner.send('get', `/api/events/${event.id}/exports/summary.csv`).expect(200);
     await owner.send('post', `/api/events/${event.id}/owner`, { userId: managerId }).expect(200);
     expect((await manager.send('get', `/api/events/${event.id}`)).body.myRole).toBe('owner');
     expect((await owner.send('get', `/api/events/${event.id}`)).body.myRole).toBe('manager');

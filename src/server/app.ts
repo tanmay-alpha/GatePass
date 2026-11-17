@@ -8,8 +8,9 @@ import { renderQr } from '../qr/renderer';
 import type { AccountUser, DesignConfig, EventPermission, SessionInfo } from '../shared/types';
 import { SESSION_ABSOLUTE_MS } from './accounts';
 import { attendeeQuerySchema } from './assist';
+import { streamCsv } from './csv';
 import { bulkDeliverySchema, deliveryFilterSchema, deliveryIdsSchema, singleDeliverySchema } from './deliveries';
-import type { AuthenticatedScanner, GatePass } from './gatepass';
+import type { AuthenticatedScanner, CsvExport, GatePass } from './gatepass';
 import { bearerToken, errorHandler, FailureThrottle, httpError, type Middleware, rateLimit } from './http';
 import { renderPassPage } from './pass-page';
 import { actorOf, type Principal } from './permissions';
@@ -389,10 +390,21 @@ export function createApp({
   const scannerOf = (res: express.Response): AuthenticatedScanner => res.locals.scanner as AuthenticatedScanner;
 
   const sessionInfo = (user: AccountUser, expiresAt: string): SessionInfo => ({ user, expiresAt, securityNotice: service.accounts.securityNotice(user.id) });
-  const sendCsv = (res: express.Response, filename: string, body: string) => {
+  /**
+   * Streams an export opened (and audited) by `service.openExport`. Once the headers are out, a failure can
+   * only cut the download short: the connection is destroyed so the file is visibly incomplete, never
+   * finished with a JSON error body.
+   */
+  const sendExport = async (res: express.Response, filename: string, exported: CsvExport) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(body);
+    try {
+      await streamCsv(res, exported.header, exported.next);
+    } catch (error) {
+      if (!res.headersSent) throw error;
+      console.error(JSON.stringify({ level: 'error', msg: 'export failed', requestId: res.locals.requestId ?? null, error: error instanceof Error ? error.message : String(error) }));
+      res.destroy();
+    }
   };
   const authLimit = limit(20);
   // Self-service reset emails: per address and requester, enough to retry a lost email; per address
@@ -686,8 +698,11 @@ export function createApp({
     res.status(201).json(await service.accounts.createInvitation({ role: 'manager', email: input.email, eventId: req.params.eventId }, actor(res)));
   });
 
-  app.get('/api/events/:eventId/operations', requireAccount, requireEvent('view'), (req, res) => {
-    res.json(service.operations(req.params.eventId));
+  app.get('/api/events/:eventId/operations', requireAccount, requireEvent('view'), async (req, res) => {
+    res.json(await service.operations(req.params.eventId));
+  });
+  app.get('/api/events/:eventId/report', requireAccount, requireEvent('view'), async (_req, res) => {
+    res.json(await service.report(eventOf(res)));
   });
 
   // Gates and policies
@@ -789,15 +804,11 @@ export function createApp({
   });
 
   // Exports: attendee personal data, owners only, each download audited.
-  app.get('/api/events/:eventId/exports/attendance.csv', requireAccount, requireEvent('export'), (req, res) => {
-    sendCsv(res, `gatepass-${req.params.eventId.slice(0, 8)}-attendance.csv`, service.attendanceCsv(eventOf(res), actor(res)));
-  });
-  app.get('/api/events/:eventId/exports/scans.csv', requireAccount, requireEvent('export'), (req, res) => {
-    sendCsv(res, `gatepass-${req.params.eventId.slice(0, 8)}-scans.csv`, service.scansCsv(eventOf(res), actor(res)));
-  });
-  app.get('/api/events/:eventId/exports/audit.csv', requireAccount, requireEvent('export'), (req, res) => {
-    sendCsv(res, `gatepass-${req.params.eventId.slice(0, 8)}-audit.csv`, service.auditCsv(eventOf(res), actor(res)));
-  });
+  for (const kind of ['attendance', 'scans', 'audit', 'summary'] as const) {
+    app.get(`/api/events/:eventId/exports/${kind}.csv`, requireAccount, requireEvent('export'), async (req, res) => {
+      await sendExport(res, `gatepass-${req.params.eventId.slice(0, 8)}-${kind}.csv`, await service.openExport(eventOf(res), kind, actor(res)));
+    });
+  }
 
   // ------------------------------------------------------------ scanner
 
