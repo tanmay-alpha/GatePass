@@ -436,6 +436,10 @@ const migrations: string[] = [
   CREATE TRIGGER pass_deliveries_event_insert BEFORE INSERT ON pass_deliveries
     WHEN (SELECT event_id FROM passes WHERE id = NEW.pass_id) IS NOT NEW.event_id
     BEGIN SELECT RAISE(ABORT, 'delivery pass belongs to another event'); END;
+  -- A door device's daily attendee-search budget (assist.ts) counts its own
+  -- lookups of the last 24 hours on every search; without this the count
+  -- reads every lookup row of the event.
+  CREATE INDEX audit_lookup_idx ON audit_log(entity_id, created_at) WHERE action = 'scanner.attendee_lookup';
   `
 ];
 

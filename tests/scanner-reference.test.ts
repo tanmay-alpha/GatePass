@@ -51,3 +51,20 @@ describe('pass references (the 8 characters printed under the QR code)', () => {
     expect(correlated.filter((detail) => detail.includes('passes_event_idx'))).toEqual([]);
   });
 });
+
+describe('door search budget', () => {
+  it("counts the device's lookups of the last day on the lookup index, not every audit row of the event", async () => {
+    const { scannerKey } = await seedEvent(h, 3);
+    const prepare = h.db.prepare.bind(h.db);
+    const budget: string[] = [];
+    const spy = vi.spyOn(h.db, 'prepare').mockImplementation((sql: string) => {
+      if (/FROM audit_log/.test(sql) && /attendee_lookup/.test(sql) && /COUNT\(\*\)/.test(sql)) budget.push(sql);
+      return prepare(sql);
+    });
+    await request(h.app).get('/api/scanner/attendees').query({ q: 'Ada' }).set('Authorization', `Bearer ${scannerKey}`).expect(200);
+    spy.mockRestore();
+    expect(budget).toHaveLength(1);
+    const plan = (h.db.prepare(`EXPLAIN QUERY PLAN ${budget[0]}`).all('x', 'x', 'x') as Array<{ detail: string }>).map((row) => row.detail);
+    expect(plan.join('\n')).toContain('audit_lookup_idx');
+  });
+});
