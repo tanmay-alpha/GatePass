@@ -47,6 +47,7 @@ Closed in Phase 5 (details in the engineering audit, "Phase 5 review"): **UX-R1*
 
 | ID | Item | Owner | Status | Acceptance criterion |
 | --- | --- | --- | --- | --- |
+| AUDIT-01 | `npm audit` reports GHSA-fc5q-39xc-vjpf (picomatch ≤ 4.0.7 ReDoS, high) in dev dependencies (vite, vitest); no patched release exists. Accepted in `scripts/audit.mjs` until 2026-12-31 (dev-only, patterns come from our own config). | E | Accepted with expiry. | A patched picomatch is in the lockfile and the exception is removed, or the exception is reviewed again before it expires. |
 | PERF-02 | Pass search uses `LIKE '%…%'` (22–35 ms at 25,000 passes, laptop). | A | Acceptable at this size. | Full-text search only if events grow well beyond 25,000 passes. |
 | PERF-03 | Shared `styles.css` (41 KB) carries admin-only rules into the scanner. | C | Open. | Admin-only rules move to the admin chunk; scanner CSS shrinks; visual and axe specs green. |
 | PERF-04 | A larger SQLite page cache halved the 25k operations summary in one (noisy) laptop run. | A | Not repeated on a quiet machine. | Measured on the durable host before changing `cache_size`. |
