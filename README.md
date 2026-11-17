@@ -130,13 +130,13 @@ What each suite covers and the latest results — including what has **not** bee
 
 **Status: not production-ready — blocked on durable hosting (owner approval).** The application and its tests are in place; the live deployment is a labelled demo.
 
-| | State (checked 2026-11-15) |
+| | State (checked 2026-11-17) |
 | --- | --- |
 | Frontend | Vercel project `gatepass`, production deploys from `main`; previews build the static UI only and never reach the production API. Serves `/version.json` (build commit). |
-| Backend | Render web service `gatepass-api`: **free plan, no persistent disk** (Render API: `plan: free`, `disk: null`), `DEMO_MODE=true` (the UI warns that data resets). Sleeps after 15 idle minutes; the first request took 14 s on 2026-11-15. |
+| Backend | Render web service `gatepass-api`: **free plan, no persistent disk** (last Render API read 2026-11-15: `plan: free`, `disk: null`), `DEMO_MODE=true` (the UI warns that data resets). On 2026-11-17 it served `main` `8b86114` at schema 4; PR #15 (schema 6) is not deployed. Sleeps after 15 idle minutes. |
 | Durable production | Deployment-ready but **not enabled**: `render.yaml` (Render Starter + 1 GB disk at `/data`, ≈ $7.25/month) or `docker-compose.yml` on a single host; comparison in [ADR 0009](docs/decisions/0009-durable-storage.md). Needs the owner's approval. Do not run a real event on the demo. |
-| Email | Resend integration built and tested against a fake provider; **live delivery not verified** (no API key or verified domain). Without it, links are shared by hand. |
-| Physical phones | Camera scanning on a real iPhone/Android **not verified** — [manual checklist](docs/test-matrix.md#manual-real-device-acceptance-checklist). |
+| Email | Resend integration and the encrypted pass-email outbox built and tested against fake providers (crash recovery, the provider's 24 h de-duplication window, key rotation, fair scheduling); **live delivery not verified** (no API key, verified domain or `PASS_DELIVERY_KEY`). Without them, links are shared by hand. "Accepted by provider" is never shown as delivered. |
+| Physical phones | Camera scanning and the installable scanner on a real iPhone/Android **not verified** — [checklist](docs/physical-device-checklist.md). Emulation does not count. |
 | Release check | `scripts/release-check.ts` (CI: `release-verify.yml`) passes only when frontend `/version.json`, backend `build.commit` and the expected commit agree and the nondestructive smoke checks pass. |
 
 Open items with acceptance criteria: [TODO.md](TODO.md).
@@ -146,7 +146,7 @@ Open items with acceptance criteria: [TODO.md](TODO.md).
 - Single process, single instance (SQLite single writer; in-memory rate limits). Do not run replicas against one database file.
 - Email is optional; without it, invitation and reset links are shown once and shared manually. No MFA.
 - No offline admission: if the scanner cannot reach the server, nobody is admitted.
-- Throughput numbers come from a laptop ([performance](docs/performance.md)); no hosted instance has been load-tested.
+- Throughput numbers come from a laptop ([performance](docs/performance.md)), including 25,000-pass events with dashboards and exports running; no hosted instance has been load-tested.
 - `node:sqlite` is still marked experimental in Node.js.
 
 ## Attribution

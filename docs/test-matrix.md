@@ -39,6 +39,28 @@ Runs of 2026-11-15/16 on branch `feat/production-readiness` (schema 4), on the h
 | **CI4** | PR #15 GitHub Actions | First push: `check (ubuntu-latest, 22/24)`, all four e2e projects, `docker`, `docker-run`, gitleaks and both CodeQL analyses passed; the CodeQL result check reported five new alerts (service worker, release-check, two e2e helpers). After the fix in `4654f5a`: all 15 jobs green, including `check (windows-latest, 24)` and the CodeQL result check (`dependency-review` skipped: repository variable not set). |
 | **P4** | Vercel preview for `feat/phase4-features` (`vercel curl --deployment …`) | `/version.json` → `4654f5a`; `/api/health` → 503 `{"error":"This preview deployment has no backend. Previews never connect to production data.","preview":true}`; `/sw.js` → 200, `Cache-Control: no-cache`, `text/javascript`; unauthenticated request → 302 (deployment protection). |
 
+### Phase 5 runs (branch `feat/phase4-features`, schema 6, 2026-11-17)
+
+Windows 10.0.26300, Node 24.14.1, Docker 29.9.2, unless a row says otherwise. Integration commit `9505667` (PR #15 head `6760640` + the Phase 5 branches) unless stated.
+
+| Key | Run | Result |
+| --- | --- | --- |
+| **V5-base** | `npx vitest run` on `6760640` before any change | 35 files, 417 passed, 4 skipped. |
+| **T5** | `npx tsc --noEmit` | 0 errors. |
+| **V5** | `npx vitest run` (full suite) | 43 files, 501 passed, 4 skipped (the Linux-only SIGTERM tests). New files: `delivery-recovery`, `delivery-keys`, `delivery-fairness`, `mail-fakes` (helper), `exports`, `queries`, `report`, `scanner-reference`, `live-impact`. |
+| **R5** | `shutdown`, `recovery`, `deliveries`, `delivery-recovery`, `delivery-keys`, `delivery-fairness`, `migration`, `exports` in Docker `node:24-bookworm-slim` (`git archive` of `3618985`, `npm ci`) | 8 files, 77/77, including every SIGTERM test. |
+| **E5** | `npm run build && npx playwright test` (all four projects, local built server) | 227 passed, 0 failed, 272 skipped, 6.1 min: chromium 163, firefox 27, webkit 27, mobile-chrome 10. Skips are browser gates (axe, overflow, PDF, fake-camera and offline-start specs run in Chromium only). Earlier runs on intermediate states: 4 failures, all fixed or explained — 3 Chromium specs hit the 20-a-minute sign-up limit (fixed: each e2e sign-up has its own client address) and the WebKit flake E2E-01 (see below). |
+| **E5-repeat** | WebKit `admission` + `live-changes`, `--repeat-each=8`; firefox + webkit `admission`, `operations-dashboard`, `--repeat-each=8` (QA) | 40/40; 79 passed, 1 failed (E2E-01). Across all repeats E2E-01 appeared in about 3 of ≈ 100 WebKit runs; base `273918b` 6/6. |
+| **A5** | `e2e/a11y.spec.ts` and `e2e/visual-review.spec.ts` (Chromium, part of E5) | 32 screens (templates, CSV import preview, issued passes, badge preview and print, scanner setup, live-change dialogs added), light and dark: 0 axe violations at 375 and 1280 px; no sideways scroll at 320–1440 px. Screenshots: `docs/screenshots/review-2026-11-pass3/`. |
+| **D5** | `scripts/rollback-rehearsal.sh`, OLD `273918b` (schema 5), NEW `3618985` (schema 6), `EXPECT_OLD_SCHEMA=5 EXPECT_NEW_SCHEMA=6` | 9/9 passed. A first invocation exited 1 without output (not diagnosed); the re-run passed every step. |
+| **D5-run** | Docker restart persistence + SIGTERM, schema-5 image (ops agent) | Admission survives `docker restart`, re-scan `already_redeemed`; `docker stop` 312 ms, exit 0; no token, key, pass link, email or `Bearer` in the log. The schema-6 image's persistence is covered by CI `docker-run` on the PR. |
+| **M5** | Base build `6760640` writes a schema-5 database (a redemption with a request id, sealed v1 emails in `queued` and `sending`); the new build opens it (QA, ad hoc) | Migrated to v6 with `.pre-v6.bak` at v5; the replayed request answered `admitted` (`replayed: true`), a re-scan `already_redeemed`; the interrupted email re-sent with the same idempotency key. The base build refuses the v6 file (exit 1, "newer than this build"); its `restore` of `.pre-v6.bak` works. |
+| **C5** | `tests/concurrency.test.ts` + `tests/invariants.test.ts` under background CPU load (QA) | 22/22. |
+| **RC5** | `scripts/release-check.ts` against production, read-only, with `PREVIEW_URL` | 12/12 against **`main` `8b86114`** (schema 4). This checks the current live demo, not PR #15. |
+| **S5** | `npm audit` and `npm audit --omit=dev`; gitleaks (8.24.3 over the worktree and 72 commits; 8.30.1 over the Phase 5 diff and logs) | 0 vulnerabilities; no leaks. |
+| **PF5** | `scripts/perf-phase5.ts` and `scripts/perf-queries.ts` (25,000-pass event, laptop) | Zero lost or duplicate admissions in every run; numbers in [performance.md](performance.md#2026-11-17-phase-5-large-events-exports-and-the-door). |
+| **B5** | `npm run build` bundle (raw / gzip) | `/scan` loads entry 222.6 / 69.9 kB + `ScannerApp` 46.9 / 15.0 kB (+ CSS); `AdminApp` 194.1 / 51.4 kB is not requested on `/scan` (asserted in `e2e/scanner-readiness.spec.ts`). Before: one 502 / 147 kB bundle for both. `qr-detector` 43.8 / 15.1 kB loads with the camera or the design tab. |
+
 Rows marked C or R below point to those dedicated runs for their detail; the same files also ran in V on the current state (all passed, SIGTERM test skipped).
 
 PR CI results are recorded in the PR. The last recorded CI run on `main` is PR #13's run (all 11 jobs passed, 2026-11-14).
@@ -286,9 +308,9 @@ Full host details for the load tests (OS build, disk model, database pragmas, ba
 
 ## Not verified
 
-- **Physical devices.** Camera scanning, the readiness checklist, the camera test code and installing the scanner have not been tried on a real iPhone or Android phone (no devices available). Playwright uses Chromium's fake camera (run E4) and Pixel 7 emulation; neither counts as device verification. Use the [manual checklist](#manual-real-device-acceptance-checklist) below.
+- **Physical devices.** Camera scanning, the readiness checklist, the camera test code and installing the scanner have not been tried on a real iPhone or Android phone (no devices available). Playwright uses Chromium's fake camera (runs E4, E5) and Pixel 7 emulation; neither counts as device verification. Use the [manual checklist](#manual-real-device-acceptance-checklist) below together with the Phase 5 additions in [physical-device-checklist.md](physical-device-checklist.md) (PWA install and reopen, screen lock and unlock, revocation while locked, slow backend, camera switching, low light, network loss and recovery).
 - **Printed badges.** Badge QR readability was checked on PDF renders (run PR4), not on paper from a real printer.
-- **`release-verify.yml` on GitHub.** It runs only on schedule and manual dispatch and has not run on GitHub; the release check was run locally (RC4).
+- **`release-verify.yml` against the new release.** It runs on schedule and manual dispatch only. One scheduled run on `main` succeeded (run 43998983005, against `8b86114`); it has not run against a deployment of PR #15.
 - **Live email delivery.** No Resend key, sending domain or `PASS_DELIVERY_KEY` was available. Invitations, resets and attendee pass email are tested against fake providers (`account-recovery`, `deliveries`, `shutdown`); no message has been sent through Resend.
 - **Durable hosting target.** A Render instance with a persistent disk, or a VM, has never been exercised; the container rehearsal (D4) used a local Docker volume. Production still runs the free demo (`demo: true`, RC4).
 - **Load on a hosted instance.** All performance numbers are from the laptop. No hosted instance has been load-tested.
