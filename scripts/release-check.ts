@@ -266,6 +266,11 @@ async function smoke(results: Result[]): Promise<void> {
       const body = record(res.json);
       if (res.status === 503 && body?.preview === true) return { level: 'pass', detail: 'HTTP 503 preview-no-backend' };
       if (res.status === 401 || res.status === 403) return { level: 'pass', detail: `HTTP ${res.status}: protected by Vercel Deployment Protection; the no-backend body is not observable` };
+      // Vercel Authentication answers anonymous requests with a redirect to its SSO endpoint, not 401/403.
+      const location = res.headers.get('location') ?? '';
+      if (res.status >= 300 && res.status < 400 && /^https:\/\/vercel\.com\/sso-api(\?|$)/.test(location)) {
+        return { level: 'pass', detail: `HTTP ${res.status} to vercel.com/sso-api: protected by Vercel Deployment Protection; the no-backend body is not observable` };
+      }
       if (res.status === 200) {
         return { level: 'warn', detail: 'preview answers /api/health: it has its own backend (GATEPASS_PREVIEW_BACKEND_ORIGIN); vercel.mjs refuses the production origin at build time, confirm the target is not production' };
       }

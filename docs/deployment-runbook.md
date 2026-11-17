@@ -77,7 +77,7 @@ All must be ticked before the change counts as released. Record the evidence (co
   EXPECTED_COMMIT=$(git rev-parse origin/main) \
   npx tsx scripts/release-check.ts          # or: node scripts/release-check.ts (Node ≥ 22.18)
   ```
-  It waits (default up to 15 min, tolerant of the free instance's ~50 s cold start) until `/version.json`, the frontend's `/api/health` and the backend's `/api/health` all report `EXPECTED_COMMIT` with `ok: true` and a schema version. Then it runs nondestructive smoke checks: CSP, `nosniff` and HSTS on the SPA; `/api/health` `no-store`; unauthenticated `GET /api/events` → 401; `POST /api/scanner/redeem` without a key → 401; an unknown 43-character pass link → 404 page with its own CSP; the backend origin refuses unproxied API requests (401/403); with `PREVIEW_URL`, a preview does not reach a backend. Exit 0 = released; 1 = a check failed (the report says which); 2 = bad input. It uses no credentials and changes nothing.
+  It waits (default up to 15 min, tolerant of the free instance's ~50 s cold start) until `/version.json`, the frontend's `/api/health` and the backend's `/api/health` all report `EXPECTED_COMMIT` with `ok: true` and a schema version. Then it runs nondestructive smoke checks: CSP, `nosniff` and HSTS on the SPA; `/api/health` `no-store`; unauthenticated `GET /api/events` → 401; `POST /api/scanner/redeem` without a key → 401; an unknown 43-character pass link → 404 page with its own CSP; the backend origin refuses unproxied API requests (401/403); with `PREVIEW_URL`, a preview does not reach a backend (503 `preview-no-backend`, or Vercel Deployment Protection: 401/403, or a redirect to `https://vercel.com/sso-api`, which is what this project's previews answer). Exit 0 = released; 1 = a check failed (the report says which); 2 = bad input. It uses no credentials and changes nothing.
   - On GitHub: run `release-verify.yml` with `workflow_dispatch` once **both** deployments report the release live; the run summary shows the report. It is deliberately not triggered by the deployment: the Render service deploys only after every GitHub check on the commit has completed successfully (`autoDeployTrigger: checksPass`, read from the Render API on 2026-11-16; [Render docs](https://render.com/docs/deploys#integrating-with-ci): `success`, `neutral` and `skipped` count as passing, anything else skips the deploy), so a check that waits for Render to serve that commit would keep Render waiting until it failed.
   - Every run of `release-verify.yml` on `main` (scheduled or manual) is itself a check on main's head commit. So the workflow passes `GATED_COMMIT=$GITHUB_SHA` and its committer time, and `release-check.ts` **defers** when that commit is less than an hour old (`DEPLOY_PENDING_GRACE`, default 3600 s) and the backend's `/api/health` reports another commit: it prints "Release check DEFERRED", writes a "deferred (not a pass)" summary and exits 0 at once, so it neither holds back nor cancels the pending Render deploy. A deferred run is **not** a release pass; run it again once Render is live. Only a positive commit mismatch defers; an unreachable or unhealthy backend is checked and fails as usual. Covered by `tests/release-check.test.ts`.
 - [ ] **7. Key application journeys pass.** See [Smoke journey](#smoke-journey).
@@ -204,11 +204,38 @@ docker build --build-arg GATEPASS_COMMIT=$(git rev-parse HEAD) -t gatepass:new .
 OLD_IMAGE=gatepass:old NEW_IMAGE=gatepass:new bash scripts/rollback-rehearsal.sh
 ```
 
+Optional `EXPECT_OLD_SCHEMA` / `EXPECT_NEW_SCHEMA` make the run fail unless the two images produce exactly those schema versions, so a rehearsal of a specific migration cannot silently pass against the wrong pair of builds. On Windows run the script with Git Bash (`C:/Git/usr/bin/bash.exe` on the maintainer's laptop); a bare `bash` may resolve to WSL's, which cannot see Docker Desktop's CLI from Git Bash paths.
+
 It starts OLD, seeds an event, a scanner and one admission; starts NEW (migration, `.pre-vN.bak` written), checks the admission survived and admits a second pass with the scanner key enrolled on OLD; verifies the `.bak` with OLD's `verify`; shows that NEW's `restore` would make the file unusable for OLD (control); restores with OLD's `restore`; starts OLD and requires the first admission present, the second gone and `verify` ok. It prints a PASS/FAIL report and removes its containers and volume (`KEEP=1` keeps them).
 
-Last run: 2026-11-17, OLD = `main` `8b86114` (schema 4), NEW = this branch at `6d2f831` (migration 5: `pass_deliveries`, `event_templates`), both images built from `git archive` of the commit (not the working tree), all 9 steps passed in about 31 s on Docker Desktop 29.9.2 (Windows): v4 → v5 migration kept the admission, wrote `gatepass.db.pre-v5.bak` at v4, the control showed OLD refusing a v5 file ("newer than this build"), and OLD's `restore` of the `.bak` brought back admission 1 without admission 2. The script needed no change for schema 5. Previous run: 2026-11-15, OLD = `4a6ba5c` (schema 3), NEW = schema 4.
+Last run: 2026-11-17, OLD = `main` `8b86114` (schema 4), NEW = `feat/phase4-features` `273918b` + the ops branch (schema 5), both images built with Docker 29 on Windows (OLD from `git archive 8b86114`), `EXPECT_OLD_SCHEMA=4 EXPECT_NEW_SCHEMA=5`: all 9 steps passed (v4 → v5 kept admission 1, `gatepass.db.pre-v5.bak` at v4, OLD refused the control v5 file, OLD's `restore` brought back admission 1 without admission 2). The same pair with `EXPECT_NEW_SCHEMA=6` failed as intended ("NEW migrated to schema v5, expected v6"). Previous runs: 2026-11-17 at `6d2f831` (4 → 5), 2026-11-15 (3 → 4).
 
-The same day, a persistence rehearsal on the schema-5 image (`gatepass:new`, named volume) passed: one-time enrollment (201, second use 410), admission, `docker restart` (pass still `redeemed`, re-scan `already_redeemed`, `verify` exit 0), online `backup` + `verify` of the copy, then `restore` into a **separate** volume and a second container, where the pass was `redeemed` and `verify` exited 0; both containers stopped with exit code 0 and no operator token, scanner key, enrollment code or pass token appeared in either log.
+The same day, a persistence rehearsal on the schema-5 image (named volume, published port, operator token set locally) passed: event, scanner (one-time enrollment), pass issued and admitted; `docker restart`; the pass was still `redeemed` and a re-scan answered `already_redeemed`; `docker stop -t 10` took about 0.3 s and exited 0 (`"shutting down","signal":"SIGTERM"` then `"stopped","code":0` in the log). The 15-line log had no error lines and none of: the operator token, scanner key, pass token, `/p/` links, `@` (email addresses), `re_` (Resend key prefix) or `Bearer`. The only warning was the expected "APP_PUBLIC_URL is not HTTPS".
+
+### Rehearsal for schema 6 (`pass_deliveries` migration)
+
+Run once migration 6 is merged into `feat/phase4-features`. OLD is the schema-5 build that is live (or about to be) before migration 6; NEW is the merged head. From the orchestrator's checkout, with Docker Desktop running:
+
+```sh
+OLD_COMMIT=273918b   # last schema-5 commit on feat/phase4-features (or the deployed main once PR #15 is merged)
+NEW_COMMIT=$(git rev-parse HEAD)
+tmp=$(mktemp -d)
+git archive "$OLD_COMMIT" | tar -x -C "$tmp"
+docker build --build-arg GATEPASS_COMMIT="$OLD_COMMIT" -t gatepass:v5 "$tmp"
+docker build --build-arg GATEPASS_COMMIT="$NEW_COMMIT" -t gatepass:v6 .
+rm -rf "$tmp"
+OLD_IMAGE=gatepass:v5 NEW_IMAGE=gatepass:v6 EXPECT_OLD_SCHEMA=5 EXPECT_NEW_SCHEMA=6 \
+  bash scripts/rollback-rehearsal.sh          # Windows: C:/Git/usr/bin/bash.exe scripts/rollback-rehearsal.sh
+docker rmi gatepass:v5 gatepass:v6
+```
+
+Pass criteria (the script enforces them): v5 database seeded and one admission; v6 starts on it, writes `/data/gatepass.db.pre-v6.bak` at schema 5, keeps admission 1 and admits a second pass; v5's `verify` accepts the `.bak`; v5 refuses to start on a v6 file ("newer than this build"); v5's `restore` of `.pre-v6.bak` gives back a schema-5 database with admission 1 and without admission 2; `verify` ok; every stop exits 0. Record the report lines in [test-matrix.md](test-matrix.md).
+
+Production procedure for "deploy schema 6 → roll back to the previous build":
+
+- **Free demo (today):** no disk, so the rolled-back v5 build starts on an empty database. Roll back Render (previous deploy → Rollback) and Vercel (`vercel rollback`) together, then run the release check with `EXPECTED_COMMIT=<v5 commit>`. Nothing to restore.
+- **Docker single host:** `docker compose stop gatepass`; `docker run --rm -v gatepass_gatepass-data:/data gatepass:v5 node dist/server/index.js verify /data/gatepass.db.pre-v6.bak`; `docker run --rm -v gatepass_gatepass-data:/data gatepass:v5 node dist/server/index.js restore /data/gatepass.db.pre-v6.bak`; start v5 (re-tag it `gatepass:local` or pin it in `docker-compose.yml`), then `verify` and the release check. Everything written on v6 (admissions, accounts, queued pass emails) is lost; take an `offsite-backup.sh` copy of the v6 database first.
+- **Render with a disk:** prefer rolling forward. A Render rollback alone starts v5 on the v6 disk, which refuses to open it, so the deploy fails and Render keeps v6 serving ([INFERENCE] from Render's failed-deploy behaviour, not exercised).
 
 ## Backup, verify and restore
 
@@ -276,7 +303,7 @@ The owner decided on 2026-11-10 to keep SQLite with a single writer on a persist
 **Once the owner approves**, choose one path:
 
 - **A. New service from the Blueprint (clean cut-over).**
-  1. Dashboard → New → Blueprint → this repository. Review the plan and the disk, enter the `sync: false` values (`ADMIN_TOKEN`, `ORIGIN_SECRET` — a new value, `APP_PUBLIC_URL`, `TRUST_PROXY`, and the optional `RESEND_API_KEY`/`MAIL_FROM`).
+  1. Dashboard → New → Blueprint → this repository. Review the plan and the disk, enter the `sync: false` values (`ADMIN_TOKEN`, `ORIGIN_SECRET` — a new value, `APP_PUBLIC_URL`, `TRUST_PROXY`, and the optional `RESEND_API_KEY`/`MAIL_FROM`/`PASS_DELIVERY_KEY`). Leave the optional ones empty until the owner has a Resend API key, a verified sending domain for `MAIL_FROM` and a generated `PASS_DELIVERY_KEY`; without them email stays off and `/api/health` reports `email:false` (`passEmail` appears only once email is on, and is `false` until `PASS_DELIVERY_KEY` is set too).
   2. Wait for `live`. Check `curl -fsS https://<new service host>/api/health`: `ok: true`, `build.commit` = `git rev-parse origin/main`, a `build.schema`, and no `"demo":true`. (Everything else on the origin answers 403 until requests come through Vercel with the origin secret, so the full release check runs after step 3.)
   3. Point Vercel at it: Production env `GATEPASS_BACKEND_ORIGIN=https://<new service host>` and `ORIGIN_SECRET` = the new service's value; redeploy production. Run the release check (gate 6) against `https://gatepass-sandy.vercel.app` with `BACKEND_URL` set to the new origin.
   4. Durability: create an event through the frontend, trigger Manual Deploy on the new service (a restart), confirm the event is still there, and run `node dist/server/index.js verify` from the Shell.
@@ -284,8 +311,9 @@ The owner decided on 2026-11-10 to keep SQLite with a single writer on a persist
 - **B. Upgrade the existing service in place.**
   1. Render Dashboard → `gatepass-api` → Settings → Instance type: **Free** → **Starter**.
   2. Disk page → Add disk: mount path **`/data`**, size **1 GB**. Render redeploys; the disk is available once the deploy is live.
-  3. Environment: `DEMO_MODE=false` (or delete it). `/api/health` must no longer contain `"demo":true`.
-  4. Durability check as in A.3, then the release check (gate 6).
+  3. Environment: `DEMO_MODE=false` (or delete it). `/api/health` must no longer contain `"demo":true`. Decide `ALLOW_SIGNUP` with the owner: the demo has `true`; the Blueprint uses `false` (accounts by invitation only).
+  4. Durability check as in A.4, then the release check (gate 6).
+- **C. Single Docker host instead of Render (Caddy, [deployment.md](deployment.md#oracle-cloud-arm64-ampere-a1-with-docker)).** `docker compose --profile proxy up -d --build` with `GATEPASS_DOMAIN`, `APP_PUBLIC_URL=https://<domain>` and `ADMIN_TOKEN` in `.env`; the database lives in the `gatepass_gatepass-data` volume on the host's local disk; Caddy terminates TLS. Cost: $0 on an Oracle Cloud Always Free Ampere A1 instance within its free allowance (capacity is not guaranteed; the owner must accept Oracle's terms and card verification), otherwise the price of any small VM plus a domain. The Vercel front is not needed (the container serves the SPA); if it is kept, point `GATEPASS_BACKEND_ORIGIN` at the host and set `ORIGIN_SECRET` on both. Backups: `scripts/offsite-backup.sh` with an off-host `BACKUP_UPLOAD_CMD`. Durability check: admit a pass, `docker compose restart gatepass`, re-scan → "Already used" (rehearsed locally on 2026-11-17, [Rollback rehearsal](#rollback-rehearsal)).
 
 If the server cannot write `/data` (for example because of mount ownership), it fails at startup and the deploy does not go live; check the logs. This has not been exercised on Render.
 
@@ -301,9 +329,9 @@ Consequences to accept:
 
 Stated plainly so nobody mistakes a plan for evidence:
 
-- `release-verify.yml` has not run on GitHub yet (`gh run list --workflow release-verify.yml` is empty on 2026-11-17); `scripts/release-check.ts` itself was run locally and read-only against production. `security.yml`, `codeql.yml` and the extended `ci.yml` ran on pull request #14 and on its merge to `main` (all green). `actionlint` 1.7.12 (with shellcheck) reports no findings on the workflows.
+- `release-verify.yml` has run on GitHub on a schedule (`gh run list --workflow release-verify.yml`: run 43998983005 on `main`, 2026-11-17T01:53Z, success); it has not been dispatched by hand after a release yet. `security.yml`, `codeql.yml` and the extended `ci.yml` ran on pull requests #14 and #15 (all green on PR #15 head `6760640`). `actionlint` 1.7.12 (with shellcheck) reports no findings on the workflows.
 - `VERCEL_GIT_COMMIT_SHA` reaches the Vercel build: observed on 2026-11-17, production `/version.json` reports `8b86114ff1352777abb03d67ff5b0f038311c932`, the same commit as `/api/health`.
-- The production release check passed read-only on 2026-11-17 against `main` `8b86114` (frontend `/version.json`, frontend and backend `/api/health` all on `8b86114`, schema 4, demo; 11 of 11 checks).
+- The production release check passed read-only on 2026-11-17 against `main` `8b86114` (frontend `/version.json`, frontend and backend `/api/health` all on `8b86114`, schema 4, demo, `email:false`; 12 of 12 checks with `PREVIEW_URL` set to the newest Vercel preview, which answers 302 to `vercel.com/sso-api`). This is a check of current `main`, not of PR #15. Render's plan and disk were not read on that day (no Render CLI or `RENDER_API_KEY` on the laptop); the last API read is the one in [Environments](#environments).
 - Render: a rollback, a disk, the Blueprint, and backups from the Render Shell have never been exercised. Vercel: `vercel rollback` has never been exercised.
 - `offsite-backup.sh` was run locally against a container of this branch (backup, verify, copy, checksum, upload hook to a local directory, retention, failure exits). A real off-host target (rclone/scp) has not been used.
 - Transactional email (Resend) is implemented but not configured anywhere: live delivery is untested.

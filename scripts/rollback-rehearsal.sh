@@ -2,6 +2,12 @@
 # Rollback rehearsal across a schema migration, on a throwaway Docker volume.
 #
 #   OLD_IMAGE=gatepass:old NEW_IMAGE=gatepass:new bash scripts/rollback-rehearsal.sh
+#   OLD_IMAGE=gatepass:v5 NEW_IMAGE=gatepass:v6 EXPECT_OLD_SCHEMA=5 EXPECT_NEW_SCHEMA=6 \
+#     bash scripts/rollback-rehearsal.sh
+#
+# EXPECT_OLD_SCHEMA / EXPECT_NEW_SCHEMA (optional) pin the schema versions the
+# two images must produce, so a rehearsal of a specific migration cannot pass
+# against the wrong pair of builds. Without them, any OLD < NEW pair is accepted.
 #
 # 1. OLD starts on an empty volume; synthetic data is seeded and one pass is admitted.
 # 2. OLD stops gracefully. NEW starts on the same volume: it migrates the
@@ -152,6 +158,8 @@ ok "OLD healthy; event $event_id; pass 1 ($pass1) admitted"
 stop "$old_c"
 old_schema=$(schema_of "$OLD_IMAGE" "$db")
 ok "OLD stopped cleanly; database at schema v$old_schema"
+[ -z "${EXPECT_OLD_SCHEMA:-}" ] || [ "$old_schema" = "$EXPECT_OLD_SCHEMA" ] \
+  || die "OLD produced schema v$old_schema, expected v$EXPECT_OLD_SCHEMA (wrong OLD_IMAGE?)"
 
 step "2. NEW ($NEW_IMAGE): migrate, keep pass 1, admit pass 2"
 start "$new_c" "$NEW_IMAGE" || die "NEW did not start on OLD's database (migration failed?)"
@@ -164,6 +172,8 @@ ok "NEW healthy after migration; pass 1 still redeemed; pass 2 ($pass2) admitted
 stop "$new_c"
 new_schema=$(schema_of "$NEW_IMAGE" "$db")
 [ "$new_schema" -gt "$old_schema" ] || die "NEW did not migrate (schema v$old_schema -> v$new_schema); nothing to roll back across"
+[ -z "${EXPECT_NEW_SCHEMA:-}" ] || [ "$new_schema" = "$EXPECT_NEW_SCHEMA" ] \
+  || die "NEW migrated to schema v$new_schema, expected v$EXPECT_NEW_SCHEMA (wrong NEW_IMAGE?)"
 bak="$db.pre-v$new_schema.bak"
 oneoff "$NEW_IMAGE" test -f "$bak" || die "NEW did not write $bak"
 bak_schema=$(schema_of "$OLD_IMAGE" "$bak")

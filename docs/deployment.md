@@ -28,8 +28,13 @@ All configuration is environment variables (see `.env.example`). The server refu
 | `CLIENT_DIR` | `dist/client` | Built UI; served only if it contains `index.html`. |
 | `HTTPS_CERT_FILE`, `HTTPS_KEY_FILE` | unset | Optional TLS in Node. Normally TLS terminates at the proxy. |
 | `GATEPASS_DOMAIN` | unset | Read only by the compose `proxy` profile (Caddy site address). |
+| `DEMO_MODE` | `false` | `true` makes the UI warn that all data can reset at any time and adds `"demo":true` to `/api/health`. Only for a deployment without durable storage. |
+| `ORIGIN_SECRET`, `CLIENT_IP_HEADER` | unset | Only when a CDN such as Vercel sits in front: the origin refuses requests without the matching `X-Origin-Secret` header (except `/api/health`); `CLIENT_IP_HEADER` (Vercel: `x-vercel-forwarded-for`) is honoured only together with `ORIGIN_SECRET`. Not needed behind Caddy. |
+| `RESEND_API_KEY`, `MAIL_FROM` | unset | Transactional email (invitations, password resets). Both need a Resend account and a sending domain verified in Resend. Unset: email is off, links are handed over by hand. |
+| `PASS_DELIVERY_KEY`, `PASS_EMAIL_PER_SECOND`, `PASS_EMAIL_MAX_ATTEMPTS` | unset, `2`, `8` | Attendee pass email ([ADR 0012](decisions/0012-pass-email-outbox.md)); needs `RESEND_API_KEY` and `MAIL_FROM` too. 32 random bytes, base64; keep it apart from database backups. Unset: pass email is off. |
+| `GATEPASS_COMMIT` | unset | Commit reported by `/api/health` and `/version.json`; set by `docker build --build-arg GATEPASS_COMMIT=$(git rev-parse HEAD)`. |
 
-Health check: `GET /api/health` returns `200 {"ok":true,"service":"gatepass","signup":false}` (`signup` mirrors `ALLOW_SIGNUP`), or `503` when the database is unusable.
+Health check: `GET /api/health` returns `200 {"ok":true,"service":"gatepass","signup":false,"email":false,"build":{"commit":…,"schema":…}}` (`signup` mirrors `ALLOW_SIGNUP`, `email` whether Resend is configured; `"demo":true` and `passEmail` appear only when they apply), or `503` when the database is unusable.
 
 Camera scanning on `/scan` needs a secure context: HTTPS, or `http://localhost` on the same machine. Over plain HTTP from another device the browser blocks the camera.
 

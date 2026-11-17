@@ -24,7 +24,9 @@ backend half, leaving the frontend and backend on different commits.
   - Require conversation resolution before merging.
 - **Require status checks to pass**, with "Require branches to be up to date
   before merging" on (the checks must have run against the merge result that
-  Render will deploy). Exact check names, as reported on PR #14:
+  Render will deploy). Exact check names, as reported on PR #14 and again on
+  PR #15 head `6760640` (2026-11-17, `gh api …/commits/<sha>/check-runs`, all
+  green; `dependency-review` skipped):
 
   | Workflow | Required check names |
   | --- | --- |
@@ -57,6 +59,29 @@ backend half, leaving the frontend and backend on different commits.
 - `Vercel`, `Vercel Preview Comments`: produced by the Vercel GitHub app for
   previews. They are useful signals, but making them required ties merges to
   Vercel availability; leave them optional.
+
+- `release-check` must stay out of the list even if it is later triggered on
+  pull requests: Render deploys `main` only after **every** check on the commit
+  succeeds (`checksPass`), and the release check waits for that deploy, so
+  requiring it would deadlock merges and deploys.
+
+## Open CodeQL alerts (2026-11-17)
+
+`gh api 'repos/tanmay-alpha/GatePass/code-scanning/alerts?state=open'` lists 6
+alerts, all on `main` in `src/server/app.ts` (line numbers at `8b86114`). All
+are false positives; the owner should dismiss them with these reasons before
+turning on the `code_scanning` rule, so the alert list stays meaningful:
+
+| # | Rule | Line | Why it is a false positive |
+| --- | --- | --- | --- |
+| 5 | `js/clear-text-storage-of-sensitive-data` | 284 | `setSessionCookie` puts the random session token in an `HttpOnly; SameSite=Strict; Secure` (`__Host-` on HTTPS) cookie: that is the session mechanism; the server stores only its hash. |
+| 6 | `js/missing-rate-limiting` | 777 | `GET /{*path}` sends the static `index.html`; no database or credential work. `/api/*` is rate limited (line 240). |
+| 7, 8 | `js/user-controlled-bypass` | 293, 301 | `requireAccount`: the "user-controlled" value is the presented credential itself, compared in constant time with the operator token or looked up as a session hash; there is no bypass branch. |
+| 9 | `js/user-controlled-bypass` | 360 | `requireScanner`: same pattern for scanner keys. |
+| 10 | `js/user-controlled-bypass` | 516 | Invitation accept reads the optional current session only to link the invitation to a signed-in user; the invitation token is still required and checked. |
+
+The `code_scanning` rule below blocks only alerts a PR **introduces**, so these
+existing ones do not block merging either way.
 
 ## Matrix and job renames
 
