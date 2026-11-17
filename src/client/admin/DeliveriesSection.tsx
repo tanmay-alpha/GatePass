@@ -1,6 +1,6 @@
-import { ChevronLeft, ChevronRight, Mail, RefreshCw, Send, X } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Mail, RefreshCw, Send, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import type { DeliveryActionResult, DeliveryList, DeliverySkipReason, DeliveryStatus, EventSummary, IssuedPass, PassDelivery } from '../../shared/types';
+import type { DeliveryActionResult, DeliveryList, DeliveryPause, DeliverySkipReason, DeliveryStatus, EventSummary, IssuedPass, PassDelivery } from '../../shared/types';
 import { api } from '../api';
 import { useConfirm } from '../dialog';
 import { formatShortInZone } from '../time';
@@ -15,6 +15,8 @@ import './deliveries.css';
 // freshly issued passes, and the per-event delivery status card
 // (docs/decisions/0012-pass-email-outbox.md). "Accepted by provider" is the
 // strongest claim the product makes: delivery to the inbox is never confirmed.
+// "Requires action" (unconfirmed) means the email may or may not have been
+// sent; only the organizer can decide whether to send a new link.
 
 const PAGE_SIZE = 50;
 /** The bulk endpoints accept at most this many ids per request. */
@@ -27,8 +29,19 @@ const STATUS_META: Record<DeliveryStatus, { label: string; tone: Tone }> = {
   sending: { label: 'Sending', tone: 'info' },
   accepted: { label: 'Accepted by provider', tone: 'ok' },
   failed: { label: 'Failed', tone: 'bad' },
-  cancelled: { label: 'Cancelled', tone: 'muted' }
+  cancelled: { label: 'Cancelled', tone: 'muted' },
+  unconfirmed: { label: 'Requires action', tone: 'warn' }
 };
+
+const PAUSED: Record<DeliveryPause, string> = {
+  no_provider: 'this server has no email provider set up (RESEND_API_KEY and MAIL_FROM).',
+  no_key:
+    'the server is missing PASS_DELIVERY_KEY, the key that unlocks the waiting links. Ask the operator to set it again; a new key needs the old one in PASS_DELIVERY_PREVIOUS_KEYS, or these emails fail and need new links.'
+};
+
+/** Why an unconfirmed email needs a decision, shown before a new link is sent. */
+const DUPLICATE_RISK =
+  'The email provider may already have sent the earlier email: it took a request GatePass could not confirm in time. Check the provider’s log if you can. Sending a new link replaces the pass link, so the current QR code and link stop working, including copies already printed or forwarded; the attendee may get two emails, and only the newest link works.';
 
 const SKIP_LABEL: Record<DeliverySkipReason, string> = {
   not_found: 'not found',
@@ -135,14 +148,31 @@ export function EmailIssuedPasses({ eventId, passes }: { eventId: string; passes
   );
 }
 
+/** Queued again after an attempt that did not go through (a provider error, a rate limit or a restart). */
+function retryScheduled(delivery: PassDelivery): boolean {
+  return delivery.status === 'queued' && delivery.lastError !== null;
+}
+
+/** What happened and what comes next, in plain words; never the sealed link or a raw provider answer. */
 function statusDetail(delivery: PassDelivery, zone: string): string {
-  if (delivery.status === 'queued' && delivery.lastError) {
-    return `Retrying after: ${delivery.lastError}${delivery.nextAttemptAt ? ` Next try ${formatShortInZone(delivery.nextAttemptAt, zone)}.` : ''}`;
+  const at = (iso: string | null) => formatShortInZone(iso, zone);
+  const lines: Array<string | null | false> = [];
+  if (retryScheduled(delivery)) {
+    lines.push(
+      `${delivery.attempts ? `Attempt ${delivery.attempts} did not go through` : 'Not sent yet'}: ${delivery.lastError}`,
+      Boolean(delivery.nextAttemptAt) && `Next try ${at(delivery.nextAttemptAt)}.`
+    );
+  } else if (delivery.status === 'sending') {
+    lines.push(`Being handed to the email provider (attempt ${delivery.attempts}).`);
+  } else if (delivery.status === 'accepted') {
+    lines.push(`Handed to the email provider ${at(delivery.acceptedAt)}; delivery to the inbox is not confirmed.`, Boolean(delivery.providerId) && `Provider message id ${delivery.providerId}.`);
+  } else if (delivery.status === 'unconfirmed') {
+    lines.push(delivery.lastError, Boolean(delivery.uncertainSince) && `Look in the provider’s log from ${at(delivery.uncertainSince)}.`);
+  } else if (delivery.status !== 'queued') {
+    lines.push(delivery.lastError);
   }
-  const later = delivery.superseded ? ' A later email replaced this one.' : '';
-  if (delivery.status === 'accepted') return `Handed to the email provider ${formatShortInZone(delivery.acceptedAt, zone)}; delivery to the inbox is not confirmed.${later}`;
-  if (delivery.status === 'failed' || delivery.status === 'cancelled') return `${delivery.lastError ?? ''}${later}`;
-  return '';
+  if (delivery.superseded) lines.push('A later email replaced this one.');
+  return lines.filter(Boolean).join(' ');
 }
 
 /** Per-event status of pass emails, with retry and cancel. Hidden until the event has any. */
@@ -202,22 +232,31 @@ export function DeliveriesSection({ event }: { event: EventSummary }) {
 
   async function sendAgain(deliveries: PassDelivery[], key: string) {
     const many = deliveries.length > 1;
+    const unconfirmed = deliveries.some((delivery) => delivery.status === 'unconfirmed');
+    const who = deliveries[0].attendeeName || deliveries[0].recipient;
     const ok = await confirm({
-      title: many ? `Send ${deliveries.length} passes again with new links?` : `Send the pass for ${deliveries[0].attendeeName || deliveries[0].recipient} again?`,
-      body:
-        'Links are erased once an email is accepted, fails or is cancelled, so sending again creates a new link: the current QR code and link of the pass stop working, including any copy already printed or forwarded.',
-      confirmLabel: many ? `Reissue and email ${deliveries.length}` : 'Reissue and email'
+      title: unconfirmed
+        ? many
+          ? `Send ${deliveries.length} new links? Some attendees may already have their email.`
+          : `Send ${who} a new link? They may already have the email.`
+        : many
+          ? `Send ${deliveries.length} passes again with new links?`
+          : `Send the pass for ${who} again?`,
+      body: unconfirmed
+        ? DUPLICATE_RISK
+        : 'Links are erased once an email is accepted, fails or is cancelled, so sending again creates a new link: the current QR code and link of the pass stop working, including any copy already printed or forwarded.',
+      confirmLabel: unconfirmed ? (many ? `Send ${deliveries.length} new links` : 'Send new link') : many ? `Reissue and email ${deliveries.length}` : 'Reissue and email'
     });
     if (ok) await act(key, 'retry', deliveries.map((delivery) => delivery.id), true, 'queued with new links');
   }
 
-  async function sendAllFailed() {
+  /** Every failed or unconfirmed email not replaced since, up to one batch per click (the count shrinks as they are sent again). */
+  async function sendAllWith(state: 'failed' | 'unconfirmed') {
     setError('');
     try {
-      // Up to one batch per click; the count shrinks as emails are sent again.
-      const failed = await adminApi<DeliveryList>(`/api/events/${event.id}/deliveries?status=failed&limit=${BULK_LIMIT}`);
-      const open = failed.deliveries.filter((delivery) => !delivery.superseded);
-      if (open.length) await sendAgain(open, 'bulk');
+      const found = await adminApi<DeliveryList>(`/api/events/${event.id}/deliveries?status=${state}&limit=${BULK_LIMIT}`);
+      const open = found.deliveries.filter((delivery) => !delivery.superseded);
+      if (open.length) await sendAgain(open, `bulk-${state}`);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -240,11 +279,17 @@ export function DeliveriesSection({ event }: { event: EventSummary }) {
       </SectionHead>
       <div className="delivery-counts" role="status">
         <ToneBadge tone={waiting ? 'info' : 'muted'}>{waiting} waiting</ToneBadge>
-        {counts.retrying ? <ToneBadge tone="warn">{counts.retrying} retrying</ToneBadge> : null}
+        {counts.retrying ? <ToneBadge tone="warn">{counts.retrying} retry scheduled</ToneBadge> : null}
         <ToneBadge tone={counts.accepted ? 'ok' : 'muted'}>{counts.accepted} accepted by provider</ToneBadge>
+        {counts.unconfirmed ? <ToneBadge tone="warn">{counts.unconfirmed} require action</ToneBadge> : null}
         <ToneBadge tone={counts.failed ? 'bad' : 'muted'}>{counts.failed} failed</ToneBadge>
         <ToneBadge tone="muted">{counts.cancelled} cancelled</ToneBadge>
       </div>
+      {list.data?.paused ? (
+        <p className="notice delivery-paused" role="status">
+          <AlertTriangle size={16} aria-hidden className="warning-text" /> Sending is paused: {PAUSED[list.data.paused]} Waiting emails stay queued until then; you can still cancel them.
+        </p>
+      ) : null}
       <div className="pass-actions">
         <label>
           <span className="sr-only">Filter pass emails by status</span>
@@ -257,11 +302,18 @@ export function DeliveriesSection({ event }: { event: EventSummary }) {
             ))}
           </select>
         </label>
-        {manage && counts.failed > 0 ? (
+        {manage && (counts.failed > 0 || counts.unconfirmed > 0) ? (
           <span className="pass-actions-end actions">
-            <button type="button" className="btn btn-secondary btn-small" onClick={() => void sendAllFailed()} disabled={pending !== null}>
-              <Send size={14} aria-hidden /> {pending === 'bulk' ? 'Queuing…' : `Send ${counts.failed} failed again`}
-            </button>
+            {counts.unconfirmed > 0 ? (
+              <button type="button" className="btn btn-secondary btn-small" onClick={() => void sendAllWith('unconfirmed')} disabled={pending !== null}>
+                <Send size={14} aria-hidden /> {pending === 'bulk-unconfirmed' ? 'Queuing…' : `Send ${counts.unconfirmed} new link${counts.unconfirmed === 1 ? '' : 's'}`}
+              </button>
+            ) : null}
+            {counts.failed > 0 ? (
+              <button type="button" className="btn btn-secondary btn-small" onClick={() => void sendAllWith('failed')} disabled={pending !== null}>
+                <Send size={14} aria-hidden /> {pending === 'bulk-failed' ? 'Queuing…' : `Send ${counts.failed} failed again`}
+              </button>
+            ) : null}
           </span>
         ) : null}
       </div>
@@ -286,7 +338,13 @@ export function DeliveriesSection({ event }: { event: EventSummary }) {
           <tbody>
             {rows.map((delivery) => {
               const detail = statusDetail(delivery, zone);
-              const retrying = delivery.status === 'queued' && delivery.attempts > 0;
+              const retrying = retryScheduled(delivery);
+              // An unconfirmed email replaced by a later one needs no decision any more.
+              const badge = retrying
+                ? { label: 'Retry scheduled', tone: 'warn' as const }
+                : delivery.status === 'unconfirmed' && delivery.superseded
+                  ? { label: 'Not confirmed', tone: 'muted' as const }
+                  : STATUS_META[delivery.status];
               return (
                 <tr key={delivery.id}>
                   <td className="cell-primary">
@@ -294,7 +352,7 @@ export function DeliveriesSection({ event }: { event: EventSummary }) {
                     <div className="muted small">{delivery.recipient}</div>
                   </td>
                   <td className="delivery-status" data-label="Status">
-                    <ToneBadge tone={retrying ? 'warn' : STATUS_META[delivery.status].tone}>{retrying ? 'Retrying' : STATUS_META[delivery.status].label}</ToneBadge>
+                    <ToneBadge tone={badge.tone}>{badge.label}</ToneBadge>
                     {detail ? <div className="muted small delivery-detail">{detail}</div> : null}
                   </td>
                   <td className="num muted" data-label="Attempts">
@@ -329,13 +387,26 @@ export function DeliveriesSection({ event }: { event: EventSummary }) {
                         <span className="row-action-text">Cancel</span>
                       </button>
                     ) : null}
+                    {manage && !delivery.superseded && delivery.status === 'unconfirmed' ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-icon"
+                        onClick={() => void sendAgain([delivery], delivery.id)}
+                        disabled={pending !== null}
+                        aria-label={`Send new link to ${delivery.recipient}`}
+                        title="Send a new link (the attendee may get two emails)"
+                      >
+                        <Send size={15} aria-hidden />
+                        <span className="row-action-text">Send new link</span>
+                      </button>
+                    ) : null}
                     {manage && !delivery.superseded && (delivery.status === 'failed' || delivery.status === 'cancelled' || delivery.status === 'accepted') ? (
                       <button
                         type="button"
                         className="btn btn-ghost btn-icon"
                         onClick={() => void sendAgain([delivery], delivery.id)}
                         disabled={pending !== null}
-                        aria-label={`Send the pass to ${delivery.recipient} again with a new link`}
+                        aria-label={`Send again to ${delivery.recipient} with a new link`}
                         title="Send again with a new link"
                       >
                         <Send size={15} aria-hidden />

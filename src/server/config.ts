@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+/** 32 random bytes in base64 or base64url (43 characters, optional padding). */
+const DELIVERY_KEY = /^[A-Za-z0-9+/_-]{43}=?$/;
+const decodeDeliveryKey = (value: string) => Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+
 const envSchema = z.object({
   ADMIN_TOKEN: z
     .string({ error: 'ADMIN_TOKEN is required. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"' })
@@ -52,9 +56,35 @@ const envSchema = z.object({
    */
   PASS_DELIVERY_KEY: z
     .string()
-    .regex(/^[A-Za-z0-9+/_-]{43}=?$/, 'PASS_DELIVERY_KEY must be 32 random bytes in base64. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"')
-    .transform((value) => Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64'))
+    .regex(DELIVERY_KEY, 'PASS_DELIVERY_KEY must be 32 random bytes in base64. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"')
+    .transform(decodeDeliveryKey)
     .refine((key) => key.length === 32, 'PASS_DELIVERY_KEY must decode to exactly 32 bytes')
+    .optional(),
+  /**
+   * Earlier PASS_DELIVERY_KEY values during a rotation, comma-separated: they
+   * still open links sealed before it, and the worker re-seals waiting links
+   * under PASS_DELIVERY_KEY when it starts. Remove them once the start log
+   * shows no link left that needs them.
+   */
+  PASS_DELIVERY_PREVIOUS_KEYS: z
+    .string()
+    .transform((value) =>
+      value
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean)
+    )
+    .pipe(
+      z
+        .array(
+          z
+            .string()
+            .regex(DELIVERY_KEY, 'PASS_DELIVERY_PREVIOUS_KEYS must list 32-byte base64 keys separated by commas')
+            .transform(decodeDeliveryKey)
+            .refine((key) => key.length === 32, 'PASS_DELIVERY_PREVIOUS_KEYS entries must each decode to exactly 32 bytes')
+        )
+        .max(4, 'PASS_DELIVERY_PREVIOUS_KEYS takes at most 4 keys; drop the ones the start log no longer reports links for')
+    )
     .optional(),
   /** Pass emails handed to the provider per second at most (Resend's default account limit is 2). */
   PASS_EMAIL_PER_SECOND: z.coerce.number().min(0.1).max(100).default(2),
@@ -83,7 +113,15 @@ const envSchema = z.object({
   .refine((env) => !env.CLIENT_IP_HEADER || env.ORIGIN_SECRET, {
     message: 'CLIENT_IP_HEADER requires ORIGIN_SECRET; without it any client could set the header and pick its own rate-limit bucket'
   })
-  .refine((env) => !env.RESEND_API_KEY || env.MAIL_FROM, { message: 'RESEND_API_KEY requires MAIL_FROM (a sender on a domain verified with Resend)' });
+  .refine((env) => !env.RESEND_API_KEY || env.MAIL_FROM, { message: 'RESEND_API_KEY requires MAIL_FROM (a sender on a domain verified with Resend)' })
+  .refine((env) => !env.PASS_DELIVERY_PREVIOUS_KEYS?.length || env.PASS_DELIVERY_KEY, { message: 'PASS_DELIVERY_PREVIOUS_KEYS needs PASS_DELIVERY_KEY (the key new links are sealed with)' })
+  // Object refinements also run when a key failed to parse, so the values may still be strings.
+  .refine((env) => !env.PASS_DELIVERY_PREVIOUS_KEYS?.some((key) => Buffer.isBuffer(key) && Buffer.isBuffer(env.PASS_DELIVERY_KEY) && key.equals(env.PASS_DELIVERY_KEY)), {
+    message: 'PASS_DELIVERY_PREVIOUS_KEYS must not contain PASS_DELIVERY_KEY'
+  })
+  .refine((env) => new Set(env.PASS_DELIVERY_PREVIOUS_KEYS?.map((key) => Buffer.from(key).toString('hex'))).size === (env.PASS_DELIVERY_PREVIOUS_KEYS?.length ?? 0), {
+    message: 'PASS_DELIVERY_PREVIOUS_KEYS lists a key more than once'
+  });
 
 export type AppConfig = z.infer<typeof envSchema>;
 

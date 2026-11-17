@@ -5,7 +5,7 @@ export interface MailMessage {
   subject: string;
   text: string;
   html: string;
-  /** Provider-side de-duplication: a retried request with the same key sends at most once. */
+  /** Provider-side de-duplication: a retried request with the same key is not sent again while the provider remembers the key (Resend: 24 hours). */
   idempotencyKey?: string;
 }
 
@@ -14,15 +14,18 @@ export interface MailMessage {
  * (src/server/deliveries.ts):
  * - `accepted`: the provider took the message and returned its id;
  * - `refused`: the provider answered and said no; the same request would be refused again;
- * - `retry`: no answer, a timeout, a server error, a credential problem or a rate limit.
- *   The provider may already have accepted it, so a retry must reuse the same
- *   idempotency key. `throttled` (rate limited) attempts do not count against
- *   the attempt limit.
+ * - `retry`: worth another try later. `ambiguous` when the provider may
+ *   already have accepted the message (no answer, a timeout, an interruption,
+ *   a server error, a success answer without a readable id): a retry must
+ *   reuse the same idempotency key, and only while the provider still
+ *   remembers it. Definite otherwise (rate limit, credentials, a concurrent
+ *   request with the same key): nothing was sent by this request.
+ *   `throttled` (rate limited) attempts do not count against the attempt limit.
  */
 export type MailAttempt =
   | { status: 'accepted'; providerId: string }
   | { status: 'refused'; error: string }
-  | { status: 'retry'; error: string; throttled?: boolean; retryAfterMs?: number };
+  | { status: 'retry'; error: string; ambiguous: boolean; throttled?: boolean; retryAfterMs?: number };
 
 /**
  * Transactional email. `sent` means the provider accepted the message and
@@ -41,12 +44,12 @@ export const disabledMailer: Mailer = {
   send: async () => ({ status: 'disabled' })
 };
 
-/** `mailer.attempt`, or `send` with every failure treated as retryable (safe: the idempotency key prevents duplicates). */
+/** `mailer.attempt`, or `send` with every failure treated as ambiguous (`send` does not say whether the provider took the message). */
 export async function attemptSend(mailer: Mailer, message: MailMessage, signal?: AbortSignal): Promise<MailAttempt> {
   if (mailer.attempt) return mailer.attempt(message, signal);
   const report = await mailer.send(message);
   if (report.status === 'sent') return { status: 'accepted', providerId: report.providerId };
-  if (report.status === 'failed') return { status: 'retry', error: report.error };
+  if (report.status === 'failed') return { status: 'retry', error: report.error, ambiguous: true };
   return { status: 'refused', error: 'Email is not configured on this server.' };
 }
 
@@ -86,20 +89,31 @@ export function resendMailer({ apiKey, from, fetch: fetchImpl = fetch, timeoutMs
       });
       const body = (await response.json().catch(() => ({}))) as { id?: unknown; name?: unknown; message?: unknown };
       if (response.ok && typeof body.id === 'string') return { status: 'accepted', providerId: body.id };
+      if (response.ok) {
+        // A success status whose body was cut off or malformed: the message was most likely taken.
+        console.error(JSON.stringify({ level: 'error', msg: 'email provider answer unreadable', provider: 'resend', status: response.status }));
+        return { status: 'retry', error: 'The email provider answered without a readable message id; it may have accepted the message.', ambiguous: true };
+      }
       const reason = typeof body.name === 'string' ? body.name : `HTTP ${response.status}`;
       console.error(JSON.stringify({ level: 'error', msg: 'email provider refused message', provider: 'resend', status: response.status, reason }));
       const error = `The email provider refused the message (${reason}).`;
-      if (response.status === 429) return { status: 'retry', error, throttled: true, retryAfterMs: retryAfterMs(response.headers.get('retry-after')) };
-      // Server errors, credential or sending-domain problems the operator can fix, and a
-      // concurrent request with the same idempotency key are worth another try later.
-      if (response.status >= 500 || response.status === 401 || response.status === 403 || reason === 'concurrent_idempotent_requests') return { status: 'retry', error };
+      // Rate limits and exhausted quotas: nothing was sent.
+      if (response.status === 429) return { status: 'retry', error, ambiguous: false, throttled: true, retryAfterMs: retryAfterMs(response.headers.get('retry-after')) };
+      // A server error may come after the provider took the message.
+      if (response.status >= 500) return { status: 'retry', error, ambiguous: true };
+      // Credential or sending-domain problems the operator can fix, and a concurrent request with
+      // the same idempotency key (an earlier attempt still running), are worth another try later;
+      // this request sent nothing.
+      if (response.status === 401 || response.status === 403 || reason === 'concurrent_idempotent_requests') return { status: 'retry', error, ambiguous: false };
       return { status: 'refused', error };
     } catch (error) {
+      // No answer: the request may have reached the provider before the connection failed.
       const interrupted = Boolean(signal?.aborted) && !timeout.aborted;
       const reason = interrupted ? 'interrupted' : error instanceof Error ? error.name : 'unknown';
       console.error(JSON.stringify({ level: 'error', msg: 'email provider unreachable', provider: 'resend', reason }));
       return {
         status: 'retry',
+        ambiguous: true,
         error: interrupted
           ? 'Sending was interrupted by a server shutdown; the provider may have accepted it.'
           : reason === 'TimeoutError'
@@ -118,10 +132,10 @@ export function resendMailer({ apiKey, from, fetch: fetchImpl = fetch, timeoutMs
   };
 }
 
-/** `Retry-After` in seconds (the only form Resend sends); 1 s when absent or unreadable, at most 10 minutes. */
-function retryAfterMs(header: string | null): number {
+/** `Retry-After` in seconds (the only form Resend sends), at most 10 minutes; undefined when absent or unreadable. */
+function retryAfterMs(header: string | null): number | undefined {
   const seconds = Number(header);
-  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 600) * 1000 : 1000;
+  return header && Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 600) * 1000 : undefined;
 }
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };

@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createApp } from './app';
 import { buildCommit, loadConfig, trustProxySetting } from './config';
 import { backupDatabase, openDatabase } from './db';
-import { DeliveryWorker } from './deliveries';
+import { deliveryWorkerFor } from './deliveries';
 import { GatePass } from './gatepass';
 import { disabledMailer, resendMailer } from './mailer';
 import { restoreDatabase, verifyDatabase } from './integrity';
@@ -74,10 +74,13 @@ function start(): void {
   const db = openDatabase(config.DATABASE_FILE);
   const mailer =
     config.RESEND_API_KEY && config.MAIL_FROM ? resendMailer({ apiKey: config.RESEND_API_KEY, from: config.MAIL_FROM, url: config.RESEND_API_URL }) : disabledMailer;
-  const service = new GatePass(db, { publicUrl: config.APP_PUBLIC_URL, mailer, passDeliveryKey: config.PASS_DELIVERY_KEY });
-  const worker = service.deliveries.available
-    ? new DeliveryWorker(service.deliveries, mailer, { perSecond: config.PASS_EMAIL_PER_SECOND, maxAttempts: config.PASS_EMAIL_MAX_ATTEMPTS })
-    : null;
+  const service = new GatePass(db, {
+    publicUrl: config.APP_PUBLIC_URL,
+    mailer,
+    passDeliveryKey: config.PASS_DELIVERY_KEY,
+    passDeliveryPreviousKeys: config.PASS_DELIVERY_PREVIOUS_KEYS
+  });
+  const worker = deliveryWorkerFor(service.deliveries, mailer, { perSecond: config.PASS_EMAIL_PER_SECOND, maxAttempts: config.PASS_EMAIL_MAX_ATTEMPTS });
   if (mailer.enabled && !worker) {
     console.warn(JSON.stringify({ level: 'warn', msg: 'pass emails disabled: set PASS_DELIVERY_KEY to let organizers email passes' }));
   }

@@ -494,9 +494,11 @@ export interface EventTemplate {
 /**
  * Attendee pass email outbox (docs/decisions/0012-pass-email-outbox.md).
  * `accepted` means the email provider accepted the message, never that it
- * reached the inbox.
+ * reached the inbox. `unconfirmed`: an attempt may have reached the provider
+ * but could no longer be repeated safely (its duplicate protection lasts 24
+ * hours), so the email may or may not have been sent; the organizer decides.
  */
-export type DeliveryStatus = 'queued' | 'sending' | 'accepted' | 'failed' | 'cancelled';
+export type DeliveryStatus = 'queued' | 'sending' | 'accepted' | 'failed' | 'cancelled' | 'unconfirmed';
 
 export interface PassDelivery {
   id: string;
@@ -508,7 +510,11 @@ export interface PassDelivery {
   attempts: number;
   /** When a queued email is tried next. */
   nextAttemptAt: string | null;
-  /** Last provider error (queued: retrying; failed: final) or why it was cancelled. */
+  /** When the latest provider request started. */
+  lastAttemptAt: string | null;
+  /** When the first attempt that may have reached the provider started (timeout, server error, restart); null when none did. */
+  uncertainSince: string | null;
+  /** Last provider error (queued: retrying; failed, unconfirmed: final) or why it was cancelled. */
   lastError: string | null;
   providerId: string | null;
   createdAt: string;
@@ -518,8 +524,11 @@ export interface PassDelivery {
   superseded: boolean;
 }
 
-/** Per status; `failed` leaves out failed emails that were sent again since; `retrying` counts queued emails that already failed at least once. */
+/** Per status; `failed` and `unconfirmed` leave out emails sent again since (they need attention); `retrying` counts queued emails with a failed attempt behind them. */
 export type DeliveryCounts = Record<DeliveryStatus, number> & { retrying: number };
+
+/** Why waiting pass emails are not being sent: no mail provider, or no PASS_DELIVERY_KEY on the server. */
+export type DeliveryPause = 'no_provider' | 'no_key';
 
 /** GET /api/events/:eventId/deliveries (newest first). */
 export interface DeliveryList {
@@ -528,6 +537,8 @@ export interface DeliveryList {
   total: number;
   /** Whole event, unfiltered. */
   counts: DeliveryCounts;
+  /** Set while emails of this event wait but the server cannot send them. */
+  paused: DeliveryPause | null;
 }
 
 export type DeliverySkipReason =
