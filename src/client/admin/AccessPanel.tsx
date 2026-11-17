@@ -1,10 +1,11 @@
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-import type { AdmissionPolicy, EventSummary, Gate } from '../../shared/types';
-import { Modal, useConfirm } from '../dialog';
+import type { AdmissionPolicy, EventSummary, Gate, Scanner } from '../../shared/types';
+import { Consequences, Modal, useConfirm } from '../dialog';
 import { ErrorNote, SectionHead, errorMessage } from '../ui';
 import { useResource } from './hooks';
 import { adminApi } from './http';
+import { gateBlockers } from './live-impact';
 import { ARCHIVED_NOTE, can } from './model';
 import { PoliciesSection } from './PoliciesSection';
 import { ScannersSection } from './ScannersSection';
@@ -14,6 +15,8 @@ import { useToast } from './toast';
 export function AccessPanel({ event, onChanged }: { event: EventSummary; onChanged: () => Promise<void> }) {
   const gates = useResource<Gate[]>(`/api/events/${event.id}/gates`);
   const policies = useResource<AdmissionPolicy[]>(`/api/events/${event.id}/policies`);
+  // Loaded here, not in the devices section: deleting a gate and narrowing a policy say which devices they affect.
+  const scanners = useResource<Scanner[]>(`/api/events/${event.id}/scanners`);
 
   // Gate, policy and device changes also refresh the event, which drives the setup checklist.
   async function gatesChanged() {
@@ -26,9 +29,9 @@ export function AccessPanel({ event, onChanged }: { event: EventSummary; onChang
   return (
     <div className="stack-lg">
       {event.status === 'archived' ? <p className="notice">{ARCHIVED_NOTE}</p> : null}
-      <GatesSection event={event} gates={gates.data} error={gates.error} onChanged={gatesChanged} />
-      <PoliciesSection event={event} gates={gates.data ?? []} policies={policies.data} error={policies.error} onChanged={policiesChanged} />
-      <ScannersSection event={event} gates={gates.data ?? []} onChanged={onChanged} />
+      <GatesSection event={event} gates={gates.data} scanners={scanners.data ?? []} policies={policies.data ?? []} error={gates.error} onChanged={gatesChanged} />
+      <PoliciesSection event={event} gates={gates.data ?? []} scanners={scanners.data ?? []} policies={policies.data} error={policies.error} onChanged={policiesChanged} />
+      <ScannersSection event={event} gates={gates.data ?? []} policies={policies.data ?? []} scanners={scanners} onChanged={onChanged} />
     </div>
   );
 }
@@ -36,11 +39,13 @@ export function AccessPanel({ event, onChanged }: { event: EventSummary; onChang
 interface GatesProps {
   event: EventSummary;
   gates: Gate[] | null;
+  scanners: Scanner[];
+  policies: AdmissionPolicy[];
   error: string;
   onChanged: () => Promise<void>;
 }
 
-function GatesSection({ event, gates, error: loadError, onChanged }: GatesProps) {
+function GatesSection({ event, gates, scanners, policies, error: loadError, onChanged }: GatesProps) {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -66,11 +71,24 @@ function GatesSection({ event, gates, error: loadError, onChanged }: GatesProps)
       setBusy(false);
     }
   }
-
   async function remove(gate: Gate) {
+    const blockers = gateBlockers(gate, scanners, policies);
+    if (blockers.length) {
+      // The server refuses these; say why up front instead of offering a delete that fails.
+      await confirm({
+        title: `“${gate.name}” cannot be deleted`,
+        body: (
+          <Consequences lead="A gate can only be deleted while nothing refers to it, so that device, policy and check-in history stays intact:" items={blockers}>
+            To change what it is called, rename it.
+          </Consequences>
+        ),
+        confirmLabel: null
+      });
+      return;
+    }
     const ok = await confirm({
       title: `Delete gate “${gate.name}”?`,
-      body: 'Only a gate that no device, policy or past check-in uses can be deleted. To stop using a gate that has history, rebind its devices and remove it from policies instead.',
+      body: 'No device, policy or check-in uses this gate. It disappears from the gate lists; this cannot be undone.',
       confirmLabel: 'Delete gate',
       danger: true
     });

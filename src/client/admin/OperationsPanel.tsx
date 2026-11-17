@@ -1,6 +1,6 @@
 import { Download, Info, RefreshCw, TriangleAlert } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import type { AlertKind, EventSummary, OperationsCompletion, OperationsSummary, StoredScanOutcome } from '../../shared/types';
+import type { AlertKind, DeliveryList, EventSummary, OperationsCompletion, OperationsSummary, StoredScanOutcome } from '../../shared/types';
 import { Bar, EmptyState, ErrorNote, OUTCOME_LABEL, OutcomeBadge, SectionHead, Stat, TableMessage, ToneBadge, capacityTone, errorMessage, type Tone } from '../ui';
 import { formatTimeInZone, zoneLabel } from '../time';
 import { LIVE_POLL_MS, usePolling } from './hooks';
@@ -76,12 +76,26 @@ export function OperationsPanel({ event, onChanged }: { event: EventSummary; onC
   }, []);
   const stale = updatedAt !== null && now - updatedAt > STALE_AFTER_MS;
 
+  // Email counts change slowly and the Passes tab has the live list; a slower cadence keeps this tab light.
+  const [emails, setEmails] = useState<DeliveryList['counts'] | null>(null);
+  const pollEmails = useCallback(async () => {
+    try {
+      setEmails((await adminApi<DeliveryList>(`/api/events/${event.id}/deliveries?limit=1`)).counts);
+    } catch {
+      // Optional context for the event-day strip: without it the row is left out, and the dashboard still works.
+      setEmails(null);
+    }
+  }, [event.id]);
+  usePolling(pollEmails, EMAIL_POLL_MS);
+
   return (
     <div className="stack-lg">
-      {can(event, 'export') ? <Exports event={event} /> : null}
       <RefreshBar summary={summary} error={error} stale={stale} refreshing={refreshing} zone={event.timeZone} onRefresh={() => void poll()} />
       {summary ? (
-        <Summary summary={summary} zone={event.timeZone} />
+        <>
+          <EventDay event={event} summary={summary} emails={emails} />
+          <Summary summary={summary} zone={event.timeZone} />
+        </>
       ) : !error ? (
         <p className="muted" role="status">
           Loading operations…
@@ -95,7 +109,111 @@ export function OperationsPanel({ event, onChanged }: { event: EventSummary; onC
         </SectionHead>
         <ScanFeed event={event} onChanged={onChanged} />
       </section>
+      {/* Reports are for after the doors: below the live picture, not above it. */}
+      {can(event, 'export') ? <Exports event={event} /> : null}
     </div>
+  );
+}
+
+const EMAIL_POLL_MS = 30_000;
+
+interface DayRow {
+  label: string;
+  value: string;
+  tone: Tone;
+  /** Next step, as a link to the tab where it is done. */
+  action?: { tab: string; label: string };
+}
+
+/**
+ * Event-day strip: the five questions a door manager asks, each with where to act. Built from the operations
+ * summary and the email counts; the dashboard below has the detail.
+ */
+function EventDay({ event, summary, emails }: { event: EventSummary; summary: OperationsSummary; emails: DeliveryList['counts'] | null }) {
+  const zone = event.timeZone;
+  const time = (iso: string) => formatTimeInZone(iso, zone);
+  const live = summary.phase === 'live';
+  const rows: DayRow[] = [];
+
+  // Policy windows widen the entry window, as in the server's `phase`.
+  const opens = summary.policies.reduce((first, policy) => (policy.opensAt < first ? policy.opensAt : first), event.startsAt);
+  const closes = summary.policies.reduce((last, policy) => (policy.closesAt > last ? policy.closesAt : last), event.endsAt);
+  const doors: Record<OperationsSummary['phase'], DayRow> = {
+    upcoming: { label: 'Doors', value: `Open at ${time(opens)}`, tone: 'info' },
+    live: { label: 'Doors', value: `Open until ${time(closes)}`, tone: 'ok' },
+    paused: { label: 'Doors', value: 'Closed: the event is a draft', tone: 'warn', action: { tab: 'settings', label: 'Open the event' } },
+    finished: { label: 'Doors', value: 'Closed', tone: 'muted' }
+  };
+  rows.push(doors[summary.phase]);
+
+  const devices = summary.scanners.filter((scanner) => scanner.state !== 'revoked');
+  const recent = devices.filter((scanner) => scanner.state === 'recent').length;
+  const idle = devices.filter((scanner) => scanner.state === 'idle').length;
+  const unused = devices.length - recent - idle;
+  const deviceParts = [recent ? `${recent} in use` : '', idle ? `${idle} idle` : '', unused ? `${unused} never used` : ''].filter(Boolean);
+  rows.push({
+    label: 'Scanners',
+    value: devices.length ? deviceParts.join(' · ') : 'None set up',
+    // Idle = silent for 10 minutes while the doors are open (the alerts card names them).
+    tone: !devices.length ? (live ? 'bad' : 'warn') : live && idle ? 'warn' : recent ? 'ok' : 'muted',
+    action: !devices.length || (live && idle) ? { tab: 'access', label: devices.length ? 'Check devices' : 'Add a device' } : undefined
+  });
+
+  // Exact once the event is finished; while it runs the summary only has 5-minute buckets for the last hour.
+  const lastBucket = summary.recent.buckets.findLast((bucket) => bucket.admitted > 0);
+  const minutes = summary.recent.bucketMinutes;
+  const lastAdmission = summary.completion
+    ? summary.completion.lastAdmissionAt && time(summary.completion.lastAdmissionAt)
+    : lastBucket && `${time(lastBucket.bucketStart)}–${time(new Date(Date.parse(lastBucket.bucketStart) + minutes * 60_000).toISOString())}`;
+  rows.push({
+    label: 'Last admission',
+    value: lastAdmission || (summary.passes.redeemed ? 'Over an hour ago' : 'None yet'),
+    tone: lastBucket ? 'ok' : 'muted'
+  });
+
+  const { capacity } = summary;
+  const capacityState = capacity.limit === null ? null : capacityTone(capacity.admitted, capacity.limit);
+  rows.push(
+    capacity.limit === null || capacity.remaining === null
+      ? { label: 'Capacity', value: 'No event limit', tone: 'muted' }
+      : {
+          label: 'Capacity',
+          value: capacity.remaining === 0 ? `Full: ${capacity.admitted} of ${capacity.limit}` : `${capacity.remaining} of ${capacity.limit} left`,
+          // Below 90 % used is simply fine here; the dashboard keeps the accent bar.
+          tone: capacityState === 'info' ? 'ok' : (capacityState ?? 'muted'),
+          action: capacity.remaining === 0 ? { tab: 'settings', label: 'Review capacity' } : undefined
+        }
+  );
+
+  if (emails && emails.queued + emails.sending + emails.accepted + emails.failed + emails.cancelled > 0) {
+    const waiting = emails.queued + emails.sending;
+    rows.push({
+      label: 'Pass emails',
+      value: [waiting ? `${waiting} waiting` : '', emails.failed ? `${emails.failed} failed` : '', !waiting && !emails.failed ? `${emails.accepted} accepted by provider` : ''].filter(Boolean).join(' · '),
+      tone: emails.failed ? 'bad' : waiting ? 'info' : 'ok',
+      action: emails.failed ? { tab: 'passes', label: 'Resolve failed emails' } : undefined
+    });
+  }
+
+  return (
+    <section className="event-day" aria-labelledby="event-day-title">
+      <h2 id="event-day-title" className="sr-only">
+        Event day
+      </h2>
+      <ul className="event-day-list">
+        {rows.map((row) => (
+          <li key={row.label} className={`event-day-item event-day-${row.tone}`}>
+            <span className="event-day-label">{row.label}</span>
+            <span className="event-day-value num">{row.value}</span>
+            {row.action ? (
+              <a className="event-day-action small" href={`#/events/${event.id}/${row.action.tab}`}>
+                {row.action.label}
+              </a>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -177,7 +295,7 @@ function Summary({ summary, zone }: { summary: OperationsSummary; zone: string }
       <div className="stats stats-lg">
         <Stat label="Admitted / issued" value={`${passes.redeemed} / ${passes.issued}`} />
         <Stat label="Turnout of expected" value={attendance.rate === null ? '—' : `${percent(attendance.rate)} of ${attendance.expected}`} />
-        <Stat label="Capacity used" value={capacity.limit === null ? 'No limit' : percent(capacity.admitted / capacity.limit)} />
+        {/* Capacity is in the event-day strip (what is left) and the Passes card (the bar); a third tile repeated it. */}
         <Stat label="Denied scans" value={totals.denied} />
         <Stat label="Assisted admissions" value={summary.assistedAdmissions} />
       </div>

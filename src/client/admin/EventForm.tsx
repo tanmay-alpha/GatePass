@@ -1,8 +1,10 @@
 import { useId, useMemo, useState, type FormEvent } from 'react';
 import type { EventSummary, EventTemplate } from '../../shared/types';
+import { Consequences, useConfirm } from '../dialog';
 import { ErrorNote, FieldError, describedBy, errorMessage, focusFirstInvalid } from '../ui';
-import { browserTimeZone, fromZoneInput, listTimeZones, toZoneInput, zoneLabel } from '../time';
+import { browserTimeZone, formatTimeInZone, fromZoneInput, listTimeZones, toZoneInput, zoneLabel } from '../time';
 import { adminApi } from './http';
+import { doorsOpen, eventNarrowing } from './live-impact';
 import { TemplatePicker } from './TemplatePicker';
 
 interface Props {
@@ -52,6 +54,7 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const id = useId();
+  const [confirm, dialog] = useConfirm();
   const admitted = event?.admittedCount ?? 0;
   const readOnly = event?.status === 'archived';
   const startIso = fromZoneInput(startsAt, timeZone);
@@ -77,6 +80,25 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
     if (Object.keys(validate(name, startIso, endIso, capacity, admitted)).length || !startIso || !endIso) {
       setShowErrors(true);
       focusFirstInvalid(e.currentTarget);
+      return;
+    }
+    const nextCapacity = capacity.trim() ? Number(capacity) : null;
+    // Narrowing the window or capacity of an open event turns people away at once: say how, and have it acknowledged.
+    const impact = event && doorsOpen(event) ? eventNarrowing(event, { startsAt: startIso, endsAt: endIso, capacity: nextCapacity }, (iso) => formatTimeInZone(iso, timeZone)) : [];
+    if (
+      impact.length &&
+      !(await confirm({
+        title: 'Change the event while the doors are open?',
+        body: (
+          <Consequences lead="Scanners apply the change from their next scan:" items={impact}>
+            People already admitted stay admitted.
+          </Consequences>
+        ),
+        confirmLabel: 'Save and apply now',
+        danger: true,
+        acknowledge: 'I understand door staff will start refusing these passes.'
+      }))
+    ) {
       return;
     }
     setBusy(true);
@@ -195,6 +217,7 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
           ) : null}
         </div>
       )}
+      {dialog}
     </form>
   );
 }

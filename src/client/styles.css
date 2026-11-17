@@ -311,6 +311,13 @@ legend { font-size: var(--text-sm); font-weight: 500; padding: 0; margin-bottom:
 .dialog h2 { font-size: var(--text-md); margin-bottom: var(--space-3); }
 .dialog-body { color: var(--fg-2); margin-bottom: var(--space-5); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+.dialog-body .consequences { margin: 0; padding-left: 1.25em; display: grid; gap: var(--space-1); color: var(--fg); }
+/* Statement ticked before a change that turns people away at the door now. */
+.dialog-ack {
+  align-items: flex-start; margin: calc(-1 * var(--space-2)) 0 var(--space-5); padding: var(--space-3);
+  color: var(--fg); font-weight: 500; background: var(--warn-bg); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); border-radius: var(--radius-sm);
+}
+.dialog-ack input { margin-top: 2px; flex: none; }
 
 /* Tables: hairline rows; inside a card they run edge to edge. Wide tables scroll sideways, and a
    shadow on the scrollable edge shows there is more (it disappears at either end). */
@@ -401,6 +408,14 @@ table[aria-busy='true'] tbody { opacity: 0.6; }
    Admin shell
    --------------------------------------------------------------------------- */
 .shell { min-height: 100vh; display: flex; flex-direction: column; }
+/* First stop for keyboard users: past the top bar and the event list to the page itself. */
+.skip-link {
+  position: absolute; top: var(--space-2); left: var(--space-3); z-index: 100; padding: var(--space-2) var(--space-4);
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow-pop);
+  font-weight: 500; transform: translateY(calc(-100% - var(--space-4)));
+}
+.skip-link:focus { transform: none; }
+.content:focus { outline: none; }
 .topbar {
   display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
   height: var(--topbar-h); padding: 0 var(--space-5) 0 22px; background: var(--bg); border-bottom: 1px solid var(--border);

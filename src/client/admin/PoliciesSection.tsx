@@ -1,22 +1,25 @@
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-import type { AdmissionPolicy, EventSummary, Gate } from '../../shared/types';
-import { Modal, useConfirm } from '../dialog';
+import type { AdmissionPolicy, EventSummary, Gate, Scanner } from '../../shared/types';
+import { Consequences, Modal, useConfirm } from '../dialog';
 import { CapacityLine, EmptyState, ErrorNote, FieldError, SectionHead, describedBy, errorMessage, focusFirstInvalid } from '../ui';
-import { formatDateTimeInZone, formatShortInZone, fromZoneInput, toZoneInput, zoneLabel } from '../time';
+import { formatDateTimeInZone, formatShortInZone, formatTimeInZone, fromZoneInput, toZoneInput, zoneLabel } from '../time';
 import { adminApi } from './http';
+import { doorsOpen, policyNarrowing } from './live-impact';
 import { can } from './model';
 import { useToast } from './toast';
 
 interface Props {
   event: EventSummary;
   gates: Gate[];
+  /** The event's devices: narrowing a policy's gates says which of them start refusing its passes. */
+  scanners: Scanner[];
   policies: AdmissionPolicy[] | null;
   error: string;
   onChanged: () => Promise<void>;
 }
 
-export function PoliciesSection({ event, gates, policies, error: loadError, onChanged }: Props) {
+export function PoliciesSection({ event, gates, scanners, policies, error: loadError, onChanged }: Props) {
   /** `null` = closed, `'new'` = create, otherwise the policy being edited. */
   const [editing, setEditing] = useState<AdmissionPolicy | 'new' | null>(null);
   const [error, setError] = useState('');
@@ -29,9 +32,28 @@ export function PoliciesSection({ event, gates, policies, error: loadError, onCh
   const zone = event.timeZone;
 
   async function remove(policy: AdmissionPolicy) {
+    if (policy.passCount > 0 || policy.admittedCount > 0) {
+      // The server refuses these; say why up front instead of offering a delete that fails.
+      await confirm({
+        title: `“${policy.name}” cannot be deleted`,
+        body: (
+          <Consequences
+            lead="A policy can only be deleted while no pass and no check-in uses it, so the admission history stays intact:"
+            items={[
+              ...(policy.passCount ? [`${policy.passCount} ${policy.passCount === 1 ? 'pass uses' : 'passes use'} it.`] : []),
+              ...(policy.admittedCount ? [`${policy.admittedCount} ${policy.admittedCount === 1 ? 'person was' : 'people were'} admitted under it.`] : [])
+            ]}
+          >
+            To stop using it, move its passes to another policy on the Passes tab; past admissions stay attached to it.
+          </Consequences>
+        ),
+        confirmLabel: null
+      });
+      return;
+    }
     const ok = await confirm({
       title: `Delete policy “${policy.name}”?`,
-      body: 'Only a policy that no pass and no past check-in uses can be deleted. Move its passes to another policy first.',
+      body: 'No pass or check-in uses this policy. It disappears from the policy lists; this cannot be undone.',
       confirmLabel: 'Delete policy',
       danger: true
     });
@@ -125,6 +147,8 @@ export function PoliciesSection({ event, gates, policies, error: loadError, onCh
         <PolicyDialog
           event={event}
           gates={gates}
+          scanners={scanners}
+          policies={policies ?? []}
           policy={editing === 'new' ? null : editing}
           onClose={() => setEditing(null)}
           onSaved={async () => {
@@ -141,6 +165,9 @@ export function PoliciesSection({ event, gates, policies, error: loadError, onCh
 interface DialogProps {
   event: EventSummary;
   gates: Gate[];
+  scanners: Scanner[];
+  /** Every policy of the event: their windows widen the time the doors are open. */
+  policies: AdmissionPolicy[];
   policy: AdmissionPolicy | null;
   onClose: () => void;
   onSaved: () => Promise<void>;
@@ -167,7 +194,7 @@ function validatePolicy(name: string, opensAt: string, closesAt: string, opensIs
   return errors;
 }
 
-function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
+function PolicyDialog({ event, gates, scanners, policies, policy, onClose, onSaved }: DialogProps) {
   const zone = event.timeZone;
   const [name, setName] = useState(policy?.name ?? '');
   const [opensAt, setOpensAt] = useState(policy?.opensAt ? toZoneInput(policy.opensAt, zone) : '');
@@ -178,6 +205,7 @@ function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const notify = useToast();
+  const [confirm, dialog] = useConfirm();
   const admitted = policy?.admittedCount ?? 0;
   const opensIso = opensAt ? fromZoneInput(opensAt, zone) : null;
   const closesIso = closesAt ? fromZoneInput(closesAt, zone) : null;
@@ -196,9 +224,28 @@ function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
       focusFirstInvalid(e.currentTarget);
       return;
     }
+    const body = { name: name.trim(), opensAt: opensIso, closesAt: closesIso, capacity: capacity.trim() ? Number(capacity) : null, gateIds };
+    // Narrowing a policy while the doors are open turns people away at once: say who, and have it acknowledged.
+    const impact = policy && doorsOpen(event, policies) ? policyNarrowing(event, policy, body, gates, scanners, (iso) => formatTimeInZone(iso, zone)) : [];
+    if (
+      policy &&
+      impact.length &&
+      !(await confirm({
+        title: `Change “${policy.name}” while the doors are open?`,
+        body: (
+          <Consequences lead="Scanners apply the change from their next scan:" items={impact}>
+            People already admitted stay admitted.
+          </Consequences>
+        ),
+        confirmLabel: 'Save and apply now',
+        danger: true,
+        acknowledge: 'I understand door staff will start refusing these passes.'
+      }))
+    ) {
+      return;
+    }
     setBusy(true);
     setError('');
-    const body = { name: name.trim(), opensAt: opensIso, closesAt: closesIso, capacity: capacity.trim() ? Number(capacity) : null, gateIds };
     try {
       if (policy) await adminApi<AdmissionPolicy>(`/api/policies/${policy.id}`, { method: 'PATCH', body });
       else await adminApi<AdmissionPolicy>(`/api/events/${event.id}/policies`, { body });
@@ -297,6 +344,7 @@ function PolicyDialog({ event, gates, policy, onClose, onSaved }: DialogProps) {
           </button>
         </div>
       </form>
+      {dialog}
     </Modal>
   );
 }

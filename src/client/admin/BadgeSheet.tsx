@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Printer } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import type { EventSummary, IssuedPass } from '../../shared/types';
 import { formatRangeInZone } from '../time';
@@ -29,6 +29,7 @@ export function BadgeSheet({ event, passes, policyNames, onDone }: Props) {
   const [guides, setGuides] = useState(true);
   const [pageIndex, setPageIndex] = useState(0);
   const sheet = useRef<HTMLDivElement>(null);
+  const id = useId();
   const layout = badgeLayout(perPage);
   const pages = useMemo(() => paginate(passes, perPage), [passes, perPage]);
   const current = Math.min(pageIndex, pages.length - 1);
@@ -74,22 +75,28 @@ export function BadgeSheet({ event, passes, policyNames, onDone }: Props) {
   return (
     <section className="sheet-preview" aria-label="Print preview">
       <div className="sheet-controls">
-        <div className="segmented" role="radiogroup" aria-label="Passes per page">
-          {BADGES_PER_PAGE.map((count) => (
-            <button
-              key={count}
-              role="radio"
-              aria-checked={perPage === count}
-              aria-label={`${count} per page`}
-              className={perPage === count ? 'active' : ''}
-              onClick={() => {
-                setPerPage(count);
-                setPageIndex(0);
-              }}
-            >
-              {count} per page
-            </button>
-          ))}
+        {/* Short number buttons under one visible label: four "N per page" buttons did not fit a phone screen. */}
+        <div className="sheet-per-page">
+          <span id={`${id}-per-page`} className="small muted">
+            Passes per page
+          </span>
+          <div className="segmented" role="radiogroup" aria-labelledby={`${id}-per-page`}>
+            {BADGES_PER_PAGE.map((count) => (
+              <button
+                key={count}
+                role="radio"
+                aria-checked={perPage === count}
+                aria-label={`${count} per page`}
+                className={perPage === count ? 'active' : ''}
+                onClick={() => {
+                  setPerPage(count);
+                  setPageIndex(0);
+                }}
+              >
+                {count}
+              </button>
+            ))}
+          </div>
         </div>
         <label className="check">
           <input type="checkbox" checked={guides} onChange={(e) => setGuides(e.target.checked)} /> Cut guides
