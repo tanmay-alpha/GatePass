@@ -32,10 +32,9 @@ E2E_PORT=3414 npx playwright test e2e/a11y.spec.ts --project=chromium
 
 Screenshots: `docs/screenshots/review-2026-11-pass3/{before,after}/<screen>-<scheme>-<width>.png`. Only the files
 cited below are committed; the two `badges-preview` captures are cropped to their first 3200 px (the pass list
-below grows with every run). The committed dialog captures are full-page, so a dialog opened after the page
-scrolled to its button sits outside the image; the harness now takes viewport captures of modal screens
-(`viewportShot`), so `REVIEW_SHOTS=review-2026-11-pass3/after` regenerates them with the dialog in view. The
-dialog wording itself is asserted in `e2e/live-changes.spec.ts`.
+below grows with every run). The light 375 px dialog captures and mobile Operations capture were refreshed
+after integration using the harness's viewport capture for dialogs; the confirmations are visible in the
+committed images. The dialog wording is also asserted in `e2e/live-changes.spec.ts`.
 
 ## Findings and fixes
 
@@ -56,13 +55,13 @@ and "Could not refresh: … Showing data from hh:mm:ss" with Retry. It had no te
 now fails the operations request and checks the message, the Stale badge, that the last figures (and the strip)
 stay, and that Retry clears it.
 
-## Event-day strip: data not in the summary
+## Event-day strip: integration follow-up
 
-`OperationsSummary` has no exact time of the last admission while the event runs (only `completion.lastAdmissionAt`
-once finished), so the strip shows the 5-minute bucket of the last hour. Exact value would need
-`lastAdmissionAt: string | null` in `OperationsSummary` (the query exists in `completion()` in
-`src/server/operations.ts`). Pass email counts come from `GET /api/events/:id/deliveries?limit=1` (`counts`),
-polled every 30 s while the tab is visible.
+The initial review used a 5-minute bucket while the event was live. Integration added
+`OperationsSummary.lastAdmissionAt: string | null`, and the strip now shows the exact last-admission time.
+Pass email counts come from `GET /api/events/:id/deliveries?limit=1`, polled every 30 seconds while visible;
+`unconfirmed` emails now count as requiring action rather than accepted. Owners can download the concise
+report using "Event summary CSV" alongside the other exports (`e2e/operations-dashboard.spec.ts`).
 
 ## Reviewed and kept as is
 
@@ -80,3 +79,8 @@ polled every 30 s while the tab is visible.
 - `e2e/a11y.spec.ts`, chromium: 64 passed, zero violations.
 - These two runs used the build before fix 7, the "Capacity used" tile removal and the `delete-policy-dialog`
   screen; the specs that cover those (onboarding, operations-dashboard) were run on the final build.
+
+After integration: the complete local Playwright run passed 227 tests (272 browser-gated skips), including
+all visual and axe screens on the final application code. The light Operations and four dialog screens were
+also re-captured at all seven widths: 5/5 visual tests passed. The 375 px captures replace the stale
+full-page dialog images cited above.
