@@ -169,69 +169,81 @@ describe('streamed CSV exports', () => {
     expect(exportEntries(eventId)).toEqual([]);
   });
 
-  it('answers door redemptions and the dashboard between the chunks of a large export streaming to a slow client', async () => {
+  it('answers door redemptions and the dashboard while an export is blocked by socket backpressure', async () => {
     const { eventId, scanners, live } = seedEvent(h.db, { passes: 25_000, now: h.clock.now(), seed: 11 });
-    // When the server reads each chunk of the export.
-    const chunkTimes: number[] = [];
+    let chunks = 0;
     const open = h.service.openExport.bind(h.service);
     vi.spyOn(h.service, 'openExport').mockImplementation(async (...args) => {
       const exported = await open(...args);
-      return { ...exported, next: () => (chunkTimes.push(performance.now()), exported.next()) };
+      return { ...exported, next: () => (chunks++, exported.next()) };
     });
-    const server = http.createServer(h.app).listen(0, '127.0.0.1');
+    const blocked = Promise.withResolvers<void>();
+    let releaseDrain = () => {};
+    const server = http.createServer((req, res) => {
+      if (req.url === exportPath(eventId, 'attendance')) {
+        // Hold the drain signal after the socket first reports backpressure. HTTP, the database and the
+        // writer remain real; only when the slow client becomes writable is controlled by the test.
+        let holding = true;
+        const emit = res.emit.bind(res);
+        vi.spyOn(res, 'emit').mockImplementation((event: string | symbol, ...args: unknown[]) => {
+          if (event === 'drain' && holding) return false;
+          return emit(event, ...args);
+        });
+        releaseDrain = () => {
+          holding = false;
+          res.emit('drain');
+        };
+        const write = res.write.bind(res);
+        vi.spyOn(res, 'write').mockImplementation((...args: Parameters<typeof res.write>) => {
+          const accepted = write(...args);
+          if (!accepted) blocked.resolve();
+          return accepted;
+        });
+      }
+      h.app(req, res);
+    }).listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
     const { port } = server.address() as AddressInfo;
     const base = `http://127.0.0.1:${port}`;
+    const exported = Promise.withResolvers<string>();
+    const req = http.get({ port, host: '127.0.0.1', path: exportPath(eventId, 'attendance'), headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } });
+    req.on('error', exported.reject);
+    req.on('close', () => exported.reject(new Error('Export connection closed before completion')));
+    req.on('response', (res) => {
+      const parts: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => parts.push(chunk));
+      res.on('error', exported.reject);
+      res.on('end', () => exported.resolve(Buffer.concat(parts).toString('utf8')));
+    });
+    // Mark failures handled while we wait on the independent backpressure signal; await the same promise below.
+    const downloaded = exported.promise;
+    void downloaded.catch(() => {});
     try {
-      // The client reads the export slowly (a phone on venue Wi-Fi), so the server streams it over many turns. A real
-      // delay on purpose: the subject is how the server interleaves socket back-pressure with other requests.
-      const { promise: downloading, resolve: firstBytes } = Promise.withResolvers<void>();
-      const { promise: exported, resolve, reject } = Promise.withResolvers<string>();
-      const req = http.get({ port, host: '127.0.0.1', path: exportPath(eventId, 'attendance'), headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } });
-      req.on('error', reject);
-      req.on('response', (res) => {
-        const parts: Buffer[] = [];
-        res.once('data', () => firstBytes());
-        res.on('data', (chunk: Buffer) => {
-          parts.push(chunk);
-          res.pause();
-          // 10 ms per read (≈ 80 reads of a 5 MB file): the download outlasts the 40 redemptions even on a fast CI runner.
-          setTimeout(() => res.resume(), 10);
-        });
-        res.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
-      });
-      await downloading;
-
-      const latencies: number[] = [];
-      const answeredAt: number[] = [];
-      const doors = (async () => {
-        for (const pass of live.slice(0, 40)) {
-          const started = performance.now();
-          const response = await fetch(`${base}/api/scanner/redeem`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${scanners[10].key}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code: pass.token })
-          });
-          expect((await response.json()).outcome).toBe('admitted');
-          latencies.push(performance.now() - started);
-          answeredAt.push(performance.now());
-        }
-      })();
-      const dashboards = Promise.all(
-        Array.from({ length: 3 }, async () => {
+      await blocked.promise;
+      const blockedChunks = chunks;
+      expect(blockedChunks).toBeGreaterThan(0);
+      expect(blockedChunks).toBeLessThan(Math.ceil(25_000 / EXPORT_CHUNK_ROWS));
+      await Promise.all([
+        (async () => {
+          for (const pass of live.slice(0, 40)) {
+            const response = await fetch(`${base}/api/scanner/redeem`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${scanners[10].key}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ code: pass.token })
+            });
+            expect((await response.json()).outcome).toBe('admitted');
+          }
+        })(),
+        ...Array.from({ length: 3 }, async () => {
           const response = await fetch(`${base}/api/events/${eventId}/operations`, { headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } });
           expect(response.status).toBe(200);
+          await response.arrayBuffer();
         })
-      );
-      const [body] = await Promise.all([exported, doors, dashboards]);
-
-      // The server kept producing the export while it answered the doors: most redemptions came between two chunks
-      // (a synchronous export would have produced every row before the first redemption was read).
-      const between = answeredAt.filter((at) => at > chunkTimes[0] && at < chunkTimes.at(-1)!);
-      expect(between.length).toBeGreaterThan(30);
-      // Generous bound for a loaded CI machine: the door never waits for a whole export or dashboard pass.
-      expect(Math.max(...latencies)).toBeLessThan(1_000);
-      const [header, ...rows] = parseCsv(body);
+      ]);
+      // No rows were pulled while the socket was blocked, despite all 40 admissions and three dashboards completing.
+      expect(chunks).toBe(blockedChunks);
+      releaseDrain();
+      const [header, ...rows] = parseCsv(await downloaded);
       expect(header[0]).toBe('pass_id');
       expect(rows).toHaveLength(25_000);
       expect(exportEntries(eventId)[0].details).toEqual({ kind: 'attendance', rows: 25_000 });
@@ -239,6 +251,10 @@ describe('streamed CSV exports', () => {
         Number((h.db.prepare("SELECT COUNT(*) AS n FROM scans WHERE event_id = ? AND outcome = 'admitted'").get(eventId) as Row).n)
       );
     } finally {
+      releaseDrain();
+      req.destroy();
+      await downloaded.catch(() => {});
+      server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
   }, 60_000);
