@@ -195,7 +195,7 @@ Checked with no defect found (all covered by new tests in `tests/enrollment.test
 
 ## Phase 5 review (branch `feat/phase4-features`, PR #15, 2026-11-17)
 
-Independent second review of the PR #15 code by five specialists working in separate git worktrees (pass email, database and performance, scanner and PWA, UI, deployment), integrated by the orchestrator. Base: PR head `6760640`. Every fixed row has a regression test that failed on the base code unless the Regression tests column says otherwise; run results are in [test-matrix.md](test-matrix.md#phase-5-runs-branch-featphase4-features-schema-6-2026-11-17).
+Independent second review of the PR #15 code by five specialists working in separate git worktrees (pass email, database and performance, scanner and PWA, UI, deployment), integrated by the orchestrator. Base: PR head `6760640`. Fixed rows name tests or measurements that ran; results are in [test-matrix.md](test-matrix.md#phase-5-runs-branch-featphase4-features-schema-6-2026-11-17). Failing-first cases were recorded for mail, scanner, UI, release-check and independent-QA fixes. The database/export work is supported by before/after benchmarks and passing contract tests; not every test in that slice was demonstrated failing on the base code.
 
 ### Pass email outbox
 
