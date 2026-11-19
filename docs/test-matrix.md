@@ -63,6 +63,8 @@ Windows 10.0.26300, Node 24.14.1, Docker 29.9.2, unless a row says otherwise. In
 
 CI follow-up on `26c2079`: every browser project, Docker build/restart and gitleaks passed; Ubuntu Node 24 and Windows Node 24 passed. Ubuntu Node 22 failed the export test because only 28 of 40 redemptions completed before the download ended. The initial 10 ms client delay was not a fix. The replacement controls the socket's drain signal after real backpressure: all 40 redemptions and three dashboards must complete while no further export rows are fetched; then the download is released and all 25,000 rows are checked. No throughput threshold or guessed delay. Typecheck clean and `tests/exports.test.ts` 12/12 locally after this change.
 
+Final portfolio pass (2026-11-19): both `npm audit` and `npm audit --omit=dev` report zero vulnerabilities with the existing lockfile. The temporary picomatch exception and its custom audit wrapper were removed; `npm run audit:ci` now runs the standard `npm audit --audit-level=high` with no exceptions. Earlier findings above are retained as historical evidence.
+
 Rows marked C or R below point to those dedicated runs for their detail; the same files also ran in V on the current state (all passed, SIGTERM test skipped).
 
 PR CI results are recorded in the PR. The last recorded CI run on `main` is PR #13's run (all 11 jobs passed, 2026-11-14).

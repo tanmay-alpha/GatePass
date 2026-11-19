@@ -1,10 +1,26 @@
 # GatePass
 
-GatePass is an event admission system. Organizers set up events, gates and admission rules, issue QR passes, and hand door staff scanner devices. Each pass is admitted **at most once**, only by an authorized scanner of the same event, only where and when its rules allow, and never beyond capacity — enforced inside one database transaction and backed by database constraints, not just application code.
+**Full-stack event admission with single-use QR passes, authenticated door scanners and auditable check-ins.**
 
-Live demo: https://gatepass-sandy.vercel.app — **demo only, not production**: the free backend has no persistent disk, so data is erased whenever it restarts or redeploys. See [Production readiness](#production-readiness).
+Organizers configure events, gates and admission rules, issue QR passes, and monitor doors from a live dashboard. Admission is enforced inside a SQLite transaction: a pass can be admitted at most once, by an authorized device, within its time, gate and capacity restrictions.
+
+**Stack:** TypeScript · React 19 · Express 5 · Node.js · SQLite WAL · Vite · Playwright · Vitest · Docker.
+
+[Live demo](https://gatepass-sandy.vercel.app) · [Screenshots](#screenshots) · [Run locally](#run-it-locally) · [Architecture](docs/architecture.md)
+
+**Release status:** the reviewed implementation is on [PR #15](https://github.com/tanmay-alpha/GatePass/pull/15), not yet merged into `main`. The public demo serves the older release and its API returned HTTP 503 on the latest check. Use the local walkthrough for a reliable evaluation. The free backend has no verified durable storage; do not use the public demo for real admissions.
 
 Docs: [user guide](docs/USER_GUIDE.md) · [TODO](TODO.md) · [engineering audit & tracker](docs/engineering-audit.md) · [roadmap](docs/implementation-roadmap.md) · [security & threat model](docs/security-and-threat-model.md) · [test matrix](docs/test-matrix.md) · [performance](docs/performance.md) · [deployment runbook](docs/deployment-runbook.md) · [architecture](docs/architecture.md) · [decisions](docs/decisions/README.md)
+
+## Engineering highlights
+
+- **Concurrency correctness:** transactional redemption, database uniqueness/capacity constraints and retry-safe request IDs; tests race up to 100 scanners against one pass.
+- **Recovery:** schema migrations with pre-upgrade backups, integrity verification, restore tooling and an isolated upgrade/rollback rehearsal.
+- **Secure email outbox:** AES-256-GCM-sealed links, key rotation, per-event fair scheduling and explicit handling of potentially sent messages beyond the provider's deduplication window. No exactly-once email claim.
+- **Operational performance:** chunked exports let door requests continue during downloads. On a laptop with a 25,000-pass event, admission p95 during exports fell from **1,784 ms to 170 ms**; this is not a hosted-capacity claim.
+- **Verification:** the recorded full local run passed **501 Vitest tests** and **227 Playwright tests**, with 4 platform-specific and 272 browser-gated skips respectively. CI also exercises Linux/Windows, Node 22/24, Docker restart persistence, CodeQL and secret scanning.
+
+Methods, tradeoffs and complete results: [test matrix](docs/test-matrix.md) · [performance](docs/performance.md) · [architectural decisions](docs/decisions/README.md).
 
 ## What it does
 
@@ -13,15 +29,19 @@ Docs: [user guide](docs/USER_GUIDE.md) · [TODO](TODO.md) · [engineering audit 
 - Events with a lifecycle — **draft → active → ended → archived** — an IANA time zone (all times shown in the event's zone), venue, optional event-wide capacity, and pass design. Clone an event's configuration (gates, policies with shifted windows) into a new draft.
 - Team per event: the **owner** invites **managers** by one-time link (emailed when email is configured, otherwise shown once to share by hand; "New link" replaces a lost one). Managers run day-to-day operations; only owners change the lifecycle, manage the team, or export attendee data. People who are not on an event get `404` for it — even platform administrators.
 - Gates and admission policies (entry window, gates allowed, capacity). A guided setup checklist shows what is still missing before doors open.
-- Attendees: issue named or unnamed passes, import a CSV with a validation and duplicate preview before anything is issued, page/search/filter the list, revoke (one or many), reissue a lost code, print passes.
-- Live operations: issued vs admitted, capacity remaining, admissions and denials by gate and reason, scanner device health, a 15-minute timeline and alerts (shared screenshots, invalid-code bursts, capacity nearly full).
-- Exports (owner only, each download audited): attendance, scan history and audit log as CSV with spreadsheet formula injection neutralised. Searchable audit log of every administrative and security action.
+- Attendees: issue named or unnamed passes, import CSV with validation and duplicate preview, search/filter, revoke or reissue links, and generate A4 printable QR badge sheets.
+- Reusable built-in and private event templates; clone configuration without copying attendees, credentials or admission history.
+- Optional attendee pass emails: queue/retry/cancel, clear failure reasons and "Accepted by provider" rather than "Delivered"; live email requires operator configuration.
+- Event-day dashboard: doors, capacity, scanner health, exact last admission, assisted admissions, timelines, alerts and data-freshness indicators. Admission-impacting changes require consequence-aware confirmation.
+- Audited, owner-only streamed CSV exports: attendance, scan history, audit log and a concise event summary (attendance by gate, peak arrivals, denials and scanner activity).
 
 **Door staff (scanner devices)**
 - Each door device is set up from a **one-time setup link** (single use, expires after an hour) and receives its own key, bound to one event and optionally one gate; the permanent key never travels in a link. Rotate or revoke a device at any time.
 - Camera scanning with the native `BarcodeDetector` or a self-hosted ZXing WebAssembly decoder, camera choice, torch, and manual entry of the link, token or the 8-character reference printed on the pass.
 - Clear **Admit / Already used / Denied / Not verified** results (text, colour, sound, haptics on Android), announced to screen readers.
 - **Fails closed**: no answer from the server means *Not verified — do not admit*. A retry after a dropped connection reuses the same request id, so the server returns the original verdict instead of a false "already used".
+- Readiness checklist and a diagnostic camera code that cannot admit anyone. Attendee lookup exposes masked contact information and uses the same atomic redemption path.
+- Installable scanner PWA with route-specific bundles and cached decoder assets. The cache contains the app shell, never API responses, pass pages or admission verdicts; offline admission is deliberately unsupported.
 
 **Attendees**
 - A read-only pass page at `/p/<token>` with the QR code, event time in the event's zone, admission details, a directions link for the venue and a print layout. Opening it never checks anyone in.
@@ -49,14 +69,14 @@ sequenceDiagram
 
 - The commit is the linearization point: redemptions are serialized by one write lock, so concurrent scans of one pass behave as some sequential order (Herlihy & Wing, [Linearizability](https://doi.org/10.1145/78969.78972)). Tests record invocation/response times of 2, 25 and 100 simultaneous attempts and check that exactly one admits and no "already used" answer precedes the admitting request's invocation — on one laptop; that is evidence for this implementation, not a proof of global linearizability.
 - The database refuses what the code must never do: a second redemption (`PRIMARY KEY`), over-capacity counters (`CHECK`), cross-event references and changes to past admissions (triggers).
-- `synchronous=FULL`: an admission reported to the door has been fsynced and survives a crash or power loss.
+- `synchronous=FULL` requests an fsync before acknowledging admission. Crash recovery is tested; power-loss durability also depends on the host's storage guarantees. An ephemeral demo filesystem is not durable.
 - `node dist/server/index.js verify` checks integrity, foreign keys and nine admission invariants; `backup` and `restore` are verified and reversible. Details: [ADR 0003](docs/decisions/0003-redemption-atomicity.md), [ADR 0009](docs/decisions/0009-durable-storage.md), [test matrix](docs/test-matrix.md).
 
 ## Screenshots
 
-Captured from the current build with synthetic data (`docs/screenshots/`), 2026-11-15.
+Screenshots use synthetic data. The organizer Operations image is from the Phase 5 review; scanner and attendee captures below are from the earlier reviewed build.
 
-![Operations dashboard: issued vs admitted, capacity, scanner health, alerts, live feed](docs/screenshots/v3-operations.png)
+![Operations dashboard with event-day status, attendance, scanner health and alerts](docs/screenshots/review-2026-11-pass3/after/event-operations-dark-1440.png)
 
 | Scanner: admit | Scanner: already used | Attendee pass |
 | --- | --- | --- |
@@ -97,9 +117,12 @@ Requires Node.js 22.13+ (built-in `node:sqlite`, no native build).
 
 ```sh
 npm ci
-cp .env.example .env      # set ADMIN_TOKEN (≥ 24 chars) and ALLOW_SIGNUP=true for local sign-up
-npm run dev               # API on http://127.0.0.1:3000
-npm run dev:web           # UI on http://localhost:5173 (proxies /api)
+cp .env.example .env
+# In .env: generate ADMIN_TOKEN (at least 24 characters), set ALLOW_SIGNUP=true,
+# and set APP_PUBLIC_URL=http://localhost:5173 for links opened through Vite.
+# Generate a token: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+npm run dev               # terminal 1: API on http://127.0.0.1:3000
+npm run dev:web           # terminal 2: UI on http://localhost:5173
 ```
 
 Then, in the browser:
@@ -121,6 +144,7 @@ The camera needs HTTPS or `localhost`. Production build: `npm run build && npm s
 npm run typecheck && npm test        # Vitest: unit, API, roles, concurrency, migration, recovery, journey
 npm run build && npm run test:e2e    # Playwright (Chromium, Firefox, WebKit, Pixel 7) against the built server
 npx tsx scripts/load-test.ts         # HTTP load test with persisted-invariant checks
+npm run audit:ci                  # standard npm audit; high/critical findings block CI, no exceptions
 OLD_IMAGE=gatepass:old NEW_IMAGE=gatepass:new bash scripts/rollback-rehearsal.sh   # Docker: upgrade, then roll back on the pre-migration backup
 ```
 
@@ -128,9 +152,9 @@ What each suite covers and the latest results — including what has **not** bee
 
 ## Production readiness
 
-**Status: not production-ready — blocked on durable hosting (owner approval).** The application and its tests are in place; the live deployment is a labelled demo.
+**Suitable for a resume/portfolio demonstration; not certified for production event operations.** Local execution and automated verification are documented. A production release still requires PR approval/merge, durable hosting and recovery verification, live-email verification if email is enabled, physical-phone checks and a matching frontend/backend release check.
 
-| | State (checked 2026-11-17) |
+| | State (last full deployment inspection 2026-11-17; frontend version/API availability rechecked 2026-11-19) |
 | --- | --- |
 | Frontend | Vercel project `gatepass`, production deploys from `main`; previews build the static UI only and never reach the production API. Serves `/version.json` (build commit). |
 | Backend | Render web service `gatepass-api`: **free plan, no persistent disk** (last Render API read 2026-11-15: `plan: free`, `disk: null`), `DEMO_MODE=true` (the UI warns that data resets). On 2026-11-17 it served `main` `8b86114` at schema 4; PR #15 (schema 6) is not deployed. Sleeps after 15 idle minutes. |
