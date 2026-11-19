@@ -134,7 +134,13 @@ describe('streamed CSV exports', () => {
       await new Promise<void>((resolve, reject) => {
         const req = http.get({ port, host: '127.0.0.1', path: exportPath(eventId, 'attendance'), headers: { Authorization: `Bearer ${ADMIN_TOKEN}` } });
         req.on('response', (res) => {
-          expect(res.statusCode).toBe(200);
+          try {
+            expect(res.statusCode).toBe(200);
+          } catch (error) {
+            reject(error);
+            req.destroy();
+            return;
+          }
           res.once('data', () => {
             req.destroy();
             resolve();

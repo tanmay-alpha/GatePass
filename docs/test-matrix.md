@@ -65,6 +65,8 @@ CI follow-up on `26c2079`: every browser project, Docker build/restart and gitle
 
 Final portfolio pass (2026-11-19): both `npm audit` and `npm audit --omit=dev` report zero vulnerabilities with the existing lockfile. The temporary picomatch exception and its custom audit wrapper were removed; `npm run audit:ci` now runs the standard `npm audit --audit-level=high` with no exceptions. Earlier findings above are retained as historical evidence.
 
+The same finalization pass's first local full-suite run failed five tests on 30/60-second timeouts and exposed an assertion escaping an HTTP callback in `exports.test.ts`. The runner had no explicit worker bound. Test concurrency is now capped at two workers (all suites and assertions retained; timeouts unchanged), and the callback rejects its enclosing promise on an unexpected status instead of throwing an uncaught exception.
+
 Rows marked C or R below point to those dedicated runs for their detail; the same files also ran in V on the current state (all passed, SIGTERM test skipped).
 
 PR CI results are recorded in the PR. The last recorded CI run on `main` is PR #13's run (all 11 jobs passed, 2026-11-14).
