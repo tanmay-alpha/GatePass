@@ -4,7 +4,7 @@ import type { AdmissionInput } from './admission';
 import { recordAudit } from './audit';
 import { transaction, type Database } from './db';
 import { httpError } from './http';
-import { isConstraintError, isoDate } from './values';
+import { assertEventWritable, isConstraintError, isoDate } from './values';
 
 export interface PolicyInput {
   name: string;
@@ -38,6 +38,7 @@ export class AccessControl {
   createGate(eventId: string, name: string, actor: string): Gate {
     const id = randomUUID();
     transaction(this.db, () => {
+      assertEventWritable(this.db, eventId);
       try {
         this.db.prepare('INSERT INTO gates (id, event_id, name, created_at) VALUES (?, ?, ?, ?)').run(id, eventId, name, this.now());
       } catch (error) {
@@ -66,6 +67,7 @@ export class AccessControl {
   renameGate(gateId: string, name: string, actor: string): Gate {
     const eventId = this.gateEventId(gateId);
     transaction(this.db, () => {
+      assertEventWritable(this.db, eventId);
       try {
         this.db.prepare('UPDATE gates SET name = ? WHERE id = ?').run(name, gateId);
       } catch (error) {
@@ -81,6 +83,7 @@ export class AccessControl {
   deleteGate(gateId: string, actor: string): void {
     const eventId = this.gateEventId(gateId);
     transaction(this.db, () => {
+      assertEventWritable(this.db, eventId);
       const used = this.db
         .prepare(
           `SELECT (SELECT COUNT(*) FROM scanners WHERE gate_id = :id) + (SELECT COUNT(*) FROM policy_gates WHERE gate_id = :id)
@@ -104,6 +107,7 @@ export class AccessControl {
   deletePolicy(policyId: string, actor: string): void {
     const eventId = this.policyEventId(policyId);
     transaction(this.db, () => {
+      assertEventWritable(this.db, eventId);
       const used = this.db
         .prepare('SELECT (SELECT COUNT(*) FROM passes WHERE policy_id = :id) + (SELECT COUNT(*) FROM redemptions WHERE policy_id = :id) AS n')
         .get({ id: policyId }) as Row;
@@ -144,6 +148,7 @@ export class AccessControl {
     const id = randomUUID();
     const now = this.now();
     transaction(this.db, () => {
+      assertEventWritable(this.db, eventId);
       const opensAt = input.opensAt ? isoDate(input.opensAt) : null;
       const closesAt = input.closesAt ? isoDate(input.closesAt) : null;
       assertWindow(opensAt, closesAt);
@@ -161,6 +166,7 @@ export class AccessControl {
   updatePolicy(policyId: string, patch: Partial<PolicyInput>, actor: string): AdmissionPolicy {
     transaction(this.db, () => {
       const current = this.getPolicy(policyId);
+      assertEventWritable(this.db, current.eventId);
       const opensAt = patch.opensAt === undefined ? current.opensAt : patch.opensAt ? isoDate(patch.opensAt) : null;
       const closesAt = patch.closesAt === undefined ? current.closesAt : patch.closesAt ? isoDate(patch.closesAt) : null;
       assertWindow(opensAt, closesAt);

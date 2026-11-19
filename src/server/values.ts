@@ -1,10 +1,24 @@
+import type { Database } from './db';
 import { httpError } from './http';
+
+/** RFC 3339 date-time with an explicit offset or Z; offset-less strings would be read in the server's local zone. */
+export const RFC3339_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+export function isRfc3339(value: string): boolean {
+  return RFC3339_DATE_TIME.test(value) && !Number.isNaN(Date.parse(value));
+}
 
 /** All timestamps are stored as UTC ISO-8601 so string comparison orders them correctly. */
 export function isoDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) throw httpError(400, `Invalid date: ${value}`);
-  return date.toISOString();
+  if (!isRfc3339(value)) throw httpError(400, `Invalid date: ${value}`);
+  return new Date(value).toISOString();
+}
+
+/** Archived events are read-only. Call inside the write transaction. 404 for unknown events. */
+export function assertEventWritable(db: Database, eventId: string): void {
+  const row = db.prepare('SELECT status FROM events WHERE id = ?').get(eventId) as { status: string } | undefined;
+  if (!row) throw httpError(404, 'Event not found');
+  if (row.status === 'archived') throw httpError(409, 'An archived event is read-only. Restore it to Ended first.');
 }
 
 /** node:sqlite reports constraint failures as errors whose message names the constraint. */

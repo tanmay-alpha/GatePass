@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createHarness, EVENT_INPUT, PUBLIC_URL, seedEvent, type Harness } from './helpers';
+import { createHarness, EVENT_INPUT, PUBLIC_URL, scan, seedEvent, type Harness } from './helpers';
 
 let h: Harness;
 beforeEach(() => {
@@ -130,5 +130,64 @@ describe('revocation and reissue', () => {
 
     await h.admin(request(h.app).post(`/api/passes/${passes[0].id}/reissue`)).expect(409);
     await h.admin(request(h.app).post(`/api/passes/${passes[0].id}/revoke`)).expect(409);
+  });
+});
+
+describe('pass expiry follows the event', () => {
+  it('extends default-expiry passes when the event end moves, and keeps explicit expiries', async () => {
+    const { event, scannerKey, passes } = await seedEvent(h, 1);
+    const explicit = (await h.admin(request(h.app).post(`/api/events/${event.id}/passes`)).send({ count: 1, expiresAt: '2030-06-01T22:00:00Z' }).expect(201)).body[0];
+    const later = '2030-06-02T01:00:00.000Z';
+    await h.admin(request(h.app).patch(`/api/events/${event.id}`)).send({ endsAt: later }).expect(200);
+    expect(h.service.getPass(passes[0].id).expiresAt).toBe(later);
+    expect(h.service.getPass(explicit.id).expiresAt).toBe('2030-06-01T22:00:00.000Z');
+    expect(h.service.listAudit(event.id).find((entry) => entry.action === 'event.updated')?.details.passesExtended).toBe(1);
+
+    h.clock.advance(5 * 3_600_000); // 23:30, after the old end
+    expect((await scan(h, scannerKey, passes[0].token).expect(200)).body.outcome).toBe('admitted');
+  });
+
+  it('defaults the expiry of a late-entry policy pass to the policy close', async () => {
+    const { event } = await seedEvent(h, 1);
+    const closesAt = '2030-06-02T02:00:00.000Z';
+    const policy = (await h.admin(request(h.app).post(`/api/events/${event.id}/policies`)).send({ name: 'Late', closesAt }).expect(201)).body;
+    const pass = (await h.admin(request(h.app).post(`/api/events/${event.id}/passes`)).send({ count: 1, policyId: policy.id }).expect(201)).body[0];
+    expect(pass.expiresAt).toBe(closesAt);
+  });
+});
+
+describe('archived events are read-only', () => {
+  it('refuses changes to gates, passes and scanners but still allows revoking a scanner', async () => {
+    const { event, scannerId, passes } = await seedEvent(h, 2);
+    await h.admin(request(h.app).patch(`/api/events/${event.id}`)).send({ status: 'archived' }).expect(200);
+    const refused = (req: request.Test) => req.expect(409).then((res) => expect(res.body.error).toMatch(/archived event is read-only/));
+    await refused(h.admin(request(h.app).post(`/api/events/${event.id}/gates`)).send({ name: 'North' }));
+    await refused(h.admin(request(h.app).post(`/api/passes/${passes[0].id}/revoke`)));
+    await refused(h.admin(request(h.app).post(`/api/events/${event.id}/passes/revoke`)).send({ passIds: [passes[1].id] }));
+    await refused(h.admin(request(h.app).post(`/api/events/${event.id}/scanners`)).send({ label: 'Door 2' }));
+    await refused(h.admin(request(h.app).post(`/api/scanners/${scannerId}/rotate`)));
+    await h.admin(request(h.app).post(`/api/scanners/${scannerId}/revoke`)).expect(200);
+  });
+});
+
+describe('input validation', () => {
+  it('counts duplicate ids once when bulk revoking', async () => {
+    const { event, passes } = await seedEvent(h, 2);
+    const result = (await h.admin(request(h.app).post(`/api/events/${event.id}/passes/revoke`)).send({ passIds: [passes[0].id, passes[0].id, 'unknown'] }).expect(200)).body;
+    expect(result).toEqual({ revoked: 1, skipped: 1 });
+  });
+
+  it('requires an explicit offset on date-times', async () => {
+    await h.admin(request(h.app).post('/api/events')).send({ ...EVENT_INPUT, startsAt: '2030-06-01T18:00:00' }).expect(400);
+    await h.admin(request(h.app).post('/api/events')).send({ ...EVENT_INPUT, startsAt: '2030-06-01' }).expect(400);
+    await h.admin(request(h.app).post('/api/events')).send({ ...EVENT_INPUT, startsAt: '2030-06-01T20:00:00+02:00' }).expect(201);
+  });
+
+  it('answers 400 for QR data too long for the code, and honours download=false', async () => {
+    await h.admin(request(h.app).post('/api/qr/custom')).send({ data: 'é'.repeat(700) }).expect(400);
+    const plain = await h.admin(request(h.app).get('/api/qr/custom').query({ data: 'hello', download: 'false' })).expect(200);
+    expect(plain.headers['content-disposition']).toBeUndefined();
+    const download = await h.admin(request(h.app).get('/api/qr/custom').query({ data: 'hello', download: 'true' })).expect(200);
+    expect(download.headers['content-disposition']).toMatch(/attachment/);
   });
 });

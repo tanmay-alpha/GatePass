@@ -54,8 +54,18 @@ export async function verifyPassword(password: string, stored: string): Promise<
   return timingSafeEqual(actual, expected);
 }
 
-/** Verified against when the email is unknown, so response time does not reveal which accounts exist. */
-const DUMMY_HASH = hashPassword(generateToken());
+/** Verified against when the email is unknown, so response time does not reveal which accounts exist. Computed on first use; a failure is retried next time. */
+let dummyHash: Promise<string> | null = null;
+function dummyPasswordHash(): Promise<string> {
+  if (!dummyHash) {
+    const pending = hashPassword(generateToken());
+    dummyHash = pending;
+    pending.catch(() => {
+      if (dummyHash === pending) dummyHash = null;
+    });
+  }
+  return dummyHash;
+}
 
 /** Common choices a length rule alone lets through (ASVS 5.0 6.2.4 asks for a breached-password check; this is a minimal local list). */
 const COMMON_PASSWORDS = new Set([
@@ -202,7 +212,7 @@ export class Accounts {
    */
   async login(email: string, password: string, context: { ip: string }): Promise<{ user: AccountUser; token: string; expiresAt: string } | null> {
     const row = this.db.prepare('SELECT * FROM users WHERE email = ?').get(email.trim()) as Row | undefined;
-    const valid = await verifyPassword(password, (row?.password_hash as string | undefined) ?? (await DUMMY_HASH));
+    const valid = await verifyPassword(password, (row?.password_hash as string | undefined) ?? (await dummyPasswordHash()));
     if (!row || !valid || row.disabled_at) {
       transaction(this.db, () => this.audit(null, 'anonymous', 'user.login_failed', (row?.id as string | undefined) ?? null, { email: email.trim().slice(0, 254), ip: context.ip }));
       return null;
@@ -436,7 +446,7 @@ export class Accounts {
       // While self-registration is closed, a manager invitation must not become a way to get an
       // account that can create events of its own; organizer invitations from an admin still can.
       const canCreateEvents = pending.role !== 'manager' || input.selfRegistrationOpen;
-      const user = existing
+      let user = existing
         ? toUser(existing)
         : this.insertUser(email, input.name!, passwordHash!, pending.role === 'platform_admin' ? 'platform_admin' : 'organizer', null, canCreateEvents);
       const claimed = this.db
@@ -448,6 +458,16 @@ export class Accounts {
         this.db
           .prepare("INSERT INTO event_members (event_id, user_id, role, created_at) VALUES (?, ?, 'manager', ?) ON CONFLICT (event_id, user_id) DO NOTHING")
           .run(eventId, user.id, at);
+      }
+      if (existing && (pending.role === 'organizer' || pending.role === 'platform_admin')) {
+        if (pending.role === 'platform_admin' && user.platformRole !== 'platform_admin') {
+          this.db.prepare("UPDATE users SET platform_role = 'platform_admin', can_create_events = 1 WHERE id = ?").run(user.id);
+          this.audit(null, `user:${user.id}`, 'user.platform_admin_granted', user.id, { email: user.email, invitation: pending.id });
+        } else if (!user.canCreateEvents) {
+          this.db.prepare('UPDATE users SET can_create_events = 1 WHERE id = ?').run(user.id);
+          this.audit(null, `user:${user.id}`, 'user.event_creation_granted', user.id, { email: user.email, invitation: pending.id });
+        }
+        user = this.getUser(user.id);
       }
       this.audit(eventId, `user:${user.id}`, 'invitation.accepted', pending.id as string, { role: pending.role });
       return { user, session: existing ? null : this.createSession(user.id), eventId };
@@ -661,7 +681,13 @@ export class Accounts {
         this.db.prepare('UPDATE scanners SET revoked_at = ? WHERE id = ?').run(at, id);
         this.audit(eventId, actor, 'scanner.revoked', id, { reason: 'issuer removed from team' });
       }
-      this.audit(eventId, actor, 'member.removed', userId, { scannersRevoked: keys.length });
+      const issuer = `user:${userId}`;
+      const invitationsRevoked = Number(
+        this.db
+          .prepare('UPDATE invitations SET revoked_at = ? WHERE event_id = ? AND (created_by = ? OR issued_by = ?) AND accepted_at IS NULL AND revoked_at IS NULL')
+          .run(at, eventId, issuer, issuer).changes
+      );
+      this.audit(eventId, actor, 'member.removed', userId, { scannersRevoked: keys.length, invitationsRevoked });
     });
   }
 

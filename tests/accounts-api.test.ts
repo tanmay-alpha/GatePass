@@ -92,6 +92,7 @@ describe('sessions', () => {
     expect(failures.n).toBe(2);
   });
 
+  // Thirteen sequential 32 MiB scrypt derivations: on a loaded 2-worker laptop run this exceeded 30 s.
   it('throttles repeated failures for one account even across addresses, without locking out other accounts', async () => {
     await organizer('target@example.com');
     await organizer('other@example.com');
@@ -100,7 +101,7 @@ describe('sessions', () => {
     expect(statuses.slice(0, 10).every((status) => status === 401)).toBe(true);
     expect(statuses[10]).toBe(429);
     expect((await new Browser(h).signIn('other@example.com')).status).toBe(200);
-  }, 30_000);
+  }, 90_000);
 
   it('ends sessions on sign-out, after 24 h idle and after 7 days regardless of activity', async () => {
     const browser = await organizer('idle@example.com');
@@ -387,6 +388,38 @@ describe('security review regressions', () => {
     const rogueId = (await rogue.send('get', '/api/auth/session')).body.user.id;
     await h.admin(request(h.app).post(`/api/platform/users/${rogueId}/disable`)).expect(200);
     await new Browser(h).send('post', '/api/invitations/accept', { token: planted.url.split('/').at(-1), name: 'Sleeper', password: PASSWORD }).expect(410);
+  }, 30_000);
+
+  it('revokes the pending invitations a removed member created for the event', async () => {
+    const { owner, manager, event } = await ownerAndManager();
+    const ownerId = (await owner.send('get', '/api/auth/session')).body.user.id;
+    const managerId = (await manager.send('get', '/api/auth/session')).body.user.id;
+    const pending = (await owner.send('post', `/api/events/${event.id}/invitations`, { email: 'friend@example.com' }).expect(201)).body;
+    await owner.send('post', `/api/events/${event.id}/owner`, { userId: managerId }).expect(200);
+    await manager.send('delete', `/api/events/${event.id}/members/${ownerId}`).expect(204);
+    await new Browser(h).send('post', '/api/invitations/accept', { token: pending.url.split('/').at(-1), name: 'Friend', password: PASSWORD }).expect(410);
+    expect(h.service.listAudit(event.id).find((entry) => entry.action === 'member.removed')?.details.invitationsRevoked).toBe(1);
+  }, 30_000);
+
+  it('grants an existing signed-in account what an organizer or platform-admin invitation offers', async () => {
+    // Platform invitations go out before the account exists; the person then signs up on their own and accepts signed in.
+    const invite = async (email: string, role: string) => (await h.admin(request(h.app).post('/api/platform/invitations')).send({ email, role }).expect(201)).body.url.split('/').at(-1);
+    const organizerToken = await invite('existing@example.com', 'organizer');
+    const adminToken = await invite('admin@example.com', 'platform_admin');
+    const user = await organizer('existing@example.com');
+    const admin = await organizer('admin@example.com');
+    const userId = (await user.send('get', '/api/auth/session')).body.user.id;
+    const adminId = (await admin.send('get', '/api/auth/session')).body.user.id;
+    await h.admin(request(h.app).post(`/api/platform/users/${userId}/event-creation`)).send({ allowed: false }).expect(200);
+
+    const organizerAccepted = (await user.send('post', '/api/invitations/accept', { token: organizerToken }).expect(200)).body;
+    expect(organizerAccepted.user).toMatchObject({ canCreateEvents: true, platformRole: 'organizer' });
+    const adminAccepted = (await admin.send('post', '/api/invitations/accept', { token: adminToken }).expect(200)).body;
+    expect(adminAccepted.user).toMatchObject({ canCreateEvents: true, platformRole: 'platform_admin' });
+    await admin.send('get', '/api/platform/users').expect(200);
+    const actions = (id: string) => (h.db.prepare('SELECT action FROM audit_log WHERE entity_id = ?').all(id) as Array<{ action: string }>).map((row) => row.action);
+    expect(actions(userId)).toContain('user.event_creation_granted');
+    expect(actions(adminId)).toContain('user.platform_admin_granted');
   }, 30_000);
 
   it('applies the CSRF header rule to auth routes whatever the URL case', async () => {

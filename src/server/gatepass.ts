@@ -38,7 +38,7 @@ import { ROLE_PERMISSIONS, type Principal } from './permissions';
 import { AccessControl } from './policies';
 import { EventTemplates } from './templates';
 import { extractPassToken, generateToken, hashToken, isWellFormedToken } from './tokens';
-import { assertTimeZone, assertWindow, isoDate } from './values';
+import { assertEventWritable, assertTimeZone, assertWindow, isoDate } from './values';
 
 export interface GatePassOptions {
   /** Base URL encoded into pass QR codes, without trailing slash. */
@@ -279,6 +279,20 @@ export class GatePass {
       if (patch.status && patch.status !== current.status) details.status = { from: current.status, to: patch.status };
       if (capacity !== current.capacity) details.capacity = { from: current.capacity, to: capacity };
       if (startsAt !== current.startsAt || endsAt !== current.endsAt) details.window = { from: [current.startsAt, current.endsAt], to: [startsAt, endsAt] };
+      if (endsAt !== current.endsAt) {
+        // Passes issued with the default expiry (the event end) follow the event; explicit expiries stay.
+        details.passesExtended = Number(
+          this.db
+            .prepare('UPDATE passes SET expires_at = :next WHERE event_id = :id AND expires_at = :previous AND created_at < :next')
+            .run({ next: endsAt, id, previous: current.endsAt }).changes
+        );
+        this.db
+          .prepare(
+            `UPDATE pass_deliveries SET link_expires_at = (SELECT p.expires_at FROM passes p WHERE p.id = pass_deliveries.pass_id)
+             WHERE event_id = ? AND status IN ('queued', 'sending')`
+          )
+          .run(id);
+      }
       this.audit(id, actor, patch.status && patch.status !== current.status ? 'event.status_changed' : 'event.updated', id, details);
     });
     return this.getEvent(id);
@@ -433,6 +447,7 @@ export class GatePass {
   setPassPolicy(id: string, policyId: string | null, actor: string): Pass {
     transaction(this.db, () => {
       const pass = this.getPass(id);
+      assertEventWritable(this.db, pass.eventId);
       if (pass.status === 'redeemed' || pass.status === 'revoked') throw httpError(409, `A ${pass.status} pass cannot change policy`);
       if (policyId) this.access.assertPolicy(pass.eventId, policyId);
       this.db.prepare('UPDATE passes SET policy_id = ? WHERE id = ?').run(policyId, id);
@@ -444,6 +459,7 @@ export class GatePass {
   revokePass(id: string, actor: string): Pass {
     transaction(this.db, () => {
       const pass = this.getPass(id);
+      assertEventWritable(this.db, pass.eventId);
       if (pass.status === 'redeemed') throw httpError(409, 'A redeemed pass cannot be revoked');
       if (pass.status === 'revoked') return;
       this.db.prepare('UPDATE passes SET revoked_at = ? WHERE id = ?').run(this.timestamp(), id);
@@ -455,6 +471,7 @@ export class GatePass {
   /** Revokes every listed pass of this event that is still unused; ids of other events or used passes are skipped. */
   revokePasses(eventId: string, passIds: string[], actor: string): { revoked: number; skipped: number } {
     return transaction(this.db, () => {
+      assertEventWritable(this.db, eventId);
       const at = this.timestamp();
       const revoke = this.db.prepare('UPDATE passes SET revoked_at = ? WHERE id = ? AND event_id = ? AND revoked_at IS NULL AND NOT EXISTS (SELECT 1 FROM redemptions WHERE pass_id = passes.id)');
       let revoked = 0;
@@ -464,7 +481,7 @@ export class GatePass {
           this.audit(eventId, actor, 'pass.revoked', id, { bulk: true });
         }
       }
-      return { revoked, skipped: passIds.length - revoked };
+      return { revoked, skipped: new Set(passIds).size - revoked };
     });
   }
 
@@ -473,6 +490,7 @@ export class GatePass {
     const token = this.newToken();
     transaction(this.db, () => {
       const pass = this.getPass(id);
+      assertEventWritable(this.db, pass.eventId);
       if (pass.status !== 'active') throw httpError(409, `A ${pass.status} pass cannot be reissued`);
       this.db.prepare('UPDATE passes SET token_hash = ? WHERE id = ?').run(hashToken(token), id);
       this.audit(pass.eventId, actor, 'pass.reissued', id, {});
@@ -518,7 +536,7 @@ export class GatePass {
     const id = randomUUID();
     const code = this.newToken();
     const enrollment = transaction(this.db, () => {
-      this.getEvent(eventId);
+      assertEventWritable(this.db, eventId);
       if (gateId) this.access.assertGate(eventId, gateId);
       // Placeholder key nobody holds: the device gets its real key on enrollment.
       this.db
@@ -539,6 +557,7 @@ export class GatePass {
     const code = this.newToken();
     const enrollment = transaction(this.db, () => {
       const scanner = this.getScanner(id);
+      assertEventWritable(this.db, scanner.eventId);
       if (scanner.revokedAt) throw httpError(409, 'A revoked scanner cannot be rotated. Create a new one.');
       this.db.prepare('UPDATE scanners SET key_hash = ?, key_issued_by = ?, enrolled_at = NULL WHERE id = ?').run(hashToken(`unclaimed_${this.newToken()}`), actor, id);
       this.audit(scanner.eventId, actor, 'scanner.rotated', id, {});
@@ -972,10 +991,12 @@ export class GatePass {
     const now = this.timestamp();
     const event = this.getEvent(eventId);
     if (event.status === 'ended' || event.status === 'archived') throw httpError(409, `Passes cannot be issued for an ${event.status} event`);
-    const expiresAt = input.expiresAt ? isoDate(input.expiresAt) : event.endsAt;
+    if (input.policyId) this.access.assertPolicy(eventId, input.policyId);
+    const policyClosesAt = !input.expiresAt && input.policyId ? this.access.getPolicy(input.policyId).closesAt : null;
+    // A late-entry policy keeps its passes valid until its doors close.
+    const expiresAt = input.expiresAt ? isoDate(input.expiresAt) : policyClosesAt && policyClosesAt > event.endsAt ? policyClosesAt : event.endsAt;
     if (expiresAt <= now) throw httpError(400, 'The pass expiry must be in the future.');
     if (expiresAt <= event.startsAt) throw httpError(400, 'The pass expiry must be after the event starts, or the pass could never be used.');
-    if (input.policyId) this.access.assertPolicy(eventId, input.policyId);
     const insert = this.db.prepare(
       'INSERT INTO passes (id, event_id, policy_id, token_hash, attendee_name, attendee_email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     );

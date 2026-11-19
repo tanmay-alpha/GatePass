@@ -15,6 +15,7 @@ import { bearerToken, errorHandler, FailureThrottle, httpError, type Middleware,
 import { renderPassPage } from './pass-page';
 import { actorOf, type Principal } from './permissions';
 import { safeEqual } from './tokens';
+import { isRfc3339 } from './values';
 
 export interface AppOptions {
   service: GatePass;
@@ -48,7 +49,7 @@ export interface AppOptions {
   requestLog?: boolean;
 }
 
-const isoDateTime = z.string().refine((value) => !Number.isNaN(Date.parse(value)), 'must be an ISO 8601 date-time');
+const isoDateTime = z.string().refine(isRfc3339, 'must be an RFC 3339 date-time with a Z or ±hh:mm offset');
 const id = z.string().min(1).max(64);
 const designInput = z.record(z.string(), z.unknown());
 const optionalEmail = z.union([z.email().max(254), z.literal('')]).nullish();
@@ -133,11 +134,18 @@ const redeemSchema = z.strictObject({
   requestId: z.string().min(8).max(64).optional(),
   method: z.enum(['camera', 'manual', 'lookup']).optional()
 });
+/** Byte-mode capacity of the largest QR code at error-correction level H (the renderer's level). */
+const QR_MAX_BYTES_LEVEL_H = 1273;
 const qrSchema = z.object({
-  data: z.string().min(1).max(1024),
+  data: z
+    .string()
+    .min(1)
+    .max(1024)
+    .refine((value) => Buffer.byteLength(value, 'utf8') <= QR_MAX_BYTES_LEVEL_H, `data must be at most ${QR_MAX_BYTES_LEVEL_H} bytes of UTF-8`),
   size: z.coerce.number().optional().default(300),
   file: z.enum(['png', 'svg', 'pdf', 'eps']).optional().default('svg'),
-  download: z.coerce.boolean().optional().default(false),
+  // Query strings carry 'true'/'false'; JSON bodies carry booleans.
+  download: z.union([z.boolean(), z.stringbool()]).optional().default(false),
   config: designInput.optional().default({})
 });
 const registerSchema = z.strictObject({ email, name: personName, password });
