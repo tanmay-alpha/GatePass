@@ -1,0 +1,22 @@
+/* Event templates: picker on the new-event form, saved-template list, save-as-template form. */
+.template-picker { display: grid; gap: var(--space-2); padding-bottom: var(--space-4); border-bottom: 1px solid var(--border); }
+.template-picker .field-hint { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); }
+
+.template-outline {
+  display: grid; gap: var(--space-2); margin: 0; padding: var(--space-3) var(--space-4);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--text-sm);
+}
+.template-outline > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-3); }
+.template-outline dt { color: var(--muted); }
+.template-outline dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.template-policies { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+
+.template-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
+.template-item { display: grid; gap: var(--space-2); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.template-item:last-child { border-bottom: 0; padding-bottom: 0; }
+.template-item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.template-item-title { display: grid; gap: 2px; min-width: 0; }
+
+@media (max-width: 560px) {
+  .template-outline > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}

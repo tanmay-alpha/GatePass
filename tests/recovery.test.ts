@@ -297,7 +297,20 @@ describe('crash recovery of the server process', () => {
 
     const { code, signal } = await stop(server, 'SIGTERM');
     expect({ code, signal }).toEqual({ code: 0, signal: null });
-    expect(server.output.join('')).toContain('"msg":"shutting down","signal":"SIGTERM"');
+    // Structured logs: one JSON object per line (non-JSON lines, e.g. Node warnings, are ignored).
+    const logLines = server.output
+      .join('')
+      .split('\n')
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line) as Record<string, unknown>];
+        } catch {
+          return [];
+        }
+      });
+    expect(logLines).toContainEqual({ level: 'info', msg: 'shutting down', signal: 'SIGTERM' });
+    // The drain finished (nothing hit the deadline) and the database was closed before exit.
+    expect(logLines).toContainEqual({ level: 'info', msg: 'stopped', code: 0 });
     // Closing the last connection checkpoints and removes the WAL.
     expect(!existsSync(`${file}-wal`) || statSync(`${file}-wal`).size === 0).toBe(true);
 

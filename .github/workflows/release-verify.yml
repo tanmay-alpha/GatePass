@@ -9,10 +9,15 @@ name: Release verify
 #   agreement and the smoke checks, without an expected commit.
 #
 # Deliberately NOT triggered by the deployment itself: the Render service
-# deploys only after every GitHub check on the commit has passed
-# (`autoDeployTrigger: checksPass`), and a check that waits for Render to
-# serve that commit would keep Render waiting until it failed. The same
-# release check can be run from a laptop: `npx tsx scripts/release-check.ts`.
+# deploys only after every GitHub check on the commit has completed
+# successfully (`autoDeployTrigger: checksPass`), and a check that waits for
+# Render to serve that commit would keep Render waiting until it failed.
+# Scheduled and manual runs on main are checks on main's head commit too, so a
+# run that starts while that commit's deploy is still pending must neither wait
+# nor fail: release-check.ts then DEFERS (exits 0 with a "deferred, not a pass"
+# summary) when the head commit is less than an hour old and the backend still
+# serves another commit (GATED_COMMIT below). The same release check can be run
+# from a laptop: `npx tsx scripts/release-check.ts`.
 #
 # Read-only against production: GET requests plus one unauthenticated POST
 # that the server refuses. No credentials are used.
@@ -44,10 +49,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
       - name: Run release check
@@ -62,5 +67,10 @@ jobs:
             workflow_dispatch) export EXPECTED_COMMIT="${INPUT_COMMIT:-$GITHUB_SHA}" RELEASE_CHECK_TIMEOUT=300 ;;
             *) export RELEASE_CHECK_TIMEOUT=300 ;; # synthetic: no expected commit, allow a cold start
           esac
+          # This run is a check on main's head commit, which Render deploys only once its checks pass.
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            GATED_COMMIT_TIME="$(git log -1 --format=%ct "$GITHUB_SHA")"
+            export GATED_COMMIT="$GITHUB_SHA" GATED_COMMIT_TIME
+          fi
           # Node 24 runs the TypeScript file directly (type stripping); no npm install needed.
           node scripts/release-check.ts

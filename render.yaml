@@ -33,7 +33,8 @@ services:
     healthCheckPath: /api/health # 503 when the database is not ready
     # Deploy main only after the commit's GitHub checks pass, like the live demo service.
     # Consequence: no check may wait for this service to serve the commit (it would never
-    # finish), which is why release-verify is started by hand after the deploy is live.
+    # finish), which is why release-verify is started by hand after the deploy is live, and
+    # why a release-verify run on main defers (exit 0, "not a pass") while this deploy is pending.
     autoDeployTrigger: checksPass
     maxShutdownDelaySeconds: 30 # the server drains and closes SQLite on SIGTERM
     previews:
@@ -70,3 +71,9 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
+      # Optional: attendee pass email (docs/decisions/0012-pass-email-outbox.md). 32 random bytes, base64.
+      # Keep it out of backups. To rotate, set the new key here and the old one in PASS_DELIVERY_PREVIOUS_KEYS.
+      - key: PASS_DELIVERY_KEY
+        sync: false
+      - key: PASS_DELIVERY_PREVIOUS_KEYS
+        sync: false # comma-separated earlier keys during a rotation; empty otherwise

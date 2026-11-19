@@ -1,11 +1,14 @@
 import { Copy } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-import type { EventStatus, EventSummary } from '../../shared/types';
-import { useConfirm, type ConfirmOptions } from '../dialog';
-import { ErrorNote, FieldError, SectionHead, ToneBadge, errorMessage, focusFirstInvalid } from '../ui';
+import type { AdmissionPolicy, EventStatus, EventSummary } from '../../shared/types';
+import { Consequences, useConfirm, type ConfirmOptions } from '../dialog';
+import { ErrorNote, FieldError, SectionHead, ToneBadge, describedBy, errorMessage, focusFirstInvalid } from '../ui';
 import { fromZoneInput, toZoneInput, zoneLabel } from '../time';
 import { EventForm } from './EventForm';
+import { useResource } from './hooks';
 import { adminApi } from './http';
+import { closingNow, doorsOpen } from './live-impact';
+import { SaveTemplateSection } from './SaveTemplateSection';
 import { ARCHIVED_NOTE, STATUS_META, TRANSITIONS, can } from './model';
 import { useToast } from './toast';
 
@@ -36,6 +39,7 @@ export function SettingsPanel({ event, onChanged, onOpenEvent }: Props) {
         )}
       </section>
       {editable ? <CloneSection event={event} onOpenEvent={onOpenEvent} /> : null}
+      {editable ? <SaveTemplateSection event={event} /> : null}
     </div>
   );
 }
@@ -47,7 +51,9 @@ const ACTION: Record<EventStatus, { label: string; busy: string; done: string }>
   archived: { label: 'Archive', busy: 'Archiving…', done: 'Event archived' }
 };
 
-function confirmation(event: EventSummary, to: EventStatus): ConfirmOptions {
+/** `live`: the doors are open now, so ending or archiving turns people away at once. */
+function confirmation(event: EventSummary, to: EventStatus, live: boolean): ConfirmOptions {
+  const closing = live ? { acknowledge: 'I understand the doors close now.' } : {};
   switch (to) {
     case 'active':
       return {
@@ -59,17 +65,31 @@ function confirmation(event: EventSummary, to: EventStatus): ConfirmOptions {
       return event.status === 'archived'
         ? { title: `Restore “${event.name}”?`, body: 'The event becomes Ended: still closed to entry, but editable again. Reopen it afterwards if doors should open.', confirmLabel: 'Restore as ended' }
         : {
-            title: `End “${event.name}”?`,
-            body: 'Every scanner refuses every pass from now on and no new passes can be issued. You can reopen the event later.',
+            title: live ? `End “${event.name}” while the doors are open?` : `End “${event.name}”?`,
+            body: live ? (
+              <Consequences lead="From now on:" items={closingNow(event)}>
+                No new passes can be issued. You can reopen the event later.
+              </Consequences>
+            ) : (
+              'Every scanner refuses every pass from now on and no new passes can be issued. You can reopen the event later.'
+            ),
             confirmLabel: 'End the event',
-            danger: true
+            danger: true,
+            ...closing
           };
     case 'archived':
       return {
-        title: `Archive “${event.name}”?`,
-        body: 'The event becomes read-only history: no one is admitted and nothing can be changed. Scans, passes and the audit log stay available. You can restore it as Ended later.',
+        title: live ? `Archive “${event.name}” while the doors are open?` : `Archive “${event.name}”?`,
+        body: live ? (
+          <Consequences lead="From now on:" items={closingNow(event)}>
+            The event becomes read-only history; scans, passes and the audit log stay available. You can restore it as Ended later.
+          </Consequences>
+        ) : (
+          'The event becomes read-only history: no one is admitted and nothing can be changed. Scans, passes and the audit log stay available. You can restore it as Ended later.'
+        ),
         confirmLabel: 'Archive event',
-        danger: true
+        danger: true,
+        ...closing
       };
     case 'draft':
       return { title: 'Back to draft?', body: 'Scanners refuse every pass while the event is a draft.', confirmLabel: 'Back to draft' };
@@ -84,9 +104,11 @@ function LifecycleSection({ event, onChanged }: { event: EventSummary; onChanged
   const notify = useToast();
   const allowed = can(event, 'lifecycle');
   const current = STATUS_META[event.status];
+  // Policy windows widen the time the doors are open; only needed while the event can admit.
+  const policies = useResource<AdmissionPolicy[]>(allowed && event.status === 'active' ? `/api/events/${event.id}/policies` : null);
 
   async function move(to: EventStatus) {
-    if (!(await confirm(confirmation(event, to)))) return;
+    if (!(await confirm(confirmation(event, to, doorsOpen(event, policies.data ?? []))))) return;
     setBusy(to);
     setError('');
     try {
@@ -188,17 +210,17 @@ function CloneSection({ event, onOpenEvent }: { event: EventSummary; onOpenEvent
       <form className="form-grid" onSubmit={submit} noValidate>
         <label className="span-2">
           New event name
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} aria-invalid={errors.name ? true : undefined} aria-describedby="clone-name-error" />
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} aria-invalid={errors.name ? true : undefined} aria-describedby={describedBy(errors.name && 'clone-name-error')} />
           <FieldError id="clone-name-error" message={errors.name} />
         </label>
         <label>
           New start
-          <input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} aria-invalid={errors.startsAt ? true : undefined} aria-describedby="clone-zone clone-starts-error" />
+          <input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} aria-invalid={errors.startsAt ? true : undefined} aria-describedby={describedBy('clone-zone', errors.startsAt && 'clone-starts-error')} />
           <FieldError id="clone-starts-error" message={errors.startsAt} />
         </label>
         <label>
           New end
-          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} aria-invalid={errors.endsAt ? true : undefined} aria-describedby="clone-zone clone-ends-error" />
+          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} aria-invalid={errors.endsAt ? true : undefined} aria-describedby={describedBy('clone-zone', errors.endsAt && 'clone-ends-error')} />
           <FieldError id="clone-ends-error" message={errors.endsAt} />
         </label>
         <p id="clone-zone" className="field-hint span-2">

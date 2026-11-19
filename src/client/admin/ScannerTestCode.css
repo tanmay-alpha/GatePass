@@ -1,0 +1,7 @@
+/* Camera test code under the scanner devices table (ScannerTestCode.tsx). */
+.scanner-test-code { margin-top: var(--space-4); border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.scanner-test-code summary { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; font-weight: 600; min-height: var(--touch); }
+.scanner-test-code .setup-qr { max-width: 240px; }
+@media print {
+  .scanner-test-code[open] .setup-qr { max-width: 60mm; }
+}

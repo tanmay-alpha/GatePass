@@ -172,6 +172,29 @@ describe('vercel.mjs environment policy', () => {
     }
   });
 
+  it('serves the scanner service worker and manifest for revalidation, without Service-Worker-Allowed', () => {
+    const expected: Record<string, Record<string, string>> = {
+      '/sw.js': { 'Cache-Control': 'no-cache', 'Content-Type': 'text/javascript; charset=utf-8' },
+      '/manifest.webmanifest': { 'Cache-Control': 'no-cache', 'Content-Type': 'application/manifest+json; charset=utf-8' }
+    };
+    for (const env of [{ VERCEL_ENV: 'production', GATEPASS_BACKEND_ORIGIN: PROD_ORIGIN }, { VERCEL_ENV: 'preview' }]) {
+      const routes = loaded(env).routes;
+      const filesystem = routes.findIndex((route) => route.handle === 'filesystem');
+      for (const [file, headers] of Object.entries(expected)) {
+        const matches = (route: Route) => route.src !== undefined && new RegExp(`^${route.src}$`).test(file);
+        const index = routes.findIndex((route) => matches(route) && route.headers?.['Cache-Control']);
+        expect(index, file).toBeGreaterThanOrEqual(0);
+        expect(index, file).toBeLessThan(filesystem);
+        expect(routes[index]).toMatchObject({ headers, continue: true });
+        // Never proxied or rewritten before the static file is found.
+        for (const other of routes.slice(0, filesystem)) if (other.dest) expect(matches(other), file).toBe(false);
+      }
+      // The root worker already covers /scan: no widened scope anywhere.
+      for (const route of routes) expect(route.headers?.['Service-Worker-Allowed']).toBeUndefined();
+      expect(routes.some((route) => route.src !== undefined && new RegExp(`^${route.src}$`).test('/swXjs') && route.headers?.['Cache-Control'] === 'no-cache')).toBe(false);
+    }
+  });
+
   it('ships the 503 body as a static file Vite copies into dist/client', () => {
     expect(existsSync('public/preview-no-backend.json')).toBe(true);
   });

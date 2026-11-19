@@ -1,16 +1,15 @@
 import { Copy, Download, Printer, TriangleAlert, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useState } from 'react';
 import type { EventSummary, IssuedPass } from '../../shared/types';
 import { toCsv } from '../csv';
 import { errorMessage } from '../ui';
-import { formatRangeInZone } from '../time';
+import { BadgeSheet } from './BadgeSheet';
+import { EmailIssuedPasses } from './DeliveriesSection';
 import { adminQrUrl } from './http';
 
 const MAX_CARDS = 60;
 /** Printing renders one QR per pass; keep a sheet to a size browsers print reliably. */
 const MAX_PRINT = 500;
-const QR_CONCURRENCY = 6;
 
 interface Props {
   event: EventSummary;
@@ -60,18 +59,19 @@ export function IssuedPasses({ event, passes, policyNames, onClose }: Props) {
           </p>
         </div>
         <div className="actions">
+          <EmailIssuedPasses eventId={event.id} passes={passes} />
           <button className="btn btn-secondary btn-small" onClick={downloadCsv}>
             <Download size={14} aria-hidden /> CSV of links
           </button>
           <button className="btn btn-secondary btn-small" onClick={() => setPrinting(true)} disabled={printing || passes.length > MAX_PRINT} title={passes.length > MAX_PRINT ? `Printing is limited to ${MAX_PRINT} passes at a time` : undefined}>
-            <Printer size={14} aria-hidden /> {printing ? 'Preparing…' : 'Print passes'}
+            <Printer size={14} aria-hidden /> Print passes
           </button>
           <button className="btn btn-ghost btn-icon" onClick={onClose} aria-label="Close issued passes" title="Close">
             <X size={16} aria-hidden />
           </button>
         </div>
       </div>
-      {printing ? <PrintSheet event={event} passes={passes} onDone={() => setPrinting(false)} /> : null}
+      {printing ? <BadgeSheet event={event} passes={passes} policyNames={policyNames} onDone={() => setPrinting(false)} /> : null}
       <ul className="issued-grid">
         {passes.slice(0, MAX_CARDS).map((pass) => (
           <IssuedCard key={pass.id} event={event} pass={pass} />
@@ -83,92 +83,6 @@ export function IssuedPasses({ event, passes, policyNames, onClose }: Props) {
         </p>
       ) : null}
     </section>
-  );
-}
-
-/** Renders every QR code, then opens the print dialog on a grid of cut-out passes (see `@media print`). */
-function PrintSheet({ event, passes, onDone }: { event: EventSummary; passes: IssuedPass[]; onDone: () => void }) {
-  const [urls, setUrls] = useState<Array<string | null> | null>(null);
-  const [phase, setPhase] = useState<'rendering' | 'printing'>('rendering');
-  const sheet = useRef<HTMLDivElement>(null);
-  const failed = urls?.filter((url) => url === null).length ?? 0;
-  const when = formatRangeInZone(event.startsAt, event.endsAt, event.timeZone);
-
-  useEffect(() => {
-    let live = true;
-    const created: string[] = [];
-    const result: Array<string | null> = passes.map(() => null);
-    let next = 0;
-    const worker = async () => {
-      while (live && next < passes.length) {
-        const index = next++;
-        try {
-          const url = await adminQrUrl(passes[index].passUrl, event.design);
-          created.push(url);
-          result[index] = url;
-        } catch {
-          result[index] = null;
-        }
-      }
-    };
-    void Promise.all(Array.from({ length: QR_CONCURRENCY }, worker)).then(() => live && setUrls(result));
-    return () => {
-      live = false;
-      created.forEach((url) => URL.revokeObjectURL(url));
-    };
-  }, [passes, event.design]);
-
-  useEffect(() => {
-    if (!urls || !sheet.current) return;
-    let live = true;
-    const images = [...sheet.current.querySelectorAll('img')];
-    void Promise.allSettled(images.map((image) => image.decode())).then(() => {
-      if (!live) return;
-      setPhase('printing');
-      window.print();
-    });
-    return () => {
-      live = false;
-    };
-  }, [urls]);
-
-  useEffect(() => {
-    window.addEventListener('afterprint', onDone);
-    return () => window.removeEventListener('afterprint', onDone);
-  }, [onDone]);
-
-  return (
-    <>
-      <div className="print-status" role="status">
-        <span>
-          {phase === 'rendering'
-            ? `Preparing ${passes.length} pass${passes.length === 1 ? '' : 'es'} for printing…`
-            : `Print dialog opened.${failed ? ` ${failed} code${failed === 1 ? '' : 's'} could not be rendered and are left blank.` : ''}`}
-        </span>
-        <button type="button" className="btn btn-ghost btn-small" onClick={onDone}>
-          {phase === 'rendering' ? 'Cancel' : 'Close print view'}
-        </button>
-      </div>
-      {urls
-        ? createPortal(
-            <div className="print-sheet" ref={sheet} aria-hidden>
-              {passes.map((pass, index) => (
-                <article key={pass.id} className="print-pass">
-                  {urls[index] ? <img src={urls[index]} alt="" /> : <div className="print-missing">QR code unavailable: use the link from the CSV</div>}
-                  <div className="print-name">{pass.attendeeName || 'Admission pass'}</div>
-                  <div className="print-event">{event.name}</div>
-                  <div className="print-when">{when}</div>
-                  {event.venue ? <div className="print-when">{event.venue}</div> : null}
-                  <div className="print-ref">
-                    Ref <span>{passReference(pass.id)}</span>
-                  </div>
-                </article>
-              ))}
-            </div>,
-            document.body
-          )
-        : null}
-    </>
   );
 }
 

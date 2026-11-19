@@ -287,6 +287,9 @@ export interface ScanResult {
   };
 }
 
+/** How the door got the code: camera, typed or pasted by hand, or the reference of a pass found with "Find attendee". */
+export type ScanMethod = 'camera' | 'manual' | 'lookup';
+
 export interface ScanRecord {
   id: number;
   eventId: string;
@@ -298,6 +301,8 @@ export interface ScanRecord {
   attendeeName: string | null;
   outcome: StoredScanOutcome;
   createdAt: string;
+  /** Null for scans from clients that did not say (older scanners, direct API calls). */
+  method: ScanMethod | null;
 }
 
 export interface AuditEntry {
@@ -326,9 +331,35 @@ export interface ScannerSession {
   scanner: { id: string; label: string };
   gate: { id: string; name: string } | null;
   event: { id: string; name: string; venue: string | null; timeZone: string; startsAt: string; endsAt: string; status: EventStatus };
+  /** Server clock when the session was read; the readiness check judges the entry window and device clock skew against it. */
+  serverTime: string;
 }
 
-export type AlertKind = 'repeated_duplicate' | 'multi_gate' | 'invalid_burst' | 'capacity_near';
+/** One pass found by the door's attendee search (`GET /api/scanner/attendees`). Never carries a token or a full email address. */
+export interface AttendeeMatch {
+  /** The 8-character reference printed under the QR code; "Admit" sends it through the normal redeem endpoint. */
+  reference: string;
+  attendeeName: string | null;
+  /** Masked email (`a***@e***.com`) to tell namesakes apart. */
+  emailHint: string | null;
+  status: PassStatus;
+  redeemedAt: string | null;
+  redeemedAtGate: string | null;
+  policyName: string | null;
+  /** What a scan at this device would say right now. Advisory only: the redeem answer is authoritative. */
+  check: { admit: true } | { admit: false; outcome: ScanOutcome; detail?: ScanResult['detail'] };
+  /** Another pass of this event shares the reference, so it cannot be admitted by reference: scan the QR or open the pass link. */
+  ambiguous: boolean;
+}
+
+export interface AttendeeSearch {
+  matches: AttendeeMatch[];
+  /** More passes matched than are shown: refine the search. */
+  more: boolean;
+}
+
+/** `device_idle`: an unrevoked scanner has been silent (no scan or heartbeat) while the event is live. */
+export type AlertKind = 'repeated_duplicate' | 'multi_gate' | 'invalid_burst' | 'capacity_near' | 'device_idle';
 
 export interface OperationsAlert {
   kind: AlertKind;
@@ -375,6 +406,73 @@ export interface OperationsSummary {
   /** 15-minute buckets covering the event's scans, oldest first, at most 96. */
   timeline: Array<{ bucketStart: string; admitted: number; denied: number }>;
   alerts: OperationsAlert[];
+  /**
+   * Entry window = the event window widened by any policy window. upcoming: before it opens. live: active and
+   * inside it. paused: inside it but not active (draft). finished: past it, ended or archived.
+   */
+  phase: 'upcoming' | 'live' | 'paused' | 'finished';
+  /** Admitted against the passes expected at the door (issued minus revoked before entry); `rate` is null with none expected. */
+  attendance: { expected: number; admitted: number; rate: number | null };
+  /** The last hour in `bucketMinutes` buckets aligned to the clock, oldest first, zero-filled. */
+  recent: { bucketMinutes: number; buckets: Array<{ bucketStart: string; admitted: number; denied: number }> };
+  /** Admissions made from a "Find attendee" lookup (lost or unreadable QR code) rather than a scanned or typed code. */
+  assistedAdmissions: number;
+  /** When the event's most recent admission happened; null before the first one. */
+  lastAdmissionAt: string | null;
+  /** Present once the event is finished. */
+  completion: OperationsCompletion | null;
+}
+
+/** Wrap-up figures for a finished event. */
+export interface OperationsCompletion {
+  expected: number;
+  admitted: number;
+  /** Expected passes never admitted. */
+  noShows: number;
+  rate: number | null;
+  firstAdmissionAt: string | null;
+  lastAdmissionAt: string | null;
+  /** Busiest 5-minute window of admissions. */
+  peak: { bucketStart: string; admitted: number } | null;
+  denied: number;
+  topDenial: { outcome: StoredScanOutcome; count: number } | null;
+  /** Scanner devices and gates that recorded at least one scan. */
+  devicesUsed: number;
+  gatesUsed: number;
+}
+
+/** GET /api/events/:eventId/report: post-event figures; the same numbers as `exports/summary.csv`. */
+export interface EventReport {
+  generatedAt: string;
+  event: { id: string; name: string; timeZone: string; startsAt: string; endsAt: string; status: EventStatus };
+  /** Every pass ever issued for the event, by current state (`issued` = the sum of the others). */
+  passes: { issued: number; active: number; redeemed: number; revoked: number; expired: number };
+  /** Admitted against the passes expected at the door (issued minus revoked before entry). */
+  attendance: { expected: number; admitted: number; rate: number | null };
+  /** Scans per gate; `id: null` groups scanners not bound to a gate. */
+  gates: Array<{ id: string | null; name: string; admitted: number; denied: number }>;
+  /**
+   * Busiest 15-minute period of admissions, ties to the earliest. `localStart`/`localEnd` are wall-clock
+   * times (`YYYY-MM-DDTHH:MM`) in the event's time zone, whose offsets are all whole quarter hours.
+   */
+  peak: { start: string; end: string; localStart: string; localEnd: string; timeZone: string; admitted: number } | null;
+  /** Every refused scan by outcome, most frequent first. */
+  denials: Array<{ outcome: Exclude<StoredScanOutcome, 'admitted'>; count: number }>;
+  /** Every scanner device of the event, including revoked ones. Times are null when the device never scanned or called in. */
+  scanners: Array<{
+    id: string;
+    label: string;
+    gateName: string | null;
+    revoked: boolean;
+    firstScanAt: string | null;
+    lastScanAt: string | null;
+    /** Newest of the last scan and the last heartbeat. */
+    lastContactAt: string | null;
+    scans: number;
+    admitted: number;
+  }>;
+  /** Admissions made from a "Find attendee" lookup rather than a scanned or typed code. */
+  assistedAdmissions: number;
 }
 
 /** POST /api/events/:eventId/passes/import */
@@ -386,4 +484,116 @@ export interface ImportReport {
   rejected: Array<{ row: number; reason: 'invalid_email' | 'too_long' | 'empty' | 'duplicate_in_file' | 'already_has_pass'; detail: string }>;
   /** Present when `dryRun` is false. Tokens are returned only here, once. */
   issued?: IssuedPass[];
+}
+
+/**
+ * A policy shape in an event template. Times are minutes from the event start
+ * (negative = before it); null = the event start (opens) or end (closes).
+ */
+export interface EventTemplatePolicy {
+  name: string;
+  opensOffsetMinutes: number | null;
+  closesOffsetMinutes: number | null;
+  capacity: number | null;
+  /** Gate names from the template's `gates`; empty = any gate. */
+  gates: string[];
+}
+
+/** Event settings, gates and policy shapes only: never passes, attendees, scanners, team or credentials. */
+export interface EventTemplateConfig {
+  version: 1;
+  durationMinutes: number;
+  /** null: the organizer's own (browser) time zone. */
+  timeZone: string | null;
+  venue: string | null;
+  /** Suggested event-wide capacity; null = no limit. */
+  capacity: number | null;
+  /** Name of a built-in pass design (`src/qr/design.ts` templates); used when `design` is null. */
+  designPreset: string | null;
+  design: DesignConfig | null;
+  gates: string[];
+  policies: EventTemplatePolicy[];
+}
+
+/** GET /api/templates: built-in templates plus the caller's own saved templates. */
+export interface EventTemplate {
+  /** `builtin:<slug>` for built-ins, a UUID for saved templates. */
+  id: string;
+  kind: 'builtin' | 'saved';
+  name: string;
+  description: string | null;
+  config: EventTemplateConfig;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/**
+ * Attendee pass email outbox (docs/decisions/0012-pass-email-outbox.md).
+ * `accepted` means the email provider accepted the message, never that it
+ * reached the inbox. `unconfirmed`: an attempt may have reached the provider
+ * but could no longer be repeated safely (its duplicate protection lasts 24
+ * hours), so the email may or may not have been sent; the organizer decides.
+ */
+export type DeliveryStatus = 'queued' | 'sending' | 'accepted' | 'failed' | 'cancelled' | 'unconfirmed';
+
+export interface PassDelivery {
+  id: string;
+  passId: string;
+  attendeeName: string | null;
+  recipient: string;
+  status: DeliveryStatus;
+  /** Provider requests made so far. */
+  attempts: number;
+  /** When a queued email is tried next. */
+  nextAttemptAt: string | null;
+  /** When the latest provider request started. */
+  lastAttemptAt: string | null;
+  /** When the first attempt that may have reached the provider started (timeout, server error, restart); null when none did. */
+  uncertainSince: string | null;
+  /** Last provider error (queued: retrying; failed, unconfirmed: final) or why it was cancelled. */
+  lastError: string | null;
+  providerId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  acceptedAt: string | null;
+  /** A later email was queued for the same pass; this one needs no action. */
+  superseded: boolean;
+}
+
+/** Per status; `failed` and `unconfirmed` leave out emails sent again since (they need attention); `retrying` counts queued emails with a failed attempt behind them. */
+export type DeliveryCounts = Record<DeliveryStatus, number> & { retrying: number };
+
+/** Why waiting pass emails are not being sent: no mail provider, or no PASS_DELIVERY_KEY on the server. */
+export type DeliveryPause = 'no_provider' | 'no_key';
+
+/** GET /api/events/:eventId/deliveries (newest first). */
+export interface DeliveryList {
+  deliveries: PassDelivery[];
+  /** Rows matching the filter. */
+  total: number;
+  /** Whole event, unfiltered. */
+  counts: DeliveryCounts;
+  /** Set while emails of this event wait but the server cannot send them. */
+  paused: DeliveryPause | null;
+}
+
+export type DeliverySkipReason =
+  | 'not_found'
+  | 'no_email'
+  | 'redeemed'
+  | 'revoked'
+  | 'expired'
+  | 'already_queued'
+  | 'needs_reissue'
+  | 'link_changed'
+  | 'recipient_limit'
+  | 'in_progress'
+  | 'not_queued'
+  | 'superseded';
+
+/** Bulk queue, retry and cancel: how many were handled, how many passes got a new link, and what was skipped (pass or delivery id). */
+export interface DeliveryActionResult {
+  done: number;
+  reissued: number;
+  skipped: Array<{ id: string; reason: DeliverySkipReason }>;
 }

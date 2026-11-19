@@ -101,6 +101,12 @@ export const config = {
     { src: '/(.*)', headers: securityHeaders, continue: true },
     // Build commit for scripts/release-check.ts; must never be served stale.
     { src: '/version\\.json', headers: { 'Cache-Control': 'no-store' }, continue: true },
+    // Scanner PWA (public/sw.js registered with scope /scan). The worker script
+    // must be revalidated on every update check so a fixed scanner build reaches
+    // the door; /sw.js at the root already covers /scan, so no
+    // Service-Worker-Allowed header is needed.
+    { src: '/sw\\.js', headers: { 'Cache-Control': 'no-cache', 'Content-Type': 'text/javascript; charset=utf-8' }, continue: true },
+    { src: '/manifest\\.webmanifest', headers: { 'Cache-Control': 'no-cache', 'Content-Type': 'application/manifest+json; charset=utf-8' }, continue: true },
     { handle: 'filesystem' },
     ...noBackendRoutes,
     { src: '/(.*)', dest: '/index.html' }

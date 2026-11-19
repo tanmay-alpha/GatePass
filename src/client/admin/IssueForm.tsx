@@ -2,9 +2,11 @@ import { Ticket } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, IssuedPass } from '../../shared/types';
 import { attendeesFromCsv, parseCsv } from '../csv';
-import { ErrorNote, FieldError, SectionHead, errorMessage, focusFirstInvalid } from '../ui';
+import { ErrorNote, FieldError, SectionHead, describedBy, errorMessage, focusFirstInvalid } from '../ui';
 import { formatDateTimeInZone, fromZoneInput, zoneLabel } from '../time';
+import { announceDeliveries, EmailPassesOption } from './DeliveriesSection';
 import { adminApi } from './http';
+import { useToast } from './toast';
 
 const MAX_PASSES = 500;
 
@@ -42,10 +44,13 @@ export function IssueForm({ event, policies, onIssued }: Props) {
   const [showErrors, setShowErrors] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [emailPasses, setEmailPasses] = useState(false);
+  const notify = useToast();
   // Same parser as CSV import, so quoted names with commas ("Lovelace, Ada") survive.
   const lines = attendeesFromCsv(parseCsv(attendees)).rows;
   const countValue = Number(count);
   const total = mode === 'named' ? lines.length : Number.isInteger(countValue) && countValue > 0 ? countValue : 0;
+  const sendEmail = mode === 'named' && emailPasses;
   const expiresIso = expiresAt ? fromZoneInput(expiresAt, event.timeZone) : null;
   const errors = showErrors ? validate(mode, lines.length, count, expiresAt, expiresIso) : {};
 
@@ -62,9 +67,16 @@ export function IssueForm({ event, policies, onIssued }: Props) {
       const body = {
         ...(mode === 'named' ? { attendees: lines } : { count: countValue }),
         ...(expiresIso ? { expiresAt: expiresIso } : {}),
-        ...(policyId ? { policyId } : {})
+        ...(policyId ? { policyId } : {}),
+        ...(sendEmail ? { emailPasses: true } : {})
       };
-      await onIssued(await adminApi<IssuedPass[]>(`/api/events/${event.id}/passes`, { body }));
+      const issued = await adminApi<IssuedPass[]>(`/api/events/${event.id}/passes`, { body });
+      await onIssued(issued);
+      if (sendEmail) {
+        const queued = issued.filter((pass) => pass.attendeeEmail).length;
+        announceDeliveries();
+        notify(`${queued} pass email${queued === 1 ? '' : 's'} queued; progress is under Pass emails`);
+      }
       setAttendees('');
       setShowErrors(false);
     } catch (err) {
@@ -97,7 +109,7 @@ export function IssueForm({ event, policies, onIssued }: Props) {
                 placeholder={'Ada Lovelace, ada@example.com\nGrace Hopper'}
                 required
                 aria-invalid={errors.attendees ? true : undefined}
-                aria-describedby="attendees-hint attendees-error"
+                aria-describedby={describedBy('attendees-hint', errors.attendees && 'attendees-error')}
               />
               <span id="attendees-hint" className="field-hint">
                 One per line: <code>Name, email</code>. Email is optional; quote names that contain commas. Up to {MAX_PASSES} lines.
@@ -117,7 +129,7 @@ export function IssueForm({ event, policies, onIssued }: Props) {
                 onChange={(e) => setCount(e.target.value)}
                 required
                 aria-invalid={errors.count ? true : undefined}
-                aria-describedby="count-hint count-error"
+                aria-describedby={describedBy('count-hint', errors.count && 'count-error')}
               />
               <span id="count-hint" className="field-hint">
                 1–{MAX_PASSES}
@@ -135,13 +147,14 @@ export function IssueForm({ event, policies, onIssued }: Props) {
               value={expiresAt}
               onChange={(e) => setExpiresAt(e.target.value)}
               aria-invalid={errors.expiresAt ? true : undefined}
-              aria-describedby="issue-expiry-hint issue-expiry-error"
+              aria-describedby={describedBy('issue-expiry-hint', errors.expiresAt && 'issue-expiry-error')}
             />
             <span id="issue-expiry-hint" className="field-hint">
               In {zoneLabel(event.timeZone, event.endsAt)}. Empty: event end ({formatDateTimeInZone(event.endsAt, event.timeZone, false)})
             </span>
             <FieldError id="issue-expiry-error" message={errors.expiresAt} />
           </label>
+          {mode === 'named' ? <EmailPassesOption checked={emailPasses} onChange={setEmailPasses} withEmail={lines.filter((line) => line.email).length} /> : null}
           <ErrorNote message={error} />
           <button className="btn btn-primary btn-block" disabled={busy}>
             <Ticket size={16} aria-hidden /> {busy ? 'Issuing…' : total > 0 ? `Issue ${total} pass${total === 1 ? '' : 'es'}` : 'Issue passes'}

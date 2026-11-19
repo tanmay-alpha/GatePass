@@ -22,6 +22,7 @@ const ACTION_LABEL: Record<string, string> = {
   'scanner.created': 'Scanner added',
   'scanner.revoked': 'Scanner revoked',
   'scanner.rotated': 'Scanner key rotated',
+  'scanner.attendee_lookup': 'Attendee looked up at the door',
   'gate.created': 'Gate added',
   'gate.updated': 'Gate renamed',
   'gate.deleted': 'Gate deleted',

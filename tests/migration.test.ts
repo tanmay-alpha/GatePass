@@ -8,6 +8,7 @@ import { migrate, MIGRATIONS, openDatabase, SCHEMA_VERSION, schemaVersion, type 
 import { GatePass } from '../src/server/gatepass';
 import { verifyDatabase } from '../src/server/integrity';
 import { hashToken } from '../src/server/tokens';
+import { sealV1 } from './mail-fakes';
 
 // Upgrades a populated schema-version-2 database (the last shipped schema)
 // built with raw SQL, the way an existing deployment's file looks, and checks
@@ -344,6 +345,121 @@ describe('migrating a version 3 database (accounts, pre-enrollment scanner keys)
     expect(service.authenticateScanner(scannerKey('s1'))).toBeNull();
     const enrolled = service.enrollScanner(rotated.enrollment.url.split('#enroll=')[1])!;
     expect(service.authenticateScanner(enrolled.key)).toMatchObject({ id: 's1', eventId: 'e1' });
+    expect(verifyDatabase(db).violations).toEqual([]);
+  });
+});
+
+describe('migrating a version 5 database (pass email outbox) to version 6', () => {
+  const KEY = createHash('sha256').update('pass-delivery-key').digest();
+  const OUTBOX_END = '2030-06-03T23:00:00.000Z';
+  const at = (time: string) => `2030-06-01T${time}:00.000Z`;
+  const outbox = (db: DatabaseSync) =>
+    db.prepare('SELECT rowid AS row_id, * FROM pass_deliveries ORDER BY rowid').all().map((row) => ({ ...row })) as Array<Record<string, unknown>>;
+
+  /** Every delivery state a schema-5 server can leave behind, incl. one it crashed in (`sending`) and a failed email sent again since. */
+  function buildOutbox(): string {
+    const file = tempFile();
+    const v5 = new DatabaseSync(file);
+    v5.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    migrate(v5, MIGRATIONS.slice(0, 5));
+    const run = (sql: string, ...params: Array<string | number | null | Uint8Array>) => v5.prepare(sql).run(...params);
+    run("INSERT INTO events (id, name, starts_at, ends_at, status, created_at, updated_at) VALUES ('e1', 'Outbox', ?, ?, 'active', 'x', 'x')", E1.start, OUTBOX_END);
+    run("INSERT INTO events (id, name, starts_at, ends_at, status, created_at, updated_at) VALUES ('e2', 'Other', ?, ?, 'active', 'x', 'x')", E1.start, OUTBOX_END);
+    for (const [id, event] of [['p1', 'e1'], ['p2', 'e1'], ['p3', 'e1'], ['p4', 'e1'], ['p5', 'e1'], ['p6', 'e1'], ['p7', 'e1'], ['q1', 'e2']]) {
+      run('INSERT INTO passes (id, event_id, token_hash, attendee_email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)', id, event, hashToken(token(id)), `${id}@example.com`, OUTBOX_END, at('17:00'));
+    }
+    const delivery = (id: string, passId: string, status: string, attempts: number, createdAt: string, updatedAt: string, extra: { error?: string; providerId?: string } = {}) => {
+      const open = status === 'queued' || status === 'sending';
+      const sealed = open ? sealV1(KEY, `https://gate.example/p/${token(passId)}`, id, passId) : null;
+      run(
+        `INSERT INTO pass_deliveries (id, event_id, pass_id, recipient, token_hash, status, attempts, next_attempt_at, sealed_link, link_expires_at, provider_id, last_error, created_by, created_at, updated_at, accepted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'operator', ?, ?, ?)`,
+        id, passId.startsWith('q') ? 'e2' : 'e1', passId, `${passId}@example.com`, hashToken(token(passId)), status, attempts, open ? updatedAt : null, sealed, OUTBOX_END,
+        extra.providerId ?? null, extra.error ?? null, createdAt, updatedAt, status === 'accepted' ? updatedAt : null
+      );
+    };
+    delivery('d1', 'p1', 'queued', 0, at('18:20'), at('18:20'));
+    delivery('gone', 'p2', 'cancelled', 0, at('16:00'), at('16:00'));
+    delivery('d2', 'p2', 'queued', 2, '2030-05-31T10:00:00.000Z', at('18:00'), { error: 'The email provider did not answer in time.' });
+    run("DELETE FROM pass_deliveries WHERE id = 'gone'"); // a gap in the rowids, which order "sent again since"
+    delivery('d3', 'p3', 'sending', 1, at('18:25'), at('18:26'));
+    delivery('d4', 'p4', 'accepted', 1, at('17:10'), at('17:11'), { providerId: 're_4' });
+    delivery('d5', 'p5', 'failed', 8, at('12:00'), at('17:00'), { error: 'The email provider could not be reached. Gave up after 8 attempts.' });
+    delivery('d6', 'p6', 'cancelled', 0, at('17:20'), at('17:21'), { error: 'Not sent: the pass was revoked.' });
+    delivery('d7', 'p7', 'failed', 1, at('17:00'), at('17:01'), { error: 'The email provider refused the message (validation_error).' });
+    delivery('d8', 'p7', 'accepted', 1, at('17:30'), at('17:31'), { providerId: 're_8' });
+    delivery('d9', 'q1', 'queued', 0, at('18:21'), at('18:21'));
+    expect(v5.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    v5.close();
+    return file;
+  }
+
+  it('keeps every row, rowid and sealed link, marks interrupted or retried emails uncertain since creation, and keeps every constraint', () => {
+    const file = buildOutbox();
+    const legacy = new DatabaseSync(file, { readOnly: true });
+    const before = outbox(legacy);
+    legacy.close();
+    expect(before.map((row) => row.row_id)).toEqual([1, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+    const db = track(openDatabase(file));
+    expect(schemaVersion(db)).toBe(SCHEMA_VERSION);
+    expect(readSnapshot(`${file}.pre-v${SCHEMA_VERSION}.bak`).version).toBe(5);
+    const after = outbox(db);
+    expect(after.map(({ last_attempt_at: _a, uncertain_since: _u, ...row }) => row)).toEqual(before);
+    expect(after.map((row) => [row.id, row.uncertain_since, row.last_attempt_at])).toEqual([
+      ['d1', null, null],
+      ['d2', '2030-05-31T10:00:00.000Z', null],
+      ['d3', at('18:25'), at('18:26')],
+      ['d4', null, null],
+      ['d5', null, null],
+      ['d6', null, null],
+      ['d7', null, null],
+      ['d8', null, null],
+      ['d9', null, null]
+    ]);
+    expect(verifyDatabase(db).violations).toEqual([]);
+    expect((db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number }).foreign_keys).toBe(1);
+    const schema = (db.prepare("SELECT type, name FROM sqlite_master WHERE tbl_name = 'pass_deliveries' AND name NOT LIKE 'sqlite_%' ORDER BY type, name").all() as Array<{ type: string; name: string }>).map(
+      (row) => `${row.type} ${row.name}`
+    );
+    expect(schema).toEqual([
+      'index pass_deliveries_due_idx',
+      'index pass_deliveries_event_idx',
+      'index pass_deliveries_open_idx',
+      'index pass_deliveries_pass_idx',
+      'index pass_deliveries_recipient_idx',
+      'index pass_deliveries_waiting_idx',
+      'table pass_deliveries',
+      'trigger pass_deliveries_event_insert'
+    ]);
+
+    // Constraints survive the rebuild.
+    const insert = (id: string, passId: string, eventId: string, status: string, sealed: Uint8Array | null) =>
+      db
+        .prepare(
+          `INSERT INTO pass_deliveries (id, event_id, pass_id, recipient, token_hash, status, attempts, sealed_link, created_by, created_at, updated_at)
+           VALUES (?, ?, ?, 'x@example.com', ?, ?, 0, ?, 'operator', 'x', 'x')`
+        )
+        .run(id, eventId, passId, 'c'.repeat(64), status, sealed);
+    expect(() => insert('n1', 'p4', 'e1', 'delivered', null)).toThrow(/CHECK constraint failed/);
+    expect(() => insert('n2', 'p4', 'e1', 'unconfirmed', Buffer.from('sealed'))).toThrow(/CHECK constraint failed/);
+    expect(() => insert('n3', 'p1', 'e1', 'queued', Buffer.from('sealed'))).toThrow(/UNIQUE constraint failed/);
+    expect(() => insert('n4', 'q1', 'e1', 'failed', null)).toThrow(/delivery pass belongs to another event/);
+    expect(() => insert('n5', 'nope', 'e1', 'failed', null)).toThrow(/FOREIGN KEY|another event/);
+    insert('n6', 'p4', 'e1', 'unconfirmed', null);
+
+    // The outbox on the migrated file: the crashed email is recovered, the one retried for over 23 hours is not sent again.
+    const service = new GatePass(db, { publicUrl: 'https://gate.example', now: () => new Date(NOW), passDeliveryKey: KEY });
+    expect(service.deliveries.recoverInterrupted()).toBe(1);
+    const claimed: string[] = [];
+    for (let job = service.deliveries.claim(); job; job = service.deliveries.claim()) {
+      claimed.push(job.id);
+      expect(job.message.text).toContain(`/p/${token(job.passId)}`);
+    }
+    expect(claimed.sort()).toEqual(['d1', 'd3', 'd9']);
+    expect(db.prepare("SELECT status FROM pass_deliveries WHERE id = 'd2'").get()).toEqual({ status: 'unconfirmed' });
+    const counts = service.deliveries.list('e1').counts;
+    expect(counts).toMatchObject({ queued: 0, sending: 2, accepted: 2, failed: 1, cancelled: 1, unconfirmed: 2 });
     expect(verifyDatabase(db).violations).toEqual([]);
   });
 });

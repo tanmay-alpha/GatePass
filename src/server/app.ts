@@ -7,7 +7,10 @@ import { z } from 'zod';
 import { renderQr } from '../qr/renderer';
 import type { AccountUser, DesignConfig, EventPermission, SessionInfo } from '../shared/types';
 import { SESSION_ABSOLUTE_MS } from './accounts';
-import type { AuthenticatedScanner, GatePass } from './gatepass';
+import { attendeeQuerySchema } from './assist';
+import { streamCsv } from './csv';
+import { bulkDeliverySchema, deliveryFilterSchema, deliveryIdsSchema, singleDeliverySchema } from './deliveries';
+import type { AuthenticatedScanner, CsvExport, GatePass } from './gatepass';
 import { bearerToken, errorHandler, FailureThrottle, httpError, type Middleware, rateLimit } from './http';
 import { renderPassPage } from './pass-page';
 import { actorOf, type Principal } from './permissions';
@@ -82,7 +85,8 @@ const issueSchema = z
     attendees: z.array(attendee).min(1).max(500).optional(),
     count: z.number().int().min(1).max(500).optional(),
     expiresAt: isoDateTime.optional(),
-    policyId: id.optional()
+    policyId: id.optional(),
+    emailPasses: z.boolean().optional()
   })
   .refine((value) => !(value.attendees && value.count), 'Provide attendees or count, not both');
 // Import rows are validated row by row by the service (invalid rows are reported, not fatal).
@@ -90,7 +94,8 @@ const importSchema = z.strictObject({
   rows: z.array(z.strictObject({ name: z.string().max(1000).nullish(), email: z.string().max(1000).nullish() })).min(1).max(2000),
   policyId: id.optional(),
   expiresAt: isoDateTime.optional(),
-  dryRun: z.boolean()
+  dryRun: z.boolean(),
+  emailPasses: z.boolean().optional()
 });
 const bulkRevokeSchema = z.strictObject({ passIds: z.array(id).min(1).max(500) });
 const passFilterSchema = z.object({
@@ -122,7 +127,12 @@ const policyFields = {
 };
 const createPolicySchema = z.strictObject(policyFields);
 const updatePolicySchema = z.strictObject({ ...policyFields, name: policyFields.name.optional() });
-const redeemSchema = z.strictObject({ code: z.string().min(1).max(2048), requestId: z.string().min(8).max(64).optional() });
+// `method` only labels the scan row (camera, typed, or a "Find attendee" lookup); it never affects admission.
+const redeemSchema = z.strictObject({
+  code: z.string().min(1).max(2048),
+  requestId: z.string().min(8).max(64).optional(),
+  method: z.enum(['camera', 'manual', 'lookup']).optional()
+});
 const qrSchema = z.object({
   data: z.string().min(1).max(1024),
   size: z.coerce.number().optional().default(300),
@@ -138,10 +148,25 @@ const resetSchema = z.strictObject({ token: z.string().min(1).max(100), password
 const forgotSchema = z.strictObject({ email: z.string().trim().min(1).max(254) });
 const resetLinkSchema = z.strictObject({ reason: z.string().trim().max(500).optional(), delivery: z.enum(['email', 'link']).optional() });
 const eventCreationSchema = z.strictObject({ allowed: z.boolean() });
-const enrollSchema = z.strictObject({ code: z.string().min(1).max(100) });
+// `claim`: the device's secret for retrying after a lost answer (optional, so older scanner pages keep working).
+const enrollSchema = z.strictObject({ code: z.string().min(1).max(100), claim: z.string().min(1).max(100).optional() });
 const managerInviteSchema = z.strictObject({ email });
 const platformInviteSchema = z.strictObject({ email, role: z.enum(['organizer', 'platform_admin']) });
 const ownerSchema = z.strictObject({ userId: id });
+const templateNameFields = { name: z.string().trim().min(1).max(100), description: z.string().trim().max(300).nullish() };
+// `config` is validated by templates.ts (strict schema, size cap) on write and again on read.
+const templateSchema = z.strictObject({ ...templateNameFields, config: z.unknown() });
+const saveTemplateSchema = z.strictObject(templateNameFields);
+// The design comes from the template; everything else may override its suggestions.
+const templateEventSchema = z.strictObject({
+  name: eventFields.name,
+  venue: eventFields.venue,
+  timeZone: eventFields.timeZone,
+  startsAt: isoDateTime,
+  endsAt: isoDateTime.optional(),
+  capacity: eventFields.capacity,
+  status: z.enum(['draft', 'active']).optional()
+});
 
 const passThrough: Middleware = (_req, _res, next) => next();
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -365,10 +390,21 @@ export function createApp({
   const scannerOf = (res: express.Response): AuthenticatedScanner => res.locals.scanner as AuthenticatedScanner;
 
   const sessionInfo = (user: AccountUser, expiresAt: string): SessionInfo => ({ user, expiresAt, securityNotice: service.accounts.securityNotice(user.id) });
-  const sendCsv = (res: express.Response, filename: string, body: string) => {
+  /**
+   * Streams an export opened (and audited) by `service.openExport`. Once the headers are out, a failure can
+   * only cut the download short: the connection is destroyed so the file is visibly incomplete, never
+   * finished with a JSON error body.
+   */
+  const sendExport = async (res: express.Response, filename: string, exported: CsvExport) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(body);
+    try {
+      await streamCsv(res, exported.header, exported.next);
+    } catch (error) {
+      if (!res.headersSent) throw error;
+      console.error(JSON.stringify({ level: 'error', msg: 'export failed', requestId: res.locals.requestId ?? null, error: error instanceof Error ? error.message : String(error) }));
+      res.destroy();
+    }
   };
   const authLimit = limit(20);
   // Self-service reset emails: per address and requester, enough to retry a lost email; per address
@@ -397,6 +433,8 @@ export function createApp({
         signup: allowSignup,
         ...(demoMode ? { demo: true } : {}),
         email: service.accounts.mailer.enabled,
+        // Present only with email on: pass emails also need PASS_DELIVERY_KEY (src/server/deliveries.ts).
+        ...(service.accounts.mailer.enabled ? { passEmail: service.deliveries.available } : {}),
         build: { commit: buildCommit, schema }
       });
     } catch (error) {
@@ -619,6 +657,25 @@ export function createApp({
     res.status(201).json(service.getEvent(event.id, principalOf(res)));
   });
 
+  // Event templates: built-ins plus the caller's own saved templates (docs/decisions/0011-event-templates.md).
+  app.get('/api/templates', requireAccount, (_req, res) => {
+    res.json(service.templates.list(ownerIdOf(res)));
+  });
+  app.post('/api/templates', requireAccount, (req, res) => {
+    res.status(201).json(service.templates.create(ownerIdOf(res), templateSchema.parse(req.body), actor(res)));
+  });
+  app.delete('/api/templates/:templateId', requireAccount, (req, res) => {
+    service.templates.remove(req.params.templateId, ownerIdOf(res), actor(res));
+    res.status(204).end();
+  });
+  app.post('/api/templates/:templateId/events', requireAccount, requireEventCreation, (req, res) => {
+    const event = service.templates.createEvent(req.params.templateId, templateEventSchema.parse(req.body), { ownerId: ownerIdOf(res), actor: actor(res) });
+    res.status(201).json(service.getEvent(event.id, principalOf(res)));
+  });
+  app.post('/api/events/:eventId/save-template', requireAccount, requireEvent('edit'), (req, res) => {
+    res.status(201).json(service.templates.saveFromEvent(req.params.eventId, ownerIdOf(res), saveTemplateSchema.parse(req.body), actor(res)));
+  });
+
   // Team
   app.get('/api/events/:eventId/members', requireAccount, requireEvent('view'), (req, res) => {
     res.json(service.accounts.listMembers(req.params.eventId));
@@ -641,8 +698,11 @@ export function createApp({
     res.status(201).json(await service.accounts.createInvitation({ role: 'manager', email: input.email, eventId: req.params.eventId }, actor(res)));
   });
 
-  app.get('/api/events/:eventId/operations', requireAccount, requireEvent('view'), (req, res) => {
-    res.json(service.operations(req.params.eventId));
+  app.get('/api/events/:eventId/operations', requireAccount, requireEvent('view'), async (req, res) => {
+    res.json(await service.operations(req.params.eventId));
+  });
+  app.get('/api/events/:eventId/report', requireAccount, requireEvent('view'), async (_req, res) => {
+    res.json(await service.report(eventOf(res)));
   });
 
   // Gates and policies
@@ -700,6 +760,26 @@ export function createApp({
     res.json(service.reissuePass(req.params.passId, actor(res)));
   });
 
+  // Pass email outbox (src/server/deliveries.ts): routes only queue; the background worker sends.
+  const deliveryLimit = limit(60);
+  app.get('/api/events/:eventId/deliveries', requireAccount, requireEvent('view'), (req, res) => {
+    res.json(service.deliveries.list(eventOf(res), deliveryFilterSchema.parse(req.query)));
+  });
+  app.post('/api/events/:eventId/deliveries', requireAccount, requireEvent('passes'), deliveryLimit, (req, res) => {
+    const input = bulkDeliverySchema.parse(req.body);
+    res.json(service.deliveries.queue(eventOf(res), input.passes, input.reissue === true, actor(res)));
+  });
+  app.post('/api/events/:eventId/passes/:passId/deliveries', requireAccount, requireEvent('passes'), deliveryLimit, (req, res) => {
+    res.status(201).json(service.deliveries.queuePass(eventOf(res), req.params.passId, singleDeliverySchema.parse(req.body ?? {}), actor(res)));
+  });
+  app.post('/api/events/:eventId/deliveries/retry', requireAccount, requireEvent('passes'), deliveryLimit, (req, res) => {
+    const input = deliveryIdsSchema.parse(req.body);
+    res.json(service.deliveries.retry(eventOf(res), input.deliveryIds, input.reissue === true, actor(res)));
+  });
+  app.post('/api/events/:eventId/deliveries/cancel', requireAccount, requireEvent('passes'), deliveryLimit, (req, res) => {
+    res.json(service.deliveries.cancel(eventOf(res), deliveryIdsSchema.parse(req.body).deliveryIds, actor(res)));
+  });
+
   // Scanner devices
   app.get('/api/events/:eventId/scanners', requireAccount, requireEvent('view'), (req, res) => {
     res.json(service.listScanners(req.params.eventId));
@@ -724,15 +804,11 @@ export function createApp({
   });
 
   // Exports: attendee personal data, owners only, each download audited.
-  app.get('/api/events/:eventId/exports/attendance.csv', requireAccount, requireEvent('export'), (req, res) => {
-    sendCsv(res, `gatepass-${req.params.eventId.slice(0, 8)}-attendance.csv`, service.attendanceCsv(eventOf(res), actor(res)));
-  });
-  app.get('/api/events/:eventId/exports/scans.csv', requireAccount, requireEvent('export'), (req, res) => {
-    sendCsv(res, `gatepass-${req.params.eventId.slice(0, 8)}-scans.csv`, service.scansCsv(eventOf(res), actor(res)));
-  });
-  app.get('/api/events/:eventId/exports/audit.csv', requireAccount, requireEvent('export'), (req, res) => {
-    sendCsv(res, `gatepass-${req.params.eventId.slice(0, 8)}-audit.csv`, service.auditCsv(eventOf(res), actor(res)));
-  });
+  for (const kind of ['attendance', 'scans', 'audit', 'summary'] as const) {
+    app.get(`/api/events/:eventId/exports/${kind}.csv`, requireAccount, requireEvent('export'), async (req, res) => {
+      await sendExport(res, `gatepass-${req.params.eventId.slice(0, 8)}-${kind}.csv`, await service.openExport(eventOf(res), kind, actor(res)));
+    });
+  }
 
   // ------------------------------------------------------------ scanner
 
@@ -741,8 +817,8 @@ export function createApp({
   // throttled per address; the request limit leaves room for a venue setting
   // up many door phones on one network at once.
   app.post('/api/scanner/enroll', limit(60), (req, res) => {
-    const { code } = enrollSchema.parse(req.body);
-    const enrolled = service.enrollScanner(code);
+    const { code, claim } = enrollSchema.parse(req.body);
+    const enrolled = service.enrollScanner(code, claim);
     if (!enrolled) {
       const wait = rateLimits ? failures.fail(req.ip ?? 'unknown') : 0;
       if (wait > 0) {
@@ -763,7 +839,20 @@ export function createApp({
   // Limited per device, not per IP: every gate at a venue often shares one NAT address.
   app.post('/api/scanner/redeem', requireScanner, limit(240, (_req, res) => `scanner:${scannerOf(res).id}`), (req, res) => {
     const input = redeemSchema.parse(req.body);
-    res.json(service.redeem(scannerOf(res), input.code, input.requestId));
+    res.json(service.redeem(scannerOf(res), input.code, input.requestId, input.method));
+  });
+
+  // Door assistance for a lost or unreadable QR code (src/server/assist.ts): own event only, masked emails,
+  // never tokens. Admitting goes through /api/scanner/redeem with the reference. Limited per device: 30 a
+  // minute here, and a 24-hour search budget in the service (429 with Retry-After).
+  app.get('/api/scanner/attendees', requireScanner, limit(30, (_req, res) => `scanner-assist:${scannerOf(res).id}`), (req, res) => {
+    const { q } = attendeeQuerySchema.parse(req.query);
+    try {
+      res.json(service.assist.search(scannerOf(res), q));
+    } catch (error) {
+      if (error instanceof Error && 'retryAfter' in error) res.setHeader('Retry-After', String(error.retryAfter));
+      throw error;
+    }
   });
 
   app.use('/api', (_req, _res, next) => next(httpError(404, 'Not found')));
@@ -773,8 +862,18 @@ export function createApp({
   if (clientDir && existsSync(path.join(clientDir, 'index.html'))) {
     const root = path.resolve(clientDir);
     // version.json names the deployed commit for release checks; it must never be served from a cache.
-    app.use(express.static(root, { index: false, setHeaders: (res, file) => path.basename(file) === 'version.json' && res.setHeader('Cache-Control', 'no-store') }));
-    app.get('/{*path}', (_req, res) => res.sendFile(path.join(root, 'index.html')));
+    // The scanner's service worker and manifest are revalidated on every load, so a fixed release reaches door phones at once.
+    const fresh: Record<string, string> = { 'version.json': 'no-store', 'sw.js': 'no-cache', 'manifest.webmanifest': 'no-cache' };
+    app.use(
+      express.static(root, {
+        index: false,
+        setHeaders: (res, file) => {
+          const policy = path.dirname(file) === root ? fresh[path.basename(file)] : undefined;
+          if (policy) res.setHeader('Cache-Control', policy);
+        }
+      })
+    );
+    app.get('/{*path}', limit(600), (_req, res) => res.sendFile(path.join(root, 'index.html')));
   }
 
   app.use(errorHandler);

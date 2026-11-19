@@ -64,6 +64,11 @@ export function FieldError({ id, message }: { id: string; message?: string }) {
   ) : null;
 }
 
+/** `aria-describedby` naming only the hints and messages that are rendered; a reference to an absent id is invalid ARIA. */
+export function describedBy(...ids: Array<string | false | null | undefined>): string | undefined {
+  return ids.filter(Boolean).join(' ') || undefined;
+}
+
 /** After a failed submit, moves focus to the first invalid control once React has rendered the messages. */
 export function focusFirstInvalid(form: HTMLFormElement) {
   requestAnimationFrame(() => form.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus());

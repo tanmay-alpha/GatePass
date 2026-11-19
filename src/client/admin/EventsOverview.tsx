@@ -4,6 +4,7 @@ import { Bar, ToneBadge } from '../ui';
 import { formatRangeInZone } from '../time';
 import { STATUS_META } from './model';
 import { isReadyForDoors, needsSetup } from './SetupChecklist';
+import { TemplatesManager } from './TemplatesManager';
 
 interface Props {
   events: EventSummary[];
@@ -78,6 +79,7 @@ export function EventsOverview({ events, canCreate, onCreate }: Props) {
       </div>
       {current.length ? <EventGroup title={past.length ? 'Current and upcoming' : null} events={current} /> : null}
       {past.length ? <EventGroup title="Past" events={past} /> : null}
+      <TemplatesManager />
     </div>
   );
 }

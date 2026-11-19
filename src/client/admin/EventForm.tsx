@@ -1,8 +1,11 @@
 import { useId, useMemo, useState, type FormEvent } from 'react';
-import type { EventSummary } from '../../shared/types';
-import { ErrorNote, FieldError, errorMessage, focusFirstInvalid } from '../ui';
-import { browserTimeZone, fromZoneInput, listTimeZones, toZoneInput, zoneLabel } from '../time';
+import type { EventSummary, EventTemplate } from '../../shared/types';
+import { Consequences, useConfirm } from '../dialog';
+import { ErrorNote, FieldError, describedBy, errorMessage, focusFirstInvalid } from '../ui';
+import { browserTimeZone, formatTimeInZone, fromZoneInput, listTimeZones, toZoneInput, zoneLabel } from '../time';
 import { adminApi } from './http';
+import { doorsOpen, eventNarrowing } from './live-impact';
+import { TemplatePicker } from './TemplatePicker';
 
 interface Props {
   event?: EventSummary;
@@ -46,10 +49,12 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
   const [endsAt, setEndsAt] = useState(toZoneInput(event?.endsAt ?? defaults.endsAt, timeZone));
   const [capacity, setCapacity] = useState(event?.capacity ? String(event.capacity) : '');
   const [status, setStatus] = useState<'draft' | 'active'>('draft');
+  const [template, setTemplate] = useState<EventTemplate | null>(null);
   const [showErrors, setShowErrors] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const id = useId();
+  const [confirm, dialog] = useConfirm();
   const admitted = event?.admittedCount ?? 0;
   const readOnly = event?.status === 'archived';
   const startIso = fromZoneInput(startsAt, timeZone);
@@ -57,11 +62,43 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
   const errors = showErrors ? validate(name, startIso, endIso, capacity, admitted) : {};
   const zoneHint = startIso ? `${zoneLabel(timeZone, startIso)}. Start and end are times on a clock in this zone.` : 'Start and end are times on a clock in this zone.';
 
+  /** Pre-fills from the template (keeping the chosen start on the wall clock); "Start from scratch" leaves the form as it is. */
+  function applyTemplate(next: EventTemplate | null) {
+    setTemplate(next);
+    if (!next) return;
+    const zone = next.config.timeZone ?? browserTimeZone();
+    const start = fromZoneInput(startsAt, zone) ?? defaults.startsAt;
+    setTimeZone(zone);
+    setStartsAt(toZoneInput(start, zone));
+    setEndsAt(toZoneInput(new Date(Date.parse(start) + next.config.durationMinutes * 60_000).toISOString(), zone));
+    setCapacity(next.config.capacity ? String(next.config.capacity) : '');
+    if (next.config.venue) setVenue(next.config.venue);
+  }
+
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (Object.keys(validate(name, startIso, endIso, capacity, admitted)).length || !startIso || !endIso) {
       setShowErrors(true);
       focusFirstInvalid(e.currentTarget);
+      return;
+    }
+    const nextCapacity = capacity.trim() ? Number(capacity) : null;
+    // Narrowing the window or capacity of an open event turns people away at once: say how, and have it acknowledged.
+    const impact = event && doorsOpen(event) ? eventNarrowing(event, { startsAt: startIso, endsAt: endIso, capacity: nextCapacity }, (iso) => formatTimeInZone(iso, timeZone)) : [];
+    if (
+      impact.length &&
+      !(await confirm({
+        title: 'Change the event while the doors are open?',
+        body: (
+          <Consequences lead="Scanners apply the change from their next scan:" items={impact}>
+            People already admitted stay admitted.
+          </Consequences>
+        ),
+        confirmLabel: 'Save and apply now',
+        danger: true,
+        acknowledge: 'I understand door staff will start refusing these passes.'
+      }))
+    ) {
       return;
     }
     setBusy(true);
@@ -77,7 +114,9 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
       };
       const saved = event
         ? await adminApi<EventSummary>(`/api/events/${event.id}`, { method: 'PATCH', body })
-        : await adminApi<EventSummary>('/api/events', { body: { ...body, status } });
+        : template
+          ? await adminApi<EventSummary>(`/api/templates/${encodeURIComponent(template.id)}/events`, { body: { ...body, status } })
+          : await adminApi<EventSummary>('/api/events', { body: { ...body, status } });
       setShowErrors(false);
       await onSaved(saved);
     } catch (err) {
@@ -89,10 +128,11 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
 
   return (
     <form className="form-grid" onSubmit={submit} noValidate>
+      {event ? null : <TemplatePicker selected={template} onSelect={applyTemplate} />}
       <fieldset className="form-grid span-2" disabled={readOnly}>
         <label className="span-2">
           Name
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={`${id}-name-error`} />
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required aria-invalid={errors.name ? true : undefined} aria-describedby={describedBy(errors.name && `${id}-name-error`)} />
           <FieldError id={`${id}-name-error`} message={errors.name} />
         </label>
         <label className="span-2">
@@ -120,13 +160,13 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
             onChange={(e) => setStartsAt(e.target.value)}
             required
             aria-invalid={errors.startsAt ? true : undefined}
-            aria-describedby={`${id}-starts-error`}
+            aria-describedby={describedBy(errors.startsAt && `${id}-starts-error`)}
           />
           <FieldError id={`${id}-starts-error`} message={errors.startsAt} />
         </label>
         <label>
           Ends
-          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} required aria-invalid={errors.endsAt ? true : undefined} aria-describedby={`${id}-ends-error`} />
+          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} required aria-invalid={errors.endsAt ? true : undefined} aria-describedby={describedBy(errors.endsAt && `${id}-ends-error`)} />
           <FieldError id={`${id}-ends-error`} message={errors.endsAt} />
         </label>
         <label className="span-2">
@@ -139,7 +179,7 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
             value={capacity}
             onChange={(e) => setCapacity(e.target.value)}
             aria-invalid={errors.capacity ? true : undefined}
-            aria-describedby={`${id}-capacity-hint ${id}-capacity-error`}
+            aria-describedby={describedBy(`${id}-capacity-hint`, errors.capacity && `${id}-capacity-error`)}
           />
           <span id={`${id}-capacity-hint`} className="field-hint">
             Most people admitted across every gate and policy, e.g. the venue limit. Empty: no limit.{admitted ? ` ${admitted} already admitted.` : ''}
@@ -177,6 +217,7 @@ export function EventForm({ event, onSaved, onCancel }: Props) {
           ) : null}
         </div>
       )}
+      {dialog}
     </form>
   );
 }

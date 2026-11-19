@@ -1,13 +1,18 @@
-import { Camera, CameraOff, Clock, Flashlight, FlashlightOff, LoaderCircle, LogOut, MapPin, RotateCcw, ScanLine, Smartphone, Volume2, VolumeX, WifiOff } from 'lucide-react';
+import { Camera, CameraOff, Clock, Flashlight, FlashlightOff, ListChecks, LoaderCircle, LogOut, MapPin, RotateCcw, ScanLine, Smartphone, Volume2, VolumeX, WifiOff } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import type { EventStatus, ScannerSession, ScanResult } from '../../shared/types';
+import { isDiagnosticPayload, isValidDiagnosticCode } from '../../shared/diagnostic';
+import type { EventStatus, ScanMethod, ScannerSession, ScanResult } from '../../shared/types';
 import { api, ApiError } from '../api';
 import { useConfirm } from '../dialog';
-import { createQrDetector, type DecoderPath, type QrDetector } from '../qr-detector';
+import type { DecoderPath, QrDetector } from '../qr-detector';
 import { ErrorNote } from '../ui';
+import { AttendeeFinder } from './AttendeeFinder';
 import { beep, loadMuted, saveMuted, unlockAudio } from './beep';
 import { INSECURE_CAMERA_MESSAGE, cameraErrorMessage, listCameras, loadCameraChoice, openCamera, saveCameraChoice, setTorch, supportsTorch, type CameraChoice } from './camera';
 import { REPLAYED_NOTE, VERDICT_HEADLINE, explain, explainFailure, formatEventClock, formatEventTime, isScanResult, reasonLabel, verdictOf, type Verdict } from './outcome';
+import { useOfflineShell } from './pwa';
+import { readinessItems, type CameraPermission, type DiagnosticState, type Probe } from './readiness';
+import { ReadinessPanel } from './ReadinessPanel';
 import { RepeatFilter } from './repeat';
 import { ResultOverlay, type ScanDisplay } from './ResultOverlay';
 import { PendingScans, isUnanswered, mayHaveBeenJudged } from './retry';
@@ -28,6 +33,10 @@ const OFFLINE_MESSAGE = 'Scanning paused — offline. Do not admit anyone until 
 const SLOW_MESSAGE = 'Checking… slow connection';
 /** The 8-character reference printed on the pass (a pass id prefix); the server matches it case-insensitively. */
 const REFERENCE = /^[0-9a-f]{8}$/i;
+/** A camera test code is read on this device only; it is never sent to the server. */
+const DIAGNOSTIC_NOTICE = 'Camera test code read: the camera works. It is not a pass, so nothing was sent to the server.';
+const NOT_THE_TEST_CODE = 'That is not the camera test code. Passes are checked once you start scanning.';
+const NOTICE_HOLD_MS = 5000;
 
 /** Short verdict words for the recent list. */
 const HISTORY_WORD: Record<Verdict, string> = { admit: 'Admit', warn: 'Used', deny: 'Denied', error: 'Not verified' };
@@ -70,6 +79,18 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
   const [now, setNow] = useState(() => new Date());
   const [confirm, dialog] = useConfirm();
   const online = useOnline();
+  const offlineShell = useOfflineShell();
+  /** The readiness checklist opens with the station and again from the header. While it is open the camera only looks for the test code. */
+  const [readinessOpen, setReadinessOpen] = useState(true);
+  const [diagnostic, setDiagnostic] = useState<DiagnosticState>('idle');
+  const [diagnosticHint, setDiagnosticHint] = useState('');
+  const [probe, setProbe] = useState<Probe>({ state: 'checking' });
+  const [probeAttempt, setProbeAttempt] = useState(0);
+  const [cameraPermission, setCameraPermission] = useState<CameraPermission>('unknown');
+  /** Frames are arriving in the viewfinder. */
+  const [streaming, setStreaming] = useState(false);
+  /** A short local message (a camera test code was read during scanning); never a verdict. */
+  const [notice, setNotice] = useState('');
   const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<MediaStreamTrack | null>(null);
   const detectorRef = useRef<QrDetector | null>(null);
@@ -81,11 +102,15 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
   /** After a 429, hold camera submissions until the server's Retry-After passes. */
   const blockedUntil = useRef(0);
   const clearTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const readinessRef = useRef(readinessOpen);
+  const diagnosticPassed = useRef(false);
   const timeZone = session.event.timeZone;
   const connection: Connection = !online ? 'offline' : quality === 'slow' ? 'slow' : 'online';
 
   onlineRef.current = online;
   displayRef.current = display;
+  readinessRef.current = readinessOpen;
 
   useEffect(() => {
     window.addEventListener('pointerdown', unlockAudio);
@@ -117,8 +142,41 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
     if (hold !== null) clearTimer.current = setTimeout(() => setDisplay(null), hold);
   }, []);
 
+  const showNotice = useCallback((message: string) => {
+    clearTimeout(noticeTimer.current);
+    setNotice(message);
+    noticeTimer.current = setTimeout(() => setNotice(''), NOTICE_HOLD_MS);
+  }, []);
+
+  /**
+   * A code the camera read that never leaves this device: the camera test code at
+   * any time, and anything at all while the checklist is open (no pass is checked then).
+   */
+  const readLocally = useCallback(
+    (code: string) => {
+      const testCode = isValidDiagnosticCode(code);
+      if (!readinessRef.current) {
+        if (isDiagnosticPayload(code)) showNotice(DIAGNOSTIC_NOTICE);
+        return;
+      }
+      if (!testCode) {
+        setDiagnosticHint(isDiagnosticPayload(code) ? 'Unrecognised camera test code. Show the one on the event’s Scanners page.' : NOT_THE_TEST_CODE);
+        return;
+      }
+      setDiagnosticHint('');
+      setDiagnostic('passed');
+      if (diagnosticPassed.current) return;
+      diagnosticPassed.current = true;
+      if (!loadMuted()) beep('ok');
+      navigator.vibrate?.(120);
+    },
+    [showNotice]
+  );
+
   const submit = useCallback(
-    async (code: string) => {
+    async (code: string, method: ScanMethod) => {
+      // Camera test codes are never sent for verification, whatever path they come from.
+      if (isDiagnosticPayload(code)) return showNotice(DIAGNOSTIC_NOTICE);
       // One request at a time: a scan is never sent twice while its result is pending.
       if (busy.current) return;
       busy.current = true;
@@ -130,7 +188,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
       try {
         const result = await api<ScanResult | null>('/api/scanner/redeem', {
           bearer: scannerKey,
-          body: { code, requestId },
+          body: { code, requestId, method },
           timeoutMs: REDEEM_TIMEOUT_MS,
           slowAfterMs: SLOW_CHECK_MS,
           onSlow: () => setSlow(true)
@@ -146,7 +204,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
           name: result.pass?.attendeeName ?? null,
           explanation: explain(result, timeZone),
           replayed: result.replayed === true,
-          retryCode: null
+          retry: null
         });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) return onUnauthorized();
@@ -165,7 +223,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
           name: null,
           explanation: explainFailure(err),
           replayed: false,
-          retryCode: unanswered ? code : null
+          retry: unanswered ? { code, method } : null
         });
       } finally {
         busy.current = false;
@@ -173,7 +231,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
         setSlow(false);
       }
     },
-    [scannerKey, onUnauthorized, show, timeZone]
+    [scannerKey, onUnauthorized, show, showNotice, timeZone]
   );
 
   // Camera and detection loop. Frames are only decoded while nothing else needs the door's attention.
@@ -202,19 +260,30 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
         const video = videoRef.current!;
         video.srcObject = stream;
         await video.play();
+        setStreaming(true);
         // Device labels are only readable once permission was granted.
         listCameras(navigator.mediaDevices).then((found) => !stopped && setCameras(found), () => undefined);
-        detectorRef.current ??= await createQrDetector();
+        // The decoder (and its WebAssembly fallback) is its own chunk, fetched when a camera first starts.
+        detectorRef.current ??= await (await import('../qr-detector')).createQrDetector();
         const detector = detectorRef.current;
         setDecoderPath(detector.path);
         const tick = async () => {
           if (stopped) return;
+          // The camera test works offline too: it never needs the server.
+          const testing = readinessRef.current;
           const ready =
-            !busy.current && !displayRef.current && onlineRef.current && !document.hidden && video.readyState >= 2 && Date.now() >= blockedUntil.current;
+            !busy.current &&
+            !displayRef.current &&
+            (testing || onlineRef.current) &&
+            !document.hidden &&
+            video.readyState >= 2 &&
+            (testing || Date.now() >= blockedUntil.current);
           if (ready) {
             try {
               const code = await detector.detect(video);
-              if (!stopped && code && !displayRef.current && onlineRef.current && repeat.current.accept(code, Date.now())) await submit(code);
+              // Test codes, and anything read while the checklist is open, stay on this device.
+              if (code && !stopped && (readinessRef.current || isDiagnosticPayload(code))) readLocally(code);
+              else if (code && !stopped && !displayRef.current && onlineRef.current && repeat.current.accept(code, Date.now())) await submit(code, 'camera');
             } catch {
               // A single bad frame is not an error worth surfacing.
             }
@@ -236,8 +305,55 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
       stream?.getTracks().forEach((track) => track.stop());
       trackRef.current = null;
       setTorchState({ supported: false, on: false });
+      setStreaming(false);
     };
-  }, [started, cameraOn, cameraAttempt, submit]);
+  }, [started, cameraOn, cameraAttempt, submit, readLocally]);
+
+  // Readiness: one timed round trip to the server each time the checklist opens or staff test the connection again.
+  useEffect(() => {
+    if (!readinessOpen) return;
+    let live = true;
+    setProbe({ state: 'checking' });
+    const sentAt = performance.now();
+    api<ScannerSession>('/api/scanner/session', { bearer: scannerKey, timeoutMs: HEARTBEAT_TIMEOUT_MS }).then(
+      (value) => {
+        if (!live) return;
+        const latencyMs = Math.round(performance.now() - sentAt);
+        setSession(value);
+        setProbe({ state: 'ok', latencyMs, serverTime: value.serverTime, receivedAt: Date.now() });
+        setQuality(latencyMs > SLOW_CHECK_MS ? 'slow' : 'good');
+      },
+      (err: unknown) => {
+        if (!live) return;
+        if (err instanceof ApiError && err.status === 401) return onUnauthorized();
+        setProbe({ state: 'failed', message: err instanceof Error ? err.message : 'The server did not answer.' });
+      }
+    );
+    return () => {
+      live = false;
+    };
+  }, [readinessOpen, probeAttempt, scannerKey, onUnauthorized]);
+
+  // Camera permission, where the browser can report it without asking (not every browser can).
+  useEffect(() => {
+    let status: PermissionStatus | null = null;
+    let live = true;
+    const update = () => {
+      if (live && status) setCameraPermission(status.state === 'granted' || status.state === 'denied' || status.state === 'prompt' ? status.state : 'unknown');
+    };
+    navigator.permissions?.query({ name: 'camera' as PermissionName }).then(
+      (value) => {
+        status = value;
+        update();
+        value.addEventListener('change', update);
+      },
+      () => undefined
+    );
+    return () => {
+      live = false;
+      status?.removeEventListener('change', update);
+    };
+  }, []);
 
   // Heartbeat: shows the device as alive to the organiser, measures the connection, picks up event status changes.
   useEffect(() => {
@@ -263,36 +379,75 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
     };
   }, [online, scannerKey, onUnauthorized]);
 
-  // Back online: check the connection straight away rather than at the next heartbeat.
+  // Back online, or back on screen (screen unlocked, app reopened from the background or the
+  // back/forward cache): check the session straight away rather than at the next heartbeat, so a
+  // device revoked, moved to another gate or whose event closed meanwhile does not keep showing
+  // the old setup. Scans are always judged by the server; this keeps the screen honest too.
+  const recheck = useCallback(() => {
+    api<ScannerSession>('/api/scanner/session', { bearer: scannerKey, timeoutMs: HEARTBEAT_TIMEOUT_MS }).then(
+      (value) => {
+        setSession(value);
+        setQuality('good');
+      },
+      (err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) onUnauthorized();
+        else setQuality('slow');
+      }
+    );
+  }, [scannerKey, onUnauthorized]);
   const wasOnline = useRef(online);
   useEffect(() => {
-    if (online && !wasOnline.current) {
-      api<ScannerSession>('/api/scanner/session', { bearer: scannerKey, timeoutMs: HEARTBEAT_TIMEOUT_MS }).then(
-        (value) => {
-          setSession(value);
-          setQuality('good');
-        },
-        (err: unknown) => {
-          if (err instanceof ApiError && err.status === 401) onUnauthorized();
-          else setQuality('slow');
-        }
-      );
-    }
+    if (online && !wasOnline.current) recheck();
     wasOnline.current = online;
-  }, [online, scannerKey, onUnauthorized]);
+  }, [online, recheck]);
+  useEffect(() => {
+    const resume = (event: Event) => {
+      if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+      if (event.type === 'pageshow' && !(event as PageTransitionEvent).persisted) return;
+      recheck();
+    };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('pageshow', resume);
+    return () => {
+      document.removeEventListener('visibilitychange', resume);
+      window.removeEventListener('pageshow', resume);
+    };
+  }, [recheck]);
 
-  useEffect(() => () => clearTimeout(clearTimer.current), []);
+  useEffect(
+    () => () => {
+      clearTimeout(clearTimer.current);
+      clearTimeout(noticeTimer.current);
+    },
+    []
+  );
 
   function startScanning() {
     unlockAudio();
     setStarted(true);
   }
 
+  /** Leaves the checklist: from now on the camera looks for passes. */
+  function finishReadiness() {
+    unlockAudio();
+    setReadinessOpen(false);
+    setDiagnosticHint('');
+    setStarted(true);
+  }
+
+  function testCamera() {
+    unlockAudio();
+    setCameraOn(true);
+    setStarted(true);
+    setDiagnosticHint('');
+    setDiagnostic((current) => (current === 'passed' ? current : 'running'));
+  }
+
   function submitManual(e: FormEvent) {
     e.preventDefault();
     const value = manual.trim();
     if (!online || busy.current || !value) return;
-    void submit(REFERENCE.test(value) ? value.toUpperCase() : value);
+    void submit(REFERENCE.test(value) ? value.toUpperCase() : value, 'manual');
     setManual('');
   }
 
@@ -338,8 +493,18 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
     : '';
   const cameraLive = started && cameraOn && !cameraError;
   const statusWarning = session.event.status === 'active' ? null : EVENT_STATUS_WARNING[session.event.status];
-  const retryCode = display?.retryCode ?? null;
-  const retry = retryCode ? { onRetry: () => void submit(retryCode), disabled: !online || checking, checking } : undefined;
+  const pendingRetry = display?.retry ?? null;
+  const retry = pendingRetry ? { onRetry: () => void submit(pendingRetry.code, pendingRetry.method), disabled: !online || checking, checking } : undefined;
+  const readiness = readinessOpen
+    ? readinessItems({
+        session,
+        online,
+        probe,
+        camera: { supported: window.isSecureContext && Boolean(navigator.mediaDevices?.getUserMedia), permission: cameraPermission, live: streaming, error: cameraError },
+        diagnostic,
+        nowMs: now.getTime()
+      })
+    : [];
 
   return (
     <main className="scanner">
@@ -378,6 +543,9 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
           <button className="icon-btn" onClick={() => setCameraOn((on) => !on)} aria-pressed={cameraOn} aria-label="Camera">
             {cameraOn ? <Camera size={18} aria-hidden /> : <CameraOff size={18} aria-hidden />}
           </button>
+          <button className="icon-btn" onClick={() => setReadinessOpen(true)} aria-pressed={readinessOpen} aria-label="Before you scan" title="Readiness checklist">
+            <ListChecks size={18} aria-hidden />
+          </button>
           <button className="icon-btn" onClick={() => void signOut()} aria-label="Sign out">
             <LogOut size={18} aria-hidden />
           </button>
@@ -387,7 +555,9 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
       {online ? null : (
         <p id="scanner-offline" className="scanner-offline" role="alert">
           <WifiOff size={18} aria-hidden />
-          <span>{OFFLINE_MESSAGE}</span>
+          <span>
+            {OFFLINE_MESSAGE} <span className="scanner-offline-shell">{offlineShell ? 'The app is loaded from this phone, but passes need the server.' : 'Passes need the server.'}</span>
+          </span>
         </p>
       )}
 
@@ -395,7 +565,23 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
         <div className="scanner-scan">
           {statusWarning ? <p className="error">{statusWarning}</p> : null}
 
-          <div className="viewfinder">
+          {readinessOpen ? (
+            <ReadinessPanel
+              items={readiness}
+              online={online}
+              serverOk={probe.state === 'ok'}
+              offlineShell={offlineShell}
+              checking={probe.state === 'checking'}
+              testing={started && cameraOn && !cameraError && diagnostic === 'running'}
+              hint={diagnosticHint}
+              onCheckAgain={() => setProbeAttempt((n) => n + 1)}
+              onTestCamera={testCamera}
+              onStart={finishReadiness}
+            />
+          ) : null}
+
+          {/* While the checklist is open the viewfinder appears only for the camera test, or to show a slow check. */}
+          <div className="viewfinder" hidden={readinessOpen && !started && !slow}>
             {!cameraOn ? (
               <div className="viewfinder-off">Camera off. Use manual entry below.</div>
             ) : !started ? (
@@ -407,7 +593,7 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
             ) : (
               <video ref={videoRef} playsInline muted aria-label="Camera view" />
             )}
-            {cameraLive && online ? (
+            {cameraLive && (online || readinessOpen) ? (
               <>
                 <div className="reticle" aria-hidden>
                   <span className="reticle-corner reticle-tl" />
@@ -415,10 +601,10 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
                   <span className="reticle-corner reticle-bl" />
                   <span className="reticle-corner reticle-br" />
                 </div>
-                <p className="viewfinder-caption">Point at a pass QR code</p>
+                <p className="viewfinder-caption">{readinessOpen ? 'Camera test: hold the test code in the frame' : 'Point at a pass QR code'}</p>
               </>
             ) : null}
-            {cameraLive && !online ? (
+            {cameraLive && !online && !readinessOpen ? (
               <div className="viewfinder-paused" aria-hidden>
                 <WifiOff size={28} />
                 <span>Paused — offline</span>
@@ -431,6 +617,12 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
               </div>
             ) : null}
           </div>
+
+          {notice ? (
+            <p className="scanner-notice" role="status">
+              {notice}
+            </p>
+          ) : null}
 
           {cameraError ? (
             <div className="camera-error">
@@ -493,6 +685,15 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
               Paste the pass link, or type the 8-character reference printed under the attendee’s QR code.
             </p>
           </form>
+
+          <AttendeeFinder
+            scannerKey={scannerKey}
+            timeZone={timeZone}
+            online={online}
+            checking={checking}
+            onAdmit={(reference) => submit(reference, 'lookup')}
+            onUnauthorized={onUnauthorized}
+          />
 
           <section className="recent" aria-labelledby="recent-title">
             <h2 id="recent-title" className="recent-title">

@@ -212,6 +212,19 @@ test('re-opening a used setup link on a working scanner keeps its key: the phone
   await expect(verdict(page)).toHaveAccessibleName('Admit');
 });
 
+test('opening an older key link with an invalid key on a working scanner keeps its key: the phone can still scan', async ({ page }) => {
+  const door = await openDoor(page);
+  await page.goto('about:blank');
+  await page.goto(`/scan#key=gps_${'x'.repeat(43)}`);
+
+  await page.getByRole('alertdialog', { name: "Replace this scanner's setup?" }).getByRole('button', { name: 'Use the new setup' }).click();
+  await expect(page.getByText('this phone keeps its current setup')).toBeVisible();
+  await page.getByRole('button', { name: 'Continue with the current setup' }).click();
+
+  await scan(page, door.passes[0].passUrl);
+  await expect(verdict(page)).toHaveAccessibleName('Admit');
+});
+
 test('a device revoked mid-session is signed out at its next server answer (401), without admitting', async ({ page }) => {
   const door = await openDoor(page);
   await page.route(REDEEM, (route) => route.abort('failed'));
@@ -232,6 +245,18 @@ test('a device revoked mid-session is signed out at its next server answer (401)
   // The key is gone for good: a reload stays on the setup screen.
   await page.reload();
   await expect(page.getByLabel('Setup link or code')).toBeVisible();
+});
+
+test('a device revoked while the phone was locked is signed out as soon as it is back on screen, before any scan', async ({ page }) => {
+  const door = await openDoor(page);
+  const sent = redeemRequests(page);
+  expect((await page.request.post(`/api/scanners/${door.scannerId}/revoke`, { headers: CSRF })).ok()).toBe(true);
+
+  // Unlocking the screen or switching back to the app fires visibilitychange; the next heartbeat would be up to a minute away.
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect(page.getByText('This device was revoked by the organiser. Ask for a new setup link.')).toBeVisible();
+  await expect(page.getByLabel('Setup link or code')).toBeVisible();
+  expect(sent).toEqual([]);
 });
 
 test('offline, scanning pauses: manual entry cannot submit and nothing is sent; back online the same code is checked', async ({ page }) => {

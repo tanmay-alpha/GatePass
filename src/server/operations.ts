@@ -1,44 +1,182 @@
-import type { EventSummary, OperationsAlert, OperationsSummary, StoredScanOutcome } from '../shared/types';
+import type { EventReport, EventSummary, OperationsAlert, OperationsCompletion, OperationsSummary, StoredScanOutcome } from '../shared/types';
 import type { Database } from './db';
+import { httpError } from './http';
 import type { AccessControl } from './policies';
 
 /** Thresholds for suspicious-pattern alerts. Deliberately simple and explainable. */
 export const ALERT_RULES = {
   /** A pass rejected as already used this many times suggests a shared screenshot. */
   repeatedDuplicates: 2,
+  /** Repeated duplicates and passes seen at several gates are reported for scans in this window. */
+  patternWindowMinutes: 60,
   /** Invalid codes from one device within the window suggest probing or a broken printout. */
   invalidBurst: { count: 5, windowMinutes: 10 },
   /** Capacity usage ratio that raises a warning. */
   capacityNear: 0.9
 } as const;
 
-const BUCKET_SQL = `strftime('%Y-%m-%dT%H:', created_at) || printf('%02d', (CAST(strftime('%M', created_at) AS INTEGER) / 15) * 15) || ':00.000Z'`;
+/** How long a computed summary is served again: dashboards poll every 5 s, so ≤2 s old data is still fresh. */
+export const OPERATIONS_MEMO_MS = 2_000;
+
+/**
+ * Per-event memo of the dashboard summary. Several dashboards polling one
+ * busy event would otherwise each rerun every aggregate while the door is
+ * redeeming. Scans never invalidate it (that is the load it absorbs: admissions
+ * show within `OPERATIONS_MEMO_MS`), but every admin write to the event does,
+ * because each one writes an audit row: the newest audit id for the event is
+ * one seek on `audit_event_idx`. `generatedAt` stays the time the summary was
+ * computed, so the client's stale indicator remains truthful. A computation in
+ * progress is shared too: dashboards that miss the memo together wait for one.
+ */
+export class OperationsMemo {
+  private readonly entries = new Map<string, { at: number; auditId: number; summary: Promise<OperationsSummary> }>();
+
+  constructor(
+    private readonly db: Database,
+    private readonly ttlMs = OPERATIONS_MEMO_MS
+  ) {}
+
+  get(eventId: string, now: Date, compute: () => Promise<OperationsSummary>): Promise<OperationsSummary> {
+    const auditId = Number((this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_log WHERE event_id = ?').get(eventId) as Row).id);
+    const at = now.getTime();
+    const cached = this.entries.get(eventId);
+    if (cached && cached.auditId === auditId && at >= cached.at && at - cached.at < this.ttlMs) return cached.summary;
+    const summary = compute();
+    for (const [id, entry] of this.entries) if (at - entry.at >= this.ttlMs) this.entries.delete(id);
+    const entry = { at, auditId, summary };
+    this.entries.set(eventId, entry);
+    // A failed computation is not served again.
+    summary.catch(() => {
+      if (this.entries.get(eventId) === entry) this.entries.delete(eventId);
+    });
+    return summary;
+  }
+}
+
+/**
+ * Lets queued requests, door redemptions above all, run between the queries of a dashboard summary or
+ * report: each query is synchronous, so without this a summary of a 25,000-pass event held the event loop
+ * for the sum of its queries (~0.1–0.2 s on a laptop) instead of the longest one. The figures of one
+ * summary can therefore be a few redemptions apart between sections; each section is consistent in itself.
+ */
+const pause = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * 15-minute bucket of an ISO timestamp, as `YYYY-MM-DDTHH:` plus the quarter (0-3). Timestamps are always
+ * written by `Date.toISOString()`, so string slicing gives the same buckets as date functions at a fraction
+ * of the cost per row (the timeline groups every scan of the event).
+ */
+const QUARTER_SQL = `substr(created_at, 1, 14) || (CAST(substr(created_at, 15, 2) AS INTEGER) / 15)`;
+const quarterStart = (key: string) => `${key.slice(0, 14)}${String(Number(key.slice(14)) * 15).padStart(2, '0')}:00.000Z`;
+
+/** Recent-activity resolution: the last hour in 5-minute buckets. */
+const RECENT_BUCKET_MINUTES = 5;
+const RECENT_BUCKETS = 12;
+const RECENT_BUCKET_SQL = `(CAST(strftime('%s', created_at) AS INTEGER) / ${RECENT_BUCKET_MINUTES * 60}) * ${RECENT_BUCKET_MINUTES * 60}`;
+/**
+ * Every stored outcome. Naming them all lets a time-bounded query seek
+ * `scans_alerts_idx (event_id, outcome, created_at)` once per outcome instead
+ * of reading every scan of the event.
+ */
+const ALL_OUTCOMES: readonly StoredScanOutcome[] = [
+  'admitted',
+  'already_redeemed',
+  'expired',
+  'revoked',
+  'invalid',
+  'event_closed',
+  'wrong_event',
+  'too_early',
+  'too_late',
+  'wrong_gate',
+  'capacity_full'
+];
+const ALL_OUTCOMES_SQL = ALL_OUTCOMES.map((outcome) => `'${outcome}'`).join(', ');
 
 type Row = Record<string, unknown>;
 
-/** Read-only aggregates for the operations dashboard; all queries use the scans/redemptions indexes. */
-export function operationsSummary(db: Database, access: AccessControl, event: EventSummary, now: Date): OperationsSummary {
-  const nowIso = now.toISOString();
-  const outcomes: Partial<Record<StoredScanOutcome, number>> = {};
-  for (const row of db.prepare('SELECT outcome, COUNT(*) AS n FROM scans WHERE event_id = ? GROUP BY outcome').all(event.id) as Row[]) {
+/** The event columns the dashboard and the report read: one primary-key row, without the per-event counts `getEvent` computes. */
+export type OperationsEvent = Pick<EventSummary, 'id' | 'name' | 'timeZone' | 'startsAt' | 'endsAt' | 'status' | 'capacity' | 'admittedCount'>;
+
+export function operationsEvent(db: Database, eventId: string): OperationsEvent {
+  const row = db.prepare('SELECT id, name, time_zone, starts_at, ends_at, status, capacity, admitted_count FROM events WHERE id = ?').get(eventId) as Row | undefined;
+  if (!row) throw httpError(404, 'Event not found');
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    timeZone: row.time_zone as string,
+    startsAt: row.starts_at as string,
+    endsAt: row.ends_at as string,
+    status: row.status as EventSummary['status'],
+    capacity: row.capacity === null ? null : Number(row.capacity),
+    admittedCount: Number(row.admitted_count)
+  };
+}
+
+function outcomeCounts(db: Database, eventId: string): OperationsSummary['outcomes'] {
+  const outcomes: OperationsSummary['outcomes'] = {};
+  for (const row of db.prepare('SELECT outcome, COUNT(*) AS n FROM scans WHERE event_id = ? GROUP BY outcome').all(eventId) as Row[]) {
     outcomes[row.outcome as StoredScanOutcome] = Number(row.n);
   }
-  const scans = Object.values(outcomes).reduce((sum, n) => sum + (n ?? 0), 0);
-  const admitted = outcomes.admitted ?? 0;
+  return outcomes;
+}
 
+function gateTotals(db: Database, access: AccessControl, eventId: string): OperationsSummary['gates'] {
   const gateRows = db
     .prepare(
       `SELECT s.gate_id, SUM(s.outcome = 'admitted') AS admitted, SUM(s.outcome <> 'admitted') AS denied, MAX(s.created_at) AS last_at
        FROM scans s WHERE s.event_id = ? GROUP BY s.gate_id`
     )
-    .all(event.id) as Row[];
+    .all(eventId) as Row[];
   const byGate = new Map(gateRows.map((row) => [(row.gate_id as string | null) ?? null, row]));
-  const gates: OperationsSummary['gates'] = access.listGates(event.id).map((gate) => {
+  const gates: OperationsSummary['gates'] = access.listGates(eventId).map((gate) => {
     const row = byGate.get(gate.id);
     return { id: gate.id, name: gate.name, admitted: Number(row?.admitted ?? 0), denied: Number(row?.denied ?? 0), lastScanAt: (row?.last_at as string) ?? null };
   });
   const ungated = byGate.get(null);
   if (ungated) gates.push({ id: null, name: 'Any gate', admitted: Number(ungated.admitted), denied: Number(ungated.denied), lastScanAt: ungated.last_at as string });
+  return gates;
+}
+
+/**
+ * Pass states without joining every pass to `redemptions`: redeemed is the event's admission counter (the
+ * integrity check holds it equal to the event's redemption rows), and only revoked or expired passes are
+ * looked up in `redemptions`. The CASE keeps that lookup off every other pass.
+ */
+function passTotals(db: Database, event: OperationsEvent, nowIso: string): OperationsSummary['passes'] {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS issued,
+              COALESCE(SUM(CASE WHEN p.revoked_at IS NOT NULL THEN NOT EXISTS (SELECT 1 FROM redemptions r WHERE r.pass_id = p.id) ELSE 0 END), 0) AS revoked,
+              COALESCE(SUM(CASE WHEN p.revoked_at IS NULL AND p.expires_at <= ? THEN NOT EXISTS (SELECT 1 FROM redemptions r WHERE r.pass_id = p.id) ELSE 0 END), 0) AS expired
+       FROM passes p WHERE p.event_id = ?`
+    )
+    .get(nowIso, event.id) as Row;
+  const issued = Number(row.issued);
+  const redeemed = event.admittedCount;
+  const revoked = Number(row.revoked);
+  const expired = Number(row.expired);
+  return { issued, active: issued - redeemed - revoked - expired, redeemed, revoked, expired };
+}
+
+function assistedAdmissions(db: Database, eventId: string): number {
+  return Number((db.prepare("SELECT COUNT(*) AS n FROM scans WHERE event_id = ? AND outcome = 'admitted' AND method = 'lookup'").get(eventId) as Row).n);
+}
+
+function attendanceOf(passes: OperationsSummary['passes']): OperationsSummary['attendance'] {
+  const expected = passes.issued - passes.revoked;
+  return { expected, admitted: passes.redeemed, rate: expected ? passes.redeemed / expected : null };
+}
+
+/** Read-only aggregates for the operations dashboard; all queries use the scans/redemptions indexes. */
+export async function operationsSummary(db: Database, access: AccessControl, event: OperationsEvent, now: Date): Promise<OperationsSummary> {
+  const nowIso = now.toISOString();
+  const outcomes = outcomeCounts(db, event.id);
+  const scans = Object.values(outcomes).reduce((sum, n) => sum + (n ?? 0), 0);
+  const admitted = outcomes.admitted ?? 0;
+  await pause();
+  const gates = gateTotals(db, access, event.id);
+  await pause();
 
   const policies: OperationsSummary['policies'] = access.listPolicies(event.id).map((policy) => {
     const opensAt = policy.opensAt ?? event.startsAt;
@@ -51,27 +189,16 @@ export function operationsSummary(db: Database, access: AccessControl, event: Ev
   const timeline = (
     db
       .prepare(
-        `SELECT ${BUCKET_SQL} AS bucket, SUM(outcome = 'admitted') AS admitted, SUM(outcome <> 'admitted') AS denied
+        `SELECT ${QUARTER_SQL} AS bucket, SUM(outcome = 'admitted') AS admitted, SUM(outcome <> 'admitted') AS denied
          FROM scans WHERE event_id = ? GROUP BY bucket ORDER BY bucket DESC LIMIT 96`
       )
       .all(event.id) as Row[]
   )
     .reverse()
-    .map((row) => ({ bucketStart: row.bucket as string, admitted: Number(row.admitted), denied: Number(row.denied) }));
-
-  const passRow = db
-    .prepare(
-      `SELECT COUNT(*) AS issued,
-              COALESCE(SUM(r.pass_id IS NOT NULL), 0) AS redeemed,
-              COALESCE(SUM(r.pass_id IS NULL AND p.revoked_at IS NOT NULL), 0) AS revoked,
-              COALESCE(SUM(r.pass_id IS NULL AND p.revoked_at IS NULL AND p.expires_at <= ?), 0) AS expired
-       FROM passes p LEFT JOIN redemptions r ON r.pass_id = p.id WHERE p.event_id = ?`
-    )
-    .get(nowIso, event.id) as Row;
-  const issued = Number(passRow.issued);
-  const redeemed = Number(passRow.redeemed);
-  const revoked = Number(passRow.revoked);
-  const expired = Number(passRow.expired);
+    .map((row) => ({ bucketStart: quarterStart(row.bucket as string), admitted: Number(row.admitted), denied: Number(row.denied) }));
+  await pause();
+  const passes = passTotals(db, event, nowIso);
+  await pause();
 
   const recentSince = new Date(now.getTime() - 15 * 60_000).toISOString();
   const idleSince = new Date(now.getTime() - SCANNER_IDLE_MINUTES * 60_000).toISOString();
@@ -92,58 +219,228 @@ export function operationsSummary(db: Database, access: AccessControl, event: Ev
     return { id: row.id as string, label: row.label as string, gateName: (row.gate_name as string | null) ?? null, lastUsedAt, revoked: revokedScanner, scansLast15m: Number(row.recent), state };
   });
 
+  // Doors can open before the event starts (early-entry policies) and stay open after it.
+  const doorsOpen = policies.reduce((earliest, policy) => (policy.opensAt < earliest ? policy.opensAt : earliest), event.startsAt);
+  const doorsClose = policies.reduce((latest, policy) => (policy.closesAt > latest ? policy.closesAt : latest), event.endsAt);
+  const phase: OperationsSummary['phase'] =
+    event.status === 'ended' || event.status === 'archived' || nowIso >= doorsClose ? 'finished' : nowIso < doorsOpen ? 'upcoming' : event.status === 'active' ? 'live' : 'paused';
+  const attendance = attendanceOf(passes);
+  await pause();
+  const alertList = await alerts(db, event.id, policies, phase === 'live' ? scanners : [], now);
+  const recent = recentActivity(db, event.id, now);
+  await pause();
+  const assisted = assistedAdmissions(db, event.id);
+  // Every redemption has exactly one admitted scan with the same time (integrity invariant), so the newest
+  // admission is one seek at the end of scans_alerts_idx (event_id, 'admitted', created_at) instead of a join
+  // over the event's redemptions.
+  const lastAdmission = db.prepare("SELECT MAX(created_at) AS at FROM scans WHERE event_id = ? AND outcome = 'admitted'").get(event.id) as Row;
+  await pause();
+
   return {
     generatedAt: nowIso,
     totals: { scans, admitted, denied: scans - admitted },
     outcomes,
-    passes: { issued, active: issued - redeemed - revoked - expired, redeemed, revoked, expired },
+    passes,
     capacity: { limit: event.capacity, admitted: event.admittedCount, remaining: event.capacity === null ? null : event.capacity - event.admittedCount },
     gates,
     policies,
     scanners,
     timeline,
-    alerts: alerts(db, event.id, policies, now)
+    alerts: alertList,
+    phase,
+    attendance,
+    recent,
+    assistedAdmissions: assisted,
+    lastAdmissionAt: (lastAdmission.at as string | null) ?? null,
+    completion: phase === 'finished' ? completion(db, event.id, attendance, outcomes, gates) : null
   };
+}
+
+/**
+ * Post-event report (Phase 6). Not memoised: it is opened once after the event, not polled. Every query is
+ * bounded by the event id, so another event's passes and scans never count.
+ */
+export async function eventReport(db: Database, access: AccessControl, event: OperationsEvent, now: Date): Promise<EventReport> {
+  const outcomes = outcomeCounts(db, event.id);
+  await pause();
+  const passes = passTotals(db, event, now.toISOString());
+  await pause();
+  const gates = gateTotals(db, access, event.id);
+  await pause();
+  const peak = db
+    .prepare(`SELECT ${QUARTER_SQL} AS bucket, COUNT(*) AS n FROM scans WHERE event_id = ? AND outcome = 'admitted' GROUP BY bucket ORDER BY n DESC, bucket LIMIT 1`)
+    .get(event.id) as Row | undefined;
+  await pause();
+  const scanners = db
+    .prepare(
+      `SELECT sc.id, sc.label, g.name AS gate_name, sc.revoked_at, sc.last_used_at, sc.last_seen_at,
+              t.scans, t.admitted, t.first_at, t.last_at
+       FROM scanners sc LEFT JOIN gates g ON g.id = sc.gate_id
+       LEFT JOIN (SELECT scanner_id, COUNT(*) AS scans, SUM(outcome = 'admitted') AS admitted, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+                  FROM scans WHERE event_id = ? GROUP BY scanner_id) t ON t.scanner_id = sc.id
+       WHERE sc.event_id = ? ORDER BY sc.label, sc.id`
+    )
+    .all(event.id, event.id) as Row[];
+  await pause();
+  const assisted = assistedAdmissions(db, event.id);
+  let peakReport: EventReport['peak'] = null;
+  if (peak) {
+    const start = quarterStart(peak.bucket as string);
+    const end = new Date(Date.parse(start) + 15 * 60_000).toISOString();
+    peakReport = { start, end, localStart: localTime(start, event.timeZone), localEnd: localTime(end, event.timeZone), timeZone: event.timeZone, admitted: Number(peak.n) };
+  }
+  return {
+    generatedAt: now.toISOString(),
+    event: { id: event.id, name: event.name, timeZone: event.timeZone, startsAt: event.startsAt, endsAt: event.endsAt, status: event.status },
+    passes,
+    attendance: attendanceOf(passes),
+    gates: gates.map(({ id, name, admitted, denied }) => ({ id, name, admitted, denied })),
+    peak: peakReport,
+    denials: (Object.entries(outcomes) as Array<[StoredScanOutcome, number]>)
+      .filter((entry): entry is [Exclude<StoredScanOutcome, 'admitted'>, number] => entry[0] !== 'admitted')
+      .map(([outcome, count]) => ({ outcome, count }))
+      .sort((a, b) => b.count - a.count || a.outcome.localeCompare(b.outcome)),
+    scanners: scanners.map((row) => {
+      const lastScanAt = (row.last_at as string | null) ?? null;
+      const contact = [lastScanAt, row.last_used_at as string | null, row.last_seen_at as string | null].filter((at): at is string => Boolean(at)).sort();
+      return {
+        id: row.id as string,
+        label: row.label as string,
+        gateName: (row.gate_name as string | null) ?? null,
+        revoked: row.revoked_at !== null,
+        firstScanAt: (row.first_at as string | null) ?? null,
+        lastScanAt,
+        lastContactAt: contact.at(-1) ?? null,
+        scans: Number(row.scans ?? 0),
+        admitted: Number(row.admitted ?? 0)
+      };
+    }),
+    assistedAdmissions: assisted
+  };
+}
+
+/** `YYYY-MM-DDTHH:MM` wall-clock time of an instant in `timeZone`. */
+function localTime(iso: string, timeZone: string): string {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-GB', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+      .formatToParts(new Date(iso))
+      .map((part) => [part.type, part.value])
+  );
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
 }
 
 /** A device with no scan or heartbeat for this long is shown as idle. */
 export const SCANNER_IDLE_MINUTES = 10;
 
-function alerts(db: Database, eventId: string, policies: OperationsSummary['policies'], now: Date): OperationsAlert[] {
-  const result: OperationsAlert[] = [];
+/** The last hour in clock-aligned 5-minute buckets, zero-filled so the chart has a fixed width. */
+function recentActivity(db: Database, eventId: string, now: Date): OperationsSummary['recent'] {
+  const size = RECENT_BUCKET_MINUTES * 60_000;
+  const first = Math.floor(now.getTime() / size) * size - (RECENT_BUCKETS - 1) * size;
+  const rows = db
+    .prepare(
+      `SELECT ${RECENT_BUCKET_SQL} AS bucket, SUM(outcome = 'admitted') AS admitted, SUM(outcome <> 'admitted') AS denied
+       FROM scans WHERE event_id = ? AND outcome IN (${ALL_OUTCOMES_SQL}) AND created_at >= ? GROUP BY bucket`
+    )
+    .all(eventId, new Date(first).toISOString()) as Row[];
+  const byBucket = new Map(rows.map((row) => [Number(row.bucket) * 1000, row]));
+  const buckets = Array.from({ length: RECENT_BUCKETS }, (_, index) => {
+    const start = first + index * size;
+    const row = byBucket.get(start);
+    return { bucketStart: new Date(start).toISOString(), admitted: Number(row?.admitted ?? 0), denied: Number(row?.denied ?? 0) };
+  });
+  return { bucketMinutes: RECENT_BUCKET_MINUTES, buckets };
+}
 
+function completion(
+  db: Database,
+  eventId: string,
+  attendance: OperationsSummary['attendance'],
+  outcomes: OperationsSummary['outcomes'],
+  gates: OperationsSummary['gates']
+): OperationsCompletion {
+  const span = db.prepare("SELECT MIN(created_at) AS first_at, MAX(created_at) AS last_at FROM scans WHERE event_id = ? AND outcome = 'admitted'").get(eventId) as Row;
+  const peak = db
+    .prepare(`SELECT ${RECENT_BUCKET_SQL} AS bucket, COUNT(*) AS n FROM scans WHERE event_id = ? AND outcome = 'admitted' GROUP BY bucket ORDER BY n DESC, bucket LIMIT 1`)
+    .get(eventId) as Row | undefined;
+  const devices = db
+    .prepare('SELECT COUNT(*) AS n FROM scanners sc WHERE sc.event_id = ? AND EXISTS (SELECT 1 FROM scans s WHERE s.scanner_id = sc.id)')
+    .get(eventId) as Row;
+  const denials = (Object.entries(outcomes) as Array<[StoredScanOutcome, number]>).filter(([outcome]) => outcome !== 'admitted').sort((a, b) => b[1] - a[1]);
+  return {
+    expected: attendance.expected,
+    admitted: attendance.admitted,
+    noShows: Math.max(0, attendance.expected - attendance.admitted),
+    rate: attendance.rate,
+    firstAdmissionAt: (span.first_at as string | null) ?? null,
+    lastAdmissionAt: (span.last_at as string | null) ?? null,
+    peak: peak ? { bucketStart: new Date(Number(peak.bucket) * 1000).toISOString(), admitted: Number(peak.n) } : null,
+    denied: denials.reduce((sum, [, count]) => sum + count, 0),
+    topDenial: denials.length ? { outcome: denials[0][0], count: denials[0][1] } : null,
+    devicesUsed: Number(devices.n),
+    gatesUsed: gates.filter((gate) => gate.id !== null && gate.admitted + gate.denied > 0).length
+  };
+}
+
+/**
+ * `liveScanners` is empty unless the doors are open: silence only matters then. Only devices that were in
+ * contact and went quiet raise an alert; a device never set up is shown in the device list instead.
+ */
+async function alerts(db: Database, eventId: string, policies: OperationsSummary['policies'], liveScanners: OperationsSummary['scanners'], now: Date): Promise<OperationsAlert[]> {
+  const result: OperationsAlert[] = [];
+  // Bounded by time so the cost follows recent traffic, not the event's whole scan history.
+  const patternSince = new Date(now.getTime() - ALERT_RULES.patternWindowMinutes * 60_000).toISOString();
+  const patternWindow = `in the last ${ALERT_RULES.patternWindowMinutes} minutes`;
+
+  for (const scanner of liveScanners) {
+    if (scanner.state !== 'idle' || !scanner.lastUsedAt) continue;
+    const minutes = Math.floor((now.getTime() - Date.parse(scanner.lastUsedAt)) / 60_000);
+    result.push({
+      kind: 'device_idle',
+      severity: 'warning',
+      message: `${scanner.label}: no contact for ${minutes} min while the doors are open. Check the phone's connection and that the scanner page is open.`,
+      count: minutes,
+      lastAt: scanner.lastUsedAt,
+      scannerId: scanner.id
+    });
+  }
+
+  // Group the windowed scans first and look up names only for the (few) passes that form a pattern.
   for (const row of db
     .prepare(
-      `SELECT s.pass_id, p.attendee_name, COUNT(*) AS n, MAX(s.created_at) AS last_at
-       FROM scans s JOIN passes p ON p.id = s.pass_id
-       WHERE s.event_id = ? AND s.outcome = 'already_redeemed'
-       GROUP BY s.pass_id HAVING n >= ? ORDER BY n DESC LIMIT 20`
+      `SELECT d.pass_id, p.attendee_name, d.n, d.last_at
+       FROM (SELECT pass_id, COUNT(*) AS n, MAX(created_at) AS last_at FROM scans
+             WHERE event_id = ? AND outcome = 'already_redeemed' AND created_at >= ? AND pass_id IS NOT NULL
+             GROUP BY pass_id HAVING n >= ? ORDER BY n DESC LIMIT 20) d
+       JOIN passes p ON p.id = d.pass_id ORDER BY d.n DESC`
     )
-    .all(eventId, ALERT_RULES.repeatedDuplicates) as Row[]) {
+    .all(eventId, patternSince, ALERT_RULES.repeatedDuplicates) as Row[]) {
     const who = (row.attendee_name as string | null) ?? `pass ${(row.pass_id as string).slice(0, 8)}`;
     result.push({
       kind: 'repeated_duplicate',
       severity: 'warning',
-      message: `${who}: presented ${row.n} more times after entry (possible shared screenshot)`,
+      message: `${who}: presented ${row.n} more times after entry ${patternWindow} (possible shared screenshot)`,
       count: Number(row.n),
       lastAt: row.last_at as string,
       passId: row.pass_id as string
     });
   }
 
+  await pause();
+  // Naming every outcome lets the time bound seek scans_alerts_idx once per outcome.
   for (const row of db
     .prepare(
-      `SELECT s.pass_id, p.attendee_name, COUNT(DISTINCT s.gate_id) AS gates, COUNT(*) AS n, MAX(s.created_at) AS last_at
-       FROM scans s JOIN passes p ON p.id = s.pass_id
-       WHERE s.event_id = ? AND s.gate_id IS NOT NULL
-       GROUP BY s.pass_id HAVING gates >= 2 ORDER BY last_at DESC LIMIT 20`
+      `SELECT m.pass_id, p.attendee_name, m.gates, m.n, m.last_at
+       FROM (SELECT pass_id, COUNT(DISTINCT gate_id) AS gates, COUNT(*) AS n, MAX(created_at) AS last_at FROM scans
+             WHERE event_id = ? AND outcome IN (${ALL_OUTCOMES_SQL}) AND created_at >= ? AND gate_id IS NOT NULL AND pass_id IS NOT NULL
+             GROUP BY pass_id HAVING gates >= 2 ORDER BY last_at DESC LIMIT 20) m
+       JOIN passes p ON p.id = m.pass_id ORDER BY m.last_at DESC`
     )
-    .all(eventId) as Row[]) {
+    .all(eventId, patternSince) as Row[]) {
     const who = (row.attendee_name as string | null) ?? `pass ${(row.pass_id as string).slice(0, 8)}`;
     result.push({
       kind: 'multi_gate',
       severity: 'info',
-      message: `${who}: scanned at ${row.gates} different gates`,
+      message: `${who}: scanned at ${row.gates} different gates ${patternWindow}`,
       count: Number(row.gates),
       lastAt: row.last_at as string,
       passId: row.pass_id as string
@@ -151,6 +448,7 @@ function alerts(db: Database, eventId: string, policies: OperationsSummary['poli
   }
 
   const since = new Date(now.getTime() - ALERT_RULES.invalidBurst.windowMinutes * 60_000).toISOString();
+  await pause();
   for (const row of db
     .prepare(
       `SELECT s.scanner_id, sc.label, COUNT(*) AS n, MAX(s.created_at) AS last_at

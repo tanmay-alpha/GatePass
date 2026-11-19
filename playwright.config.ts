@@ -2,7 +2,8 @@ import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 
-const PORT = '3410';
+// E2E_PORT lets several checkouts (git worktrees) run the suite at the same time.
+const PORT = process.env.E2E_PORT ?? '3410';
 // E2E_BASE_URL runs the same specs against an already deployed instance
 // (which must allow self-registration: the specs sign up fresh organizer
 // accounts); otherwise a local built server is started.
@@ -33,14 +34,18 @@ export default defineConfig({
   // A deployed instance adds network and cold-start latency (e.g. a free Render instance).
   expect: { timeout: deployed ? 20_000 : 5_000 },
   use: {
-    baseURL: BASE_URL
+    baseURL: BASE_URL,
+    // The scanner registers a service worker (public/sw.js). page.route cannot see requests from
+    // pages it controls in every browser (WebKit), so specs that inject network failures run without
+    // it; e2e/scanner-readiness.spec.ts allows it to test the offline app shell.
+    serviceWorkers: 'block'
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'], ...from('10.64.0.1') } },
     { name: 'firefox', use: { ...devices['Desktop Firefox'], ...from('10.64.0.2') } },
     { name: 'webkit', use: { ...devices['Desktop Safari'], ...from('10.64.0.3') } },
-    // Phone-sized admin: the guided first-event flow must work at phone width.
-    { name: 'mobile-chrome', use: { ...devices['Pixel 7'], ...from('10.64.0.4') }, testMatch: /onboarding\.spec\.ts$/ }
+    // Phone-sized admin: the guided first-event flow must work at phone width; the door scanner's readiness check, setup retry and attendee help on a phone.
+    { name: 'mobile-chrome', use: { ...devices['Pixel 7'], ...from('10.64.0.4') }, testMatch: /(onboarding|scanner-readiness|enroll-retry)\.spec\.ts$/ }
   ],
   webServer: deployed
     ? undefined

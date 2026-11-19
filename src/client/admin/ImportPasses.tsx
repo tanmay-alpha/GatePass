@@ -3,10 +3,12 @@ import { useId, useState, type FormEvent } from 'react';
 import type { AdmissionPolicy, EventSummary, ImportReport, IssuedPass } from '../../shared/types';
 import { attendeesFromCsv, parseCsv, type ParsedAttendees } from '../csv';
 import { Modal } from '../dialog';
-import { ErrorNote, FieldError, TableMessage, ToneBadge, errorMessage } from '../ui';
+import { ErrorNote, FieldError, TableMessage, ToneBadge, describedBy, errorMessage } from '../ui';
 import { fromZoneInput, zoneLabel } from '../time';
+import { announceDeliveries, EmailPassesOption } from './DeliveriesSection';
 import { adminApi } from './http';
 import { PolicySelect } from './IssueForm';
+import { useToast } from './toast';
 
 const MAX_ROWS = 2000;
 const MAX_FILE_BYTES = 2_000_000;
@@ -38,6 +40,8 @@ export function ImportPasses({ event, policies, onClose, onImported }: Props) {
   const [inputError, setInputError] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [emailPasses, setEmailPasses] = useState(false);
+  const notify = useToast();
   const id = useId();
 
   async function readFile(file: File | undefined) {
@@ -87,10 +91,17 @@ export function ImportPasses({ event, policies, onClose, onImported }: Props) {
           rows: preview.parsed.rows,
           dryRun: false,
           ...(preview.policyId ? { policyId: preview.policyId } : {}),
-          ...(preview.expiresAt ? { expiresAt: preview.expiresAt } : {})
+          ...(preview.expiresAt ? { expiresAt: preview.expiresAt } : {}),
+          ...(emailPasses ? { emailPasses: true } : {})
         }
       });
-      await onImported(report.issued ?? [], report.rejected.length);
+      const issued = report.issued ?? [];
+      await onImported(issued, report.rejected.length);
+      if (emailPasses) {
+        const queued = issued.filter((pass) => pass.attendeeEmail).length;
+        announceDeliveries();
+        notify(`${queued} pass email${queued === 1 ? '' : 's'} queued; progress is under Pass emails`);
+      }
     } catch (err) {
       setError(errorMessage(err));
       setBusy(false);
@@ -101,6 +112,8 @@ export function ImportPasses({ event, policies, onClose, onImported }: Props) {
   if (preview) {
     const { parsed, report } = preview;
     const policyName = policies.find((policy) => policy.id === preview.policyId)?.name;
+    const rejectedRows = new Set(report.rejected.map((rejection) => rejection.row));
+    const withEmail = parsed.rows.filter((row, index) => row.email && !rejectedRows.has(index + 1)).length;
     content = (
         <div className="stack">
           <div className="import-summary" role="status">
@@ -177,6 +190,7 @@ export function ImportPasses({ event, policies, onClose, onImported }: Props) {
               </tbody>
             </table>
           </div>
+          <EmailPassesOption checked={emailPasses} onChange={setEmailPasses} withEmail={withEmail} />
           <ErrorNote message={error} />
           <div className="dialog-actions">
             <button type="button" className="btn btn-secondary" onClick={() => setPreview(null)} disabled={busy}>
@@ -208,7 +222,7 @@ export function ImportPasses({ event, policies, onClose, onImported }: Props) {
             onChange={(e) => setText(e.target.value)}
             placeholder={'Name,Email\n"Lovelace, Ada",ada@example.com\nGrace Hopper,grace@example.com'}
             aria-invalid={inputError ? true : undefined}
-            aria-describedby={`${id}-error`}
+            aria-describedby={describedBy(inputError && `${id}-error`)}
           />
           <FieldError id={`${id}-error`} message={inputError} />
         </label>

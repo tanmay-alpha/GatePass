@@ -169,7 +169,17 @@ After the import, the new passes are shown once, the same as passes issued by ha
 
 ### Send passes to attendees
 
-GatePass does not email passes. You send each link yourself, by email, chat or text message, or you hand out printed passes. The attendee opens the link and shows the QR code at the door.
+You can send each link yourself, by email, chat or text message, or hand out printed passes. The attendee opens the link and shows the QR code at the door.
+
+When the server has email set up, GatePass can also email the passes for you:
+
+- In **Issue passes** (named attendees) or on the import check screen, tick **Email each attendee their pass**. Attendees without an email address get no email. If the box is greyed out, the server operator still has to enable pass emails.
+- Right after issuing, **Email these passes** on the issued passes card sends the links still on screen.
+- Emails go out in the background, a few a second. The **Pass emails** card under the pass list shows each one: **Queued**, **Retrying** (the email service did not answer; GatePass tries again with the same request, so nobody gets it twice), **Accepted by provider**, **Failed** with the reason, or **Cancelled**. "Accepted by provider" means the email service took the message; it does not prove that it reached the inbox.
+- **Cancel** stops an email that is still waiting. **Retry now** tries a waiting email again at once.
+- **Send again** (for a failed, cancelled or already sent email) needs a new link: the pass is reissued and its current QR code stops working, including printed or forwarded copies. GatePass asks before doing this.
+- An email still waiting is cancelled automatically when its pass is reissued, revoked, used at the door or expires.
+- One address gets at most 10 pass emails a day.
 
 The pass page shows whether the pass is valid, the attendee's name, the event, the times in the event's time zone, the venue with a **Get directions** link (a map search for the venue text; it opens in a new tab), what the pass allows (for example "General admission"), the QR code and an 8-character **Reference (for manual entry at the door)**. Opening the page does not check anyone in. Printing the page gives a single, black-and-white pass.
 
@@ -405,7 +415,7 @@ The **Pass design** tab changes the look of the QR code (colours, templates, log
 ## 17. Current limitations
 
 - **Demo data resets.** On the demo server, all data is erased when the server restarts or is updated.
-- **No emailing.** GatePass does not send passes, invitations or reset links. You send them yourself.
+- **Email is optional.** Without an email provider on the server, GatePass does not send passes, invitations or reset links; you send them yourself. With one, delivery to the inbox is never confirmed.
 - **No offline scanning.** Door devices need an internet connection. Plan a fallback for real events.
 - **Pass links show the name.** Anyone who has a pass link can see the attendee's name on it.
 - **Camera scanning on real phones is not verified.** Camera scanning has not yet been tested on a physical iPhone or Android phone. Test it on your own devices before your event; manual entry of the reference is the backup.

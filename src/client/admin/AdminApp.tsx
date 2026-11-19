@@ -227,6 +227,15 @@ function Dashboard({ user, demo, route, securityNotice, onSignOut, onSession }: 
   }
 
   const selected = events?.find((event) => event.id === eventRoute?.eventId) ?? null;
+  // A link to an event the list does not have yet (created in another tab, or opened from an invitation after the list
+  // loaded) fetches the list once more before saying the event is not found.
+  const missing = events !== null && eventRoute?.eventId && !selected ? eventRoute.eventId : null;
+  const [recheck, setRecheck] = useState<{ eventId: string; done: boolean } | null>(null);
+  useEffect(() => {
+    if (!missing || recheck?.eventId === missing) return;
+    setRecheck({ eventId: missing, done: false });
+    void loadEvents().finally(() => setRecheck({ eventId: missing, done: true }));
+  }, [missing, recheck, loadEvents]);
 
   let content;
   if (creating) {
@@ -266,6 +275,12 @@ function Dashboard({ user, demo, route, securityNotice, onSignOut, onSession }: 
         }}
       />
     );
+  } else if (missing && !(recheck?.eventId === missing && recheck.done)) {
+    content = (
+      <p className="muted" role="status">
+        Loading event…
+      </p>
+    );
   } else if (events !== null && eventRoute?.eventId) {
     content = (
       <section className="card">
@@ -283,6 +298,17 @@ function Dashboard({ user, demo, route, securityNotice, onSignOut, onSession }: 
 
   return (
     <div className="shell">
+      {/* Moves focus rather than following the fragment: the hash is the app's route. */}
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={(e) => {
+          e.preventDefault();
+          document.getElementById('main-content')?.focus();
+        }}
+      >
+        Skip to content
+      </a>
       <header className="topbar">
         <a className="brand" href="#/">
           GatePass
@@ -383,7 +409,9 @@ function Dashboard({ user, demo, route, securityNotice, onSignOut, onSession }: 
             })}
           </ul>
         </aside>
-        <main className="content">{content}</main>
+        <main id="main-content" className="content" tabIndex={-1}>
+          {content}
+        </main>
       </div>
     </div>
   );

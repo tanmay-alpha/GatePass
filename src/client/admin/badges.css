@@ -1,0 +1,71 @@
+/*
+ * A4 badge sheets (BadgeSheet.tsx). Sizes are physical (mm, pt) and must match
+ * BadgeSheetLayout.ts: a sheet is the A4 page minus the @page margin, less 1 mm of slack.
+ * Classes use the `sheet-` prefix; `.badge` is the status pill in styles.css.
+ */
+@page { size: A4; margin: 10mm; }
+
+/* In-app preview: one sheet on a scaled sheet of paper. */
+.sheet-preview { display: grid; gap: var(--space-3); padding: var(--space-3); background: var(--surface-2); border-radius: var(--radius-sm); }
+.sheet-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); }
+.sheet-per-page { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.sheet-per-page .segmented button { min-width: 40px; }
+.sheet-preview > p { margin: 0; }
+.sheet-paper { --preview-scale: 0.5; width: calc(210mm * var(--preview-scale)); height: calc(297mm * var(--preview-scale)); margin-inline: auto; overflow: hidden; background: #fff; box-shadow: var(--shadow-pop); }
+.sheet-paper-scale { width: 210mm; height: 297mm; padding: 10mm; transform: scale(var(--preview-scale)); transform-origin: top left; }
+.sheet-pager { display: flex; align-items: center; justify-content: center; gap: var(--space-2); font-size: var(--text-sm); }
+@media (max-width: 480px) {
+  .sheet-paper { --preview-scale: 0.38; }
+}
+/* 0.38 is 302 px wide, more than a 320-375 px screen has inside the card. */
+@media (max-width: 400px) {
+  .sheet-paper { --preview-scale: 0.3; }
+}
+@media (max-width: 860px), (pointer: coarse) {
+  .sheet-per-page .segmented button { min-width: var(--touch); }
+}
+
+/* The full run, outside #root: laid out off-screen so images load, and the only thing printed. */
+.sheet-print { position: fixed; top: 0; left: -300vw; visibility: hidden; }
+
+.sheet-page {
+  width: 190mm; height: 276mm; display: grid;
+  grid-template-columns: repeat(var(--sheet-cols), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--sheet-rows), minmax(0, 1fr));
+  background: #fff; color: #000; font-family: var(--font); line-height: 1.25;
+  print-color-adjust: exact; -webkit-print-color-adjust: exact;
+  --fs-event: 10pt; --fs-detail: 9pt; --fs-ref: 9pt; --fs-code: 12pt;
+}
+.sheet-page.per-1 { --fs-event: 20pt; --fs-detail: 14pt; --fs-ref: 14pt; --fs-code: 20pt; }
+.sheet-page.per-2 { --fs-event: 15pt; --fs-detail: 12pt; --fs-ref: 12pt; --fs-code: 16pt; }
+.sheet-page.per-4 { --fs-event: 12pt; --fs-detail: 10pt; --fs-ref: 10pt; --fs-code: 13pt; }
+
+.sheet-badge {
+  display: flex; gap: var(--sheet-gap); padding: var(--sheet-pad); min-width: 0; min-height: 0;
+  overflow: hidden; background: #fff; break-inside: avoid; page-break-inside: avoid;
+}
+.sheet-page.guides .sheet-badge { outline: 0.2mm dashed #8a8a8a; outline-offset: -0.1mm; }
+.sheet-column { flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+.sheet-row { flex-direction: row; align-items: center; text-align: left; }
+.sheet-qr { flex: none; display: block; width: var(--sheet-qr); height: var(--sheet-qr); }
+.sheet-missing { display: grid; place-items: center; padding: 2mm; font-size: 9pt; text-align: center; border: 0.3mm solid #999; }
+
+.sheet-text { display: flex; flex-direction: column; gap: 1.2mm; min-width: 0; min-height: 0; max-height: 100%; overflow: hidden; }
+.sheet-column .sheet-text { align-self: stretch; align-items: center; }
+.sheet-row .sheet-text { flex: 1 1 0; }
+/* Clamped multi-line fields: wrap anywhere rather than overflow, ellipsis past the line limit. */
+.sheet-name, .sheet-event, .sheet-when, .sheet-venue, .sheet-policy {
+  display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; max-width: 100%;
+}
+.sheet-name { font-weight: 650; line-height: 1.15; }
+.sheet-event { font-size: var(--fs-event); font-weight: 600; -webkit-line-clamp: 2; }
+.sheet-when, .sheet-venue { font-size: var(--fs-detail); -webkit-line-clamp: 2; }
+.sheet-policy { font-size: var(--fs-detail); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; -webkit-line-clamp: 1; }
+.sheet-ref { font-size: var(--fs-ref); letter-spacing: 0.04em; white-space: nowrap; }
+.sheet-ref span { font-family: var(--mono); font-weight: 700; font-size: var(--fs-code); }
+
+@media print {
+  .sheet-print { position: static; visibility: visible; }
+  .sheet-page { break-after: page; page-break-after: always; }
+  .sheet-page:last-child { break-after: auto; page-break-after: auto; }
+}

@@ -35,8 +35,31 @@ export interface ConfirmOptions {
   title: string;
   /** States the consequence of confirming. */
   body: ReactNode;
-  confirmLabel: string;
+  /** `null`: the action is not possible as things stand; the dialog explains why and only closes (resolves false). */
+  confirmLabel: string | null;
   danger?: boolean;
+  /**
+   * For actions that change who is admitted while the doors are open: the confirm button stays disabled
+   * until this statement is ticked, so the consequence cannot be confirmed by a reflexive Enter.
+   */
+  acknowledge?: string;
+}
+
+/** Confirmation body: a lead sentence, the concrete consequences as a list, and an optional closing note. */
+export function Consequences({ lead, items, children }: { lead: ReactNode; items: string[]; children?: ReactNode }) {
+  return (
+    <div className="stack-sm">
+      <p>{lead}</p>
+      {items.length ? (
+        <ul className="consequences">
+          {items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      ) : null}
+      {children ? <p>{children}</p> : null}
+    </div>
+  );
 }
 
 /** Promise-based confirm: `if (!(await confirm({...}))) return;`. Render `dialog` somewhere in the tree. */
@@ -53,19 +76,39 @@ export function useConfirm(): [(options: ConfirmOptions) => Promise<boolean>, Re
     setRequest(null);
   }
 
-  const dialog = request ? (
-    <Modal title={request.options.title} onClose={() => settle(false)}>
-      <div className="dialog-body">{request.options.body}</div>
-      <div className="dialog-actions">
-        <button type="button" className="btn btn-secondary" onClick={() => settle(false)}>
-          Cancel
-        </button>
-        <button type="button" className={`btn ${request.options.danger ? 'btn-danger' : 'btn-primary'}`} onClick={() => settle(true)}>
-          {request.options.confirmLabel}
-        </button>
-      </div>
-    </Modal>
-  ) : null;
+  const dialog = request ? <ConfirmDialog key={request.options.title} options={request.options} onSettle={settle} /> : null;
 
   return [confirm, dialog];
+}
+
+function ConfirmDialog({ options, onSettle }: { options: ConfirmOptions; onSettle: (ok: boolean) => void }) {
+  const [acknowledged, setAcknowledged] = useState(false);
+  const { confirmLabel, acknowledge } = options;
+  return (
+    <Modal title={options.title} onClose={() => onSettle(false)}>
+      <div className="dialog-body">{options.body}</div>
+      {confirmLabel && acknowledge ? (
+        <label className="check dialog-ack">
+          <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
+          {acknowledge}
+        </label>
+      ) : null}
+      <div className="dialog-actions">
+        {confirmLabel ? (
+          <>
+            <button type="button" className="btn btn-secondary" onClick={() => onSettle(false)}>
+              Cancel
+            </button>
+            <button type="button" className={`btn ${options.danger ? 'btn-danger' : 'btn-primary'}`} onClick={() => onSettle(true)} disabled={Boolean(acknowledge) && !acknowledged}>
+              {confirmLabel}
+            </button>
+          </>
+        ) : (
+          <button type="button" className="btn btn-primary" onClick={() => onSettle(false)}>
+            OK
+          </button>
+        )}
+      </div>
+    </Modal>
+  );
 }

@@ -13,9 +13,16 @@ export function localInput(minutes: number): string {
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
-/** Creates a fresh organizer account through the UI (the server runs with ALLOW_SIGNUP=true) and lands on the dashboard. */
+/**
+ * Creates a fresh organizer account through the UI (the server runs with ALLOW_SIGNUP=true) and lands on the dashboard.
+ * Each call browses from its own client address (honoured locally through `TRUST_PROXY=loopback`, ignored by a deployed
+ * instance): the per-address limit of 20 sign-ups a minute stays on, but a project with more specs than that no longer
+ * fails on whichever spec signs up 21st.
+ */
 export async function signUp(page: Page, name = 'E2E Organizer'): Promise<{ email: string; name: string }> {
   const email = uniqueEmail('organizer');
+  const host = Math.floor(Math.random() * 65_536);
+  await page.setExtraHTTPHeaders({ 'X-Forwarded-For': `10.67.${host >> 8}.${host & 255}` });
   await page.goto('/');
   await page.getByRole('link', { name: 'Create an account' }).click();
   await page.getByLabel('Your name').fill(name);

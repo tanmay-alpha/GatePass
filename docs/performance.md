@@ -9,8 +9,13 @@ What was measured, how, on which machine, and what the numbers do **not** tell y
 | `scripts/bench-server.ts` | Server half of both tools. Forked as a separate Node process: real `createApp` with `rateLimits: false` (the documented benchmark option), production `openDatabase` (WAL, `synchronous = FULL`, `busy_timeout = 5000`) on a file in a fresh temp directory, deleted afterwards. Reports host and database settings read back from its own connection. Runs the TypeScript sources through `tsx`, not the production bundle. |
 | `scripts/bench.ts` (`npm run bench`) | Four fixed redeem scenarios against one event and one scanner (see [docs/testing.md](testing.md#benchmark)). |
 | `scripts/load-test.ts` | Load test with N scanners, M passes, several client counts and three traffic patterns, persisted-state checks after every run, plus the `synchronous` FULL vs NORMAL micro-benchmark. Writes JSON and a Markdown table to `--out` (default `.local/perf/`, git-ignored). |
+| `scripts/perf-phase7.ts` | Phase 7 run against the **built** server: builds client and server bundles into `.local/perf/build` (never `dist/`), reports browser bundle sizes, then runs one synthetic event (gates, policies, 10 scanners, 5,000 passes incl. a 2,000-row CSV import) against `node <bundle>` on a temp data dir and a free loopback port, with and without admin dashboards polling. See [2026-11-17](#2026-11-17-phase-7-built-server-synthetic-event). |
+| `scripts/perf-server.ts` | Saturation server for `perf-phase7.ts`: the same start-up as `src/server/index.ts` with only `rateLimits: false`, bundled with the same `vite build --ssr` step and run with plain `node`. |
+| `scripts/perf-dataset.ts` | Synthetic event generator for the phase 5 scripts: one event with N passes (80% General, 10% VIP, 10% Staff; 2% revoked, 1% expired; formula-like and quoted names), 6 gates, 3 policies, 12 enrolled scanners plus a revoked one, ≈1.3 N scans of history over two hours with mixed outcomes and methods, ≈N/10 audit rows and pass emails for ~17% of passes, inserted straight into the schema (`verifyDatabase` passes on the result). Seeded PRNG: every run gets the same data. See [2026-11-17: Phase 5](#2026-11-17-phase-5-large-events-exports-and-the-door). |
+| `scripts/perf-queries.ts` | In-process profile of the admin reads (dashboard summary, scan feed, pass list and search, audit, exports, report) of any checkout (`--tree`) at several event sizes: median time per call and per SQL statement, `EXPLAIN QUERY PLAN` of every statement, ad hoc `--index` and `--pragma` trials. |
+| `scripts/perf-phase5.ts` | Admission under admin load against built servers (`dist/server/index.js`, rate limits on, paced; `dist/perf-server/perf-server.js`, rate limits off, closed loop) of one or more checkouts: redeem latency and throughput alone, with 3 dashboards polling every 2 s, and with 25,000-row exports downloading; server memory and event-loop delay sampled from inside the server through an `--import` preload; persisted-state checks after every run. |
 
-`scripts/load-test.ts` only ever talks to the server it starts itself on `127.0.0.1`; it has no option to point it at a deployed host.
+`scripts/load-test.ts`, `scripts/perf-phase7.ts` and `scripts/perf-phase5.ts` only ever talk to the servers they start themselves on `127.0.0.1`; they have no option to point them at a deployed host.
 
 ### Load-test method
 
@@ -157,3 +162,288 @@ Median of trial means: FULL 2.863 ms, NORMAL 0.519 ms per redeem transaction (FU
 3. CPU share: a 0.1-CPU instance must be measured, not scaled from these numbers.
 4. Cold start: time from the first request after idle to a successful `/api/health` and a successful redeem, if the host sleeps.
 5. Behaviour while `backup <file>` runs and across a restart under load.
+
+## 2026-11-17: Phase 7, built server, synthetic event
+
+**Developer-laptop numbers.** Everything below ran on the laptop described in [Host configuration](#host-configuration) over loopback, while other development processes (other agents' builds and test runs) were active. It is not a statement about the Render/Vercel deployment or about any production throughput; see [Limits](#limits-what-these-numbers-do-not-establish), which all apply here as well.
+
+### What was run
+
+Commit measured: `e75ff981224fe9b4aa57c6c4b36ea2b01c724a2c` ("Expand the operations dashboard: …"), built from a clean `git archive` of that commit, so uncommitted edits in the working tree were not part of the build.
+
+```sh
+# Build + both server kinds (one run ≈ 4 min); repeated twice:
+npx tsx --disable-warning=ExperimentalWarning scripts/perf-phase7.ts --ref e75ff98 --out .local/perf/phase7
+# Third run, production server only:
+npx tsx --disable-warning=ExperimentalWarning scripts/perf-phase7.ts --ref e75ff98 --servers production --out .local/perf/phase7
+npm audit --omit=dev
+npm audit
+```
+
+Runs started 2026-11-16 20:51, 20:55 and 20:58 UTC (2026-11-17 local time). The script writes one JSON report per run (`.local/perf/phase7/perf-phase7-<time>.json`, git-ignored) and the Vite build log (`vite-client-build.txt`).
+
+**Build.** The script builds into `.local/perf/build` (never `dist/`) with the same commands as `npm run build` (`vite build`; `vite build --ssr src/server/index.ts`), plus `scripts/perf-server.ts` with the same SSR bundler. The TypeScript check (`tsc --noEmit`) is not part of this build.
+
+**Servers.** Each one is `node <bundle>` in its own process on a free `127.0.0.1` port, with a fresh temp data directory (`DATABASE_FILE` under `%TEMP%`, deleted afterwards), a clean environment (no `.env`, no mail key), `NODE_ENV=production` and request logging on (stdout read by the script).
+
+| Server | Entry | Rate limits | Scanner traffic | Dashboards (segment 2) |
+| --- | --- | --- | --- | --- |
+| production | `.local/perf/build/server/index.js` (the production entry point) | on (per device 240 redeems/min; admin 600 req/min per IP) | each device one request at a time, paced at 3.5 scans/s (just under the per-device limit) = 35 scans/s for 10 devices | 3 dashboards, every 5 s (`LIVE_POLL_MS`); exports every 20 s |
+| saturation | `.local/perf/build/perf-server/perf-server.js` (same start-up, only `rateLimits: false`) | off | closed loop: next request as soon as the answer arrives | 3 dashboards, every 1 s; exports every 5 s (5× the UI rate, a stress setting) |
+
+**Synthetic event** (identical on both servers, seeded PRNG): 6 gates; policies *General* (gates 1–4), *VIP* (gates 5–6, capacity 450), *Staff* (any gate); 10 enrolled scanners bound to gates 1, 2, 3, 4, 5, 6, 1, 2, 3, 4. Passes: General 2,000 issued + 2,000 imported from a generated CSV, VIP 500, Staff 500, plus race passes (20 on production, 200 on saturation). Traffic: every pass is scanned once at an allowed gate; 541 passes are also re-scanned by a *different* allowed device at about the same queue position (cross-device duplicate race); 72 General passes are first shown at a VIP gate (`wrong_gate`). Segment 1 = first half of every device queue, no dashboards; segment 2 = second half, with dashboards. A dashboard cycle is `GET …/operations`, `GET …/scans?after=<last>&limit=100`, `GET …/passes?limit=50` (with `q=attendee 1` every other cycle), and every N cycles `attendance.csv` + `scans.csv`. Then the race: each race pass is sent by all 10 devices at the same moment. Then each admin endpoint 5× sequentially with no other traffic.
+
+**Correctness checks (separate from timing), on a read-only connection after the traffic:** `verifyDatabase` (integrity, foreign keys, admission invariants); admitted responses = redemption rows = expected (every General/Staff/race pass + exactly 450 VIP); VIP redemption rows = 450; 2xx redeem responses = scan rows; no pass token received `admitted` twice; every race pass admitted exactly once.
+
+### Correctness and errors
+
+| Run | Server | Redeem requests | Admitted (expected) | `already_redeemed` | `wrong_gate` | `capacity_full` | Passes admitted twice | Race passes admitted exactly once | Non-2xx | 429 | 503 / `database busy` log lines | 5xx | Network errors | Checks |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 20:51 | production | 5,813 | 4,970 (4,970) | 735 | 49 | 59 | 0 | 20 / 20 | 0 | 0 | 0 / 0 | 0 | 0 | pass |
+| 20:55 | production | 5,813 | 4,970 (4,970) | 735 | 49 | 59 | 0 | 20 / 20 | 0 | 0 | 0 / 0 | 0 | 0 | pass |
+| 20:58 | production | 5,813 | 4,970 (4,970) | 735 | 49 | 59 | 0 | 20 / 20 | 0 | 0 | 0 / 0 | 0 | 0 | pass |
+| 20:51 | saturation | 7,613 | 5,150 (5,150) | 2,355 | 49 | 59 | 0 | 200 / 200 | 0 | 0 | 0 / 0 | 0 | 0 | pass |
+| 20:55 | saturation | 7,613 | 5,150 (5,150) | 2,358 | 46 | 59 | 0 | 200 / 200 | 0 | 0 | 0 / 0 | 0 | 0 | pass |
+
+In every run VIP admissions stopped at exactly 450 and `verifyDatabase` reported no violation. One process holds the only write connection, so `SQLITE_BUSY` could only come from a second connection (for example a CLI backup); none was run here, and none occurred. The outcome split differs by a few requests in the second saturation run because a duplicate can reach the server before or after its original; the totals that matter (admissions, redemption rows) are fixed.
+
+### Admission throughput and redeem latency
+
+Latency = client-side, request start to parsed JSON, nearest-rank percentiles, ms. "Server p50/p95/p99" = the handler time from the server's own request log for all redeems of that run.
+
+| Run | Server | Segment | Requests | req/s | p50 | p95 | p99 | max |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20:51 | production | 1: scanning only | 2,781 | 23.6 | 4.62 | 486.49 | 4,903.74 | 6,798.60 |
+| 20:51 | production | 2: + 3 dashboards / 5 s | 2,832 | 33.5 | 4.55 | 36.07 | 183.55 | 378.65 |
+| 20:55 | production | 1: scanning only | 2,781 | 34.4 | 4.90 | 108.72 | 301.62 | 614.80 |
+| 20:55 | production | 2: + 3 dashboards / 5 s | 2,832 | 33.5 | 4.28 | 20.33 | 156.29 | 348.19 |
+| 20:58 | production | 1: scanning only | 2,781 | 34.3 | 7.64 | 18.75 | 30.23 | 890.57 |
+| 20:58 | production | 2: + 3 dashboards / 5 s | 2,832 | 33.5 | 3.86 | 8.84 | 38.65 | 366.51 |
+| 20:51 | saturation | 1: scanning only | 2,781 | 297.7 | 30.80 | 42.75 | 55.83 | 279.36 |
+| 20:51 | saturation | 2: + 3 dashboards / 1 s | 2,832 | 232.4 | 36.11 | 77.26 | 89.73 | 118.10 |
+| 20:55 | saturation | 1: scanning only | 2,781 | 345.7 | 26.90 | 36.05 | 42.38 | 261.75 |
+| 20:55 | saturation | 2: + 3 dashboards / 1 s | 2,832 | 294.1 | 28.41 | 55.49 | 65.25 | 194.77 |
+| 20:51 | production | race: 10 devices × 20 passes | 200 | 290.1 | 17.10 | 41.93 | 94.92 | 100.54 |
+| 20:55 | production | race | 200 | 356.7 | 15.45 | 28.34 | 37.26 | 41.00 |
+| 20:58 | production | race | 200 | 353.3 | 16.13 | 29.48 | 38.47 | 41.19 |
+| 20:51 | saturation | race: 10 devices × 200 passes | 2,000 | 308.5 | 17.25 | 33.22 | 45.06 | 169.84 |
+| 20:55 | saturation | race | 2,000 | 347.3 | 15.47 | 29.54 | 38.12 | 124.25 |
+
+Server-side redeem handler time (whole run): production p50 2.9–3.6 ms, p95 4.3–14.1 ms, p99 12.9–219.7 ms, max 507–1,054 ms; saturation p50 2.5–2.9 ms, p95 3.2–3.6 ms, p99 10.8–13.6 ms, max 129–198 ms.
+
+### Admin API while scanning and at rest
+
+Client-side ms. "While scanning" = the dashboards' own requests in segment 2 (48 per endpoint on production, 29–36 on saturation, 5–12 per export); range over the runs. "At rest" = median of 5 sequential calls after all traffic, range over the five server runs; the data set then held 5,020 passes / 5,813 scans (production) or 5,200 / 7,613 (saturation).
+
+| Endpoint | Response size | At rest p50 (5 runs) | While scanning, production: p50 / p95 | While scanning, saturation: p50 / p95 |
+| --- | ---: | ---: | --- | --- |
+| `GET …/operations` | 13 kB | 30.9–53.0 | 25.4–43.9 / 37.7–268.3 | 53.0–73.6 / 74.2–103.0 |
+| `GET …/scans?after&limit=100` (feed) | 34 kB | — | 7.2–13.6 / 17.4–101.1 | 33.2–39.9 / 46.5–60.3 |
+| `GET …/scans?limit=200` | 68 kB | 5.6–10.6 | — | — |
+| `GET …/passes?limit=50` | 21 kB | 6.9–16.0 | 8.0–12.8 / 11.9–36.6 | 35.0–44.3 / 51.2–65.8 |
+| `GET …/passes?limit=50&q=attendee 1` | 21 kB | 6.7–13.4 | (in the row above) | (in the row above) |
+| `GET …/passes?limit=50&status=active` | 17 kB | 10.0–19.1 | — | — |
+| `GET …/passes?limit=5000` | 2.0 MB | 26.9–46.8 | — | — |
+| `GET …/audit?limit=500` | 212–216 kB | 5.6–12.1 | — | — |
+| `GET …/exports/attendance.csv` | 0.88–0.90 MB | 26.3–49.4 | 26.8–42.5 / 37.4–159.7 | 54.6–75.6 / 58.9–94.2 |
+| `GET …/exports/scans.csv` | 0.41–0.54 MB | 21.4–51.8 | 20.1–36.9 / 26.2–79.8 | 49.0–61.8 / 54.3–74.5 |
+| `GET …/exports/audit.csv` | 214–221 kB | 8.6–15.8 | — | — |
+
+Server-side handler time of `GET …/operations` over each whole run: p50 25.0–43.8 ms (production), 26.2–40.2 ms (saturation).
+
+### CSV import, 2,000 rows
+
+Generated file: 2,000 rows + header, 82,933 bytes, every 7th name quoted with an embedded comma and quotes; all 2,000 accepted, 0 rejected, policy General. Request body 122,426 bytes; the commit response (every issued pass with its token and link) is 1,006,408 bytes.
+
+| Step | Range over 5 runs |
+| --- | --- |
+| Parse in Node (`parseCsv` + `attendeesFromCsv` from `src/client/csv.ts`, median of 5) | 0.73–2.31 ms |
+| `POST …/passes/import` with `dryRun: true` (client-side) | 6.0–9.9 ms |
+| `POST …/passes/import` commit, one transaction (client-side) | 30.8–99.7 ms |
+| same commit, server handler time | 28.0–95.1 ms |
+
+For comparison, issuing 500 passes by count took 10.5–12.3 ms per request (client-side p50). Browser parse time was not measured; the in-Node figure only shows the parser's algorithmic cost.
+
+### Memory (server process)
+
+Windows working set (`Get-Process`: `WorkingSet64`, `PeakWorkingSet64`), MiB, range over the 5 server runs:
+
+| Point | RSS | Peak so far |
+| --- | ---: | ---: |
+| idle after start | 79.5–85.5 | 112.2–117.9 |
+| after provisioning ~5,000 passes + import | 94.9–101.9 | 112.2–117.9 |
+| after segment 1 (scanning only) | 82.2–102.0 | 112.2–117.9 |
+| after segment 2 (scanning + dashboards + exports) | 146.1–176.8 | 157.2–186.0 |
+| after the at-rest API timings | 154.4–176.5 | 181.5–189.6 |
+
+Database at the end: 7.6–8.9 MiB plus a 4.2 MiB WAL. These are single samples; a leak would need a long run to show and none was made.
+
+### Browser bundle
+
+`vite build` of `e75ff98` (Vite 8.3.8, 2,138 modules). Gzip −9 and Brotli q11 computed by the script; Vite's own gzip column is shown for the files it reports.
+
+| Asset | Raw bytes | gzip −9 | Brotli | Vite's gzip | When the browser loads it |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `assets/index-*.js` (one chunk: public pass page, admin and scanner) | 472,531 | 139,241 | 117,671 | 140.72 kB | every page |
+| `assets/index-*.css` | 60,758 | 12,215 | 10,709 | 12.33 kB | every page |
+| `assets/zxing_reader-*.wasm` | 946,860 | 411,054 | 321,338 | 414.30 kB | only on `/scan` when the native `BarcodeDetector` is missing or fails (`src/client/qr-detector.ts`) |
+| 7 Inter `woff2` subsets | 218,512 | — (already compressed) | — | — | per `unicode-range`; Latin pages need the latin subset (48,256) [INFERENCE: browser subset selection not measured] |
+| `index.html`, `version.json` | 676 | — | — | 0.30 / 0.07 kB | every page |
+
+### `npm audit` (2026-11-17, npm 11.11.0, working-tree `package-lock.json`)
+
+| Command | info | low | moderate | high | critical |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `npm audit --omit=dev` | 0 | 0 | 0 | 0 | 0 |
+| `npm audit` (99 prod, 171 dev, 80 optional dependencies) | 0 | 0 | 0 | 0 | 0 |
+
+The committed lockfile of the measured commit `e75ff98` also reported 0 vulnerabilities with `npm audit --package-lock-only`, with and without `--omit=dev`.
+
+### Reading the results
+
+- **Correctness held in every run:** 0 passes admitted twice across 32,665 redeem requests in five server runs, including 541 cross-device duplicates per run and 460 race passes (20 or 200 per run) each sent by 10 devices at the same instant (exactly one admission each); VIP capacity held at exactly 450; 0 non-2xx, 0 `SQLITE_BUSY`/503, 0 rate-limit 429s on the production build at 35 scans/s.
+- **Throughput:** with limits on, admission rate was set by the pacing (34.3–34.4 req/s for 10 devices; the 20:51 run fell to 23.6 req/s during a stall described below); the per-device limit (4 scans/s) is far above a human-operated door. With limits off, the built server took 298–346 req/s from 10 closed-loop devices, in the range of the 2026-11-09 `tsx` runs (213–332 req/s); the ceiling is still the per-commit flush of `synchronous = FULL` (server handler p50 2.5–3.6 ms per redeem).
+- **Does dashboard polling move redeem p95?** Under saturation, yes, every time: 3 dashboards polling every second lowered throughput by 15–22% (298→232, 346→294 req/s) and raised redeem p95 by 54–81% (42.8→77.3, 36.1→55.5 ms). The admin handlers are synchronous SQLite calls on the same event loop (operations ≈ 25–44 ms, each CSV export ≈ 25–50 ms server-side), so a redeem that arrives during one waits for it. At the production pace with the real 5 s interval the effect was **not measurable** on this host: in all three runs segment 1 (no dashboards) had the *worse* p95 (18.8–486 ms against 8.8–36 ms), and redeem p50 stayed at 3.9–7.6 ms. Those segment-1 tails were stalls with no dashboard running: in the 20:51 run requests waited up to 6.8 s end to end while the slowest redeem handler of the whole run took 1,054 ms, so most of the wait was outside the handler (process or loopback scheduling, on the server or in the load generator, which shares the machine). The cause was not isolated; other agents' builds and test suites were running on the same laptop at the time [INFERENCE: contention, not GatePass code, is the likely cause].
+- **Hotspot: `GET …/operations`.** It is the costliest request a dashboard repeats (every 5 s per open tab), ~40 ms at ~5,000 passes / 7,600 scans and growing with the number of scans, since most of its queries aggregate over all of the event's scans. A per-query profile of `operationsSummary` at `e75ff98` against the saturation database (5,200 passes, 7,613 scans; 39–41 ms per call, 10 calls) showed: the multi-gate alert query (`COUNT(DISTINCT s.gate_id) … GROUP BY s.pass_id` over all of the event's gate-bound scans, no time bound) 11.6 ms; the 15-minute timeline buckets (`strftime` per scan row) 6.4 ms; the event row with pass-count sub-selects 5.4 ms; per-gate totals 3.9 ms; repeated-duplicate alert (all `already_redeemed` scans, no time bound) 3.4 ms; pass totals 3.2 ms; 5-minute buckets 2.9 ms. Suggested changes (not made here, since other agents own `src/server/`): bound the two alert queries to a recent window, and/or cache the summary per event for 1–2 s so N open tabs cost one computation. CSV exports are the other blocking handlers (25–50 ms at this size); they would need chunked/streamed generation to stop delaying redeems at much larger events.
+- **CSV import of 2,000 rows** is one 31–100 ms transaction; the 1 MB commit response is the largest single admin response apart from `passes?limit=5000` (2.0 MB, 27–47 ms).
+- **Memory** stayed under 190 MiB peak working set with ~5,000 passes and repeated exports; idle ~80 MiB.
+- **Bundle:** one 472.5 kB JS chunk (139 kB gzip) serves the pass page, the admin app and the scanner, so an attendee opening a pass link downloads the admin code too. Splitting the routes with dynamic `import()` would reduce the pass page and scanner download [INFERENCE: saving not measured]. The 947 kB ZXing WebAssembly decoder is loaded only when needed.
+
+### Limits of this run
+
+- The production pace (3.5 scans/s per device) is a machine-driven upper bound near the rate limit, not a model of real door traffic; the 5,000-pass event took ~2.8 minutes.
+- The host was shared with other active development work (see the stalls above); laptop power plan *Balanced*, on AC power; Windows Defender scanning of `%TEMP%` not checked. CPU: 16 cores / 24 threads; RAM: 2 × 8 GiB DDR5-5600.
+- Not measured: Linux/Docker, TLS, a proxy, a phone on Wi-Fi, events larger than ~5,200 passes, runs longer than a few minutes, `backup` during load, the 0.1-CPU Render instance.
+
+## 2026-11-17: Phase 5, large events, exports and the door
+
+**Developer-laptop numbers only.** Everything below ran on the laptop in [Host configuration](#host-configuration) (Windows 10.0.26300, i7-14650HX 24 threads, 15.7 GiB, NVMe SSD, Node v24.14.1) over loopback. They are not hosting numbers and say nothing about the 0.1-CPU Render instance; [Limits](#limits-what-these-numbers-do-not-establish) apply. The first round of runs (11:25–11:49 UTC) happened while other agents were building and testing on the same machine; those JSONs are kept but not quoted. Every number below comes from the second round (19:13–19:52 UTC), when nothing else was running.
+
+Question: with a 25,000-pass event, do door redemptions stay fast and correct while organisers watch the dashboard and download exports, and which admin reads grow with event size?
+
+Compared: base `273918b` (worktree, `dist/` from `npm run build`) and after `d99d7ff` ("Stream CSV exports, add the post-event report and keep admin reads off the door's critical path"), both clean, both with `vite build --ssr scripts/perf-server.ts --outDir dist/perf-server` for the saturation server.
+
+### Method
+
+```sh
+# In-process admin query profile, 5k / 10k / 25k passes, 7 repeats, median per call and per statement + EXPLAIN QUERY PLAN:
+npx tsx --disable-warning=ExperimentalWarning scripts/perf-queries.ts --tree ../wt-base2 --label q-base
+npx tsx --disable-warning=ExperimentalWarning scripts/perf-queries.ts --label q-after
+# Index trials (25k only): --sizes 25000 --index "<DDL>" (labels q-plain, q-i1, q-i123, q-audit)
+# Door under admin load, both checkouts, both server kinds:
+npx tsx --disable-warning=ExperimentalWarning scripts/perf-phase5.ts --tree ../wt-base2,. --label base,after --port 3521
+npx tsx --disable-warning=ExperimentalWarning scripts/perf-phase5.ts --tree ../wt-base2,. --label base,after --modes saturation --port 3522
+npx tsx --disable-warning=ExperimentalWarning scripts/perf-phase5.ts --tree .,../wt-base2 --label after,base --modes saturation --port 3523
+```
+
+Data (`scripts/perf-dataset.ts`, seeded PRNG, identical in every run): one event with 25,000 passes, 32,550 scans of history, 15,050 redemptions, 2,500 audit rows, 4,206 pass emails, 6 gates, 3 policies, 12 scanners; plus a 5,000-pass second event. Each server run starts from its own copy of the seeded file (47.9 MiB).
+
+Phases, each with fresh passes: **a** redemptions alone; **b** plus 3 dashboards each fetching `/operations` and the scan feed every 2 s; **c** plus the attendance (25,000 rows, 5.1 MB) and scans (~32,600 rows, 3.4 MB) CSV exports downloading back to back on two connections. Every device sends its queue one request at a time, each pass once plus 10% re-scans by another device. *Production*: `dist/server/index.js`, rate limits on, paced at 3 scans/s per device (36/s), 1,200 admissions per phase. *Saturation*: `dist/perf-server/perf-server.js`, rate limits off, closed loop, 2,400 admissions per phase. Server memory and event-loop delay (`monitorEventLoopDelay`) are sampled inside the server every 250 ms through an `--import` preload.
+
+Checks after every run, on the database file: `verifyDatabase` clean, admitted answers = new redemption rows, 2xx answers = new scan rows, no pass admitted twice. **All 8 server runs passed** (production 3,600 admitted = 3,600 rows, 3,963 scans; saturation 7,200 = 7,200, 7,923 scans; 0 passes admitted twice, 0 non-2xx, 0 network errors).
+
+### Redeem latency and throughput (ms, client side, loopback)
+
+| Mode | Phase | Base p50 / p95 / p99 | Base req/s | After p50 / p95 / p99 | After req/s |
+| --- | --- | --- | --- | --- | --- |
+| production | a alone | 4.9 / 31.7 / 305 | 26.9 | 5.5 / 84.8 / 397 | 26.6 |
+| production | b + 3 dashboards | 5.3 / 217 / 298 | 24.8 | 5.3 / 273 / 562 | 24.7 |
+| production | c + exports | **967 / 1,784 / 3,066** | **7.8** | **18.1 / 170 / 438** | **24.8** |
+| saturation | a alone | 41.4 / 82.0 / 329 | 193 | 57.7 / 95.1 / 200 | 155 |
+| saturation | b + 3 dashboards | 45.5 / 167 / 474 | 137 | 63.8 / 117 / 365 | 140 |
+| saturation | c + exports | **1,069 / 1,541 / 2,302** | **7.4** | **71.5 / 110 / 142** | **120** |
+
+Saturation repeats (same command; run 3 with `--tree .,../wt-base2`, so the after build ran first), req/s and p50 / p99 ms:
+
+| Run | Phase | Base | After |
+| --- | --- | --- | --- |
+| 2 (base first) | a alone | 157/s, 56.5 / 146 | 138/s, 65.2 / 266 |
+| 2 | b + dashboards | 114/s, 63.8 / 508 | 145/s, 62.9 / 182 |
+| 2 | c + exports | 8.1/s, 1,059 / 2,020 | 118/s, 75.3 / 229 |
+| 3 (after first) | a alone | 129/s, 70.6 / 143 | 164/s, 53.4 / 123 |
+| 3 | b + dashboards | 61/s, 91.3 / 684 | 121/s, 69.1 / 228 |
+| 3 | c + exports | 6.3/s, 1,220 / 2,280 | 87/s, 104 / 186 |
+
+Phase a does not exercise any changed code (the redeem handler is unchanged); in every one of the three quiet runs the build that ran *first* was faster there (by 15–30%), so phase-a differences are an ordering effect on this machine, not the change. Phase b is mixed run to run (the base dipped to 61/s in run 3). Phase c is the real change and holds in all runs: on the base an export built the whole CSV in memory in one synchronous call (~1 s for 25k rows) and every redeem queued behind it, so the door fell to 6–8 answers per second with 1–3 s waits. Streamed in 500-row chunks with backpressure, the door keeps its paced rate (24.8/s) in production and 87–120/s at saturation. All checks passed in every run.
+
+### Server memory and event-loop delay (peak during the phase)
+
+| Mode | Phase | Base RSS / heap MiB | Base loop delay max ms | After RSS / heap MiB | After loop delay max ms |
+| --- | --- | --- | --- | --- | --- |
+| production | a | 94 / 23 | 410 | 97 / 24 | 584 |
+| production | b | 83 / 23 | 891 | 86 / 23 | 766 |
+| production | c | **446 / 256** | **2,907** | **211 / 79** | **524** |
+| saturation | a | 103 / 25 | 487 | 101 / 26 | 488 |
+| saturation | b | 106 / 28 | 453 | 104 / 28 | 703 |
+| saturation | c | **463 / 300** | **2,580** | **152 / 52** | **472** |
+
+Idle RSS ~78–82 MiB in all runs. End of run (after the at-rest reads): base production 410 MiB RSS / 187 MiB heap, after 213 / 65; base saturation 433 / 151, after 88 / 17. Loop-delay maxima of 400–700 ms appear even with no admin load in both builds; the p99 of redeem latency in phase a follows them. Their cause (GC, WAL checkpoint, Windows scheduling) was not isolated.
+
+### Admin responses on the 25k event, at rest (production server, 3 calls each, p50 ms / bytes)
+
+| Request | Base | After |
+| --- | --- | --- |
+| `GET …/operations` (memo miss) | 1,148 / 15.6 KB | 262 / 15.7 KB |
+| `GET …/scans?limit=100` (feed) | 76.9 / 35.7 KB | 4.0 / 35.7 KB |
+| `GET …/passes` first page (50) | 103 / 20.2 KB | 6.0 / 20.2 KB |
+| `GET …/passes` last page (offset 24,950) | 130 / 20.3 KB | 7.1 / 20.3 KB |
+| `GET …/passes?q=…` search | 104 / 20.8 KB | 34.6 / 20.8 KB |
+| `GET …/exports/audit.csv` | 109 / 276 KB | 19.8 / 254 KB |
+| `GET …/report` | 404 (did not exist) | 174 / 4.9 KB |
+| `GET …/exports/summary.csv` | 404 | 173 / 5.5 KB |
+| `attendance.csv` / `scans.csv` while the door runs (phase c, production) | 964 / 969 ms; 5.06 / 3.44 MB | 865 / 1,245 ms; same bytes |
+
+The audit export is smaller on the after build only because every download writes an `export.downloaded` audit row and the base server completed 322 exports in phase c against 99 on the after build; the CSV columns are unchanged. During phase b the dashboard's `operations` requests got *slower* in wall time on the after build (production p95 760 ms vs 310 ms): the summary now yields to the event loop between its ~14 queries, so redeems are answered in between and the dashboard waits instead of the door. With the 2 s memo most dashboard polls are hits (p50 2–5 ms).
+
+### Query profile (in-process, median of 7, ms)
+
+| Call | 5k base → after | 10k base → after | 25k base → after |
+| --- | --- | --- | --- |
+| `getEvent` (per-event counts) | 9.5 → 6.7 | 23.9 → 23.7 | 65.3 → 42.6 |
+| operations summary (live) | 29.7 → 23.9 | 94.2 → 68.4 | 257 → 130 |
+| operations summary (finished, + completion) | 22.7 → 20.5 | 72.9 → 52.6 | 212 → 104 |
+| scan feed, newest 100 | 8.2 → 0.45 | 25.0 → 0.82 | 67.0 → 0.62 |
+| pass list, first page | 13.0 → 0.42 | 36.5 → 1.24 | 100 → 3.2 |
+| pass list, last page | 16.2 → 0.87 | 46.7 → 1.35 | 133 → 2.2 |
+| pass list, name search | 14.0 → 4.6 | 40.9 → 16.0 | 103 → 22.1 |
+| pass list, redeemed, deep page | 21.1 → 5.7 | 47.2 → 23.9 | 135 → 44.0 |
+| audit, newest 100 | 10.8 → 0.30 | 27.6 → 0.84 | 66.0 → 0.39 |
+| export attendance (whole document) | 50.2 → 25.0 | 109 → 88.5 | 290 → 133 |
+| export scans | 59.8 → 29.2 | 171 → 161 | 613 → 333 |
+| export audit | 18.4 → 4.9 | 32.7 → 7.0 | 85.2 → 10.5 |
+| report (new) | — → 17.6 | — → 54.1 | — → 99.0 |
+
+Export times in the profile are the total for the whole document; on the server it is spread over 500-row chunks, each a few milliseconds.
+
+EXPLAIN QUERY PLAN findings (25k):
+
+- Base: every list, feed and audit request first ran `getEvent`, whose correlated `COUNT(*)` subqueries walk `passes_event_idx` and the redemptions join for the whole event (~65 ms at 25k). The list query itself was already indexed (`scans_event_idx (event_id=? AND id>?)`, `audit_event_idx`). After: a primary-key `SELECT 1 FROM events WHERE id = ?`, so the feed, audit and first pass pages are sub-millisecond to 3 ms and no longer grow with the event.
+- Base pass list: `COUNT(*) … LEFT JOIN redemptions` on every page (33 ms at 25k) even without a status filter; after: the join is built only for the filters in use and the page is found by rowid in a co-routine.
+- Operations summary: every statement is an index `SEARCH` (`scans_alerts_idx (event_id=? AND outcome=? AND created_at>?)`, `scans_event_idx`, `passes_event_idx`, covering where possible); no full `SCAN` of a table. The remaining cost is per-row work proportional to the event's scans (gate totals 30 ms, alert grouping 28 ms, timeline 22 ms at 25k), all with a `TEMP B-TREE FOR GROUP BY`. The base's timeline used `strftime` per row (74 ms); string slicing gives identical buckets (regression test) at 22 ms.
+- Name/email/reference search is `LIKE '%…%'`: a range of `passes_event_idx` with a per-row comparison, 22–30 ms at 25k. An index cannot serve a leading wildcard; FTS would be the next step and is not proposed for this size.
+- Exports: `scans_event_idx (event_id=? AND id>? AND id<?)` per chunk, primary-key lookups for scanner, gate and pass.
+
+### Index trials (25k, in-process, median ms)
+
+| Trial | operations live | operations finished | report | export scans | export attendance |
+| --- | --- | --- | --- | --- | --- |
+| after, no extra index (`q-after`) | 130 | 104 | 99 | 333 | 133 |
+| same, repeated (`q-plain`) | 178 | 135 | 134 | 439 | 194 |
+| i1: `CREATE INDEX scans_outcome_cover_idx ON scans(event_id, outcome, created_at, gate_id, pass_id, method)` replacing `scans_alerts_idx` | 160 | 149 | 113 | 436 | 201 |
+| i1 + `scans(event_id, gate_id, outcome, created_at)` + `passes(event_id, revoked_at, expires_at)` | 104 | 102 | 94 | 458 | 151 |
+| `audit_lookup_idx ON audit_log(entity_id, created_at) WHERE action = 'scanner.attendee_lookup'` | 148 | 120 | 100 | 348 | 160 |
+
+Two runs of the same code without any index differ by ~35% (130 vs 178 ms), more than any index trial gains. The three-index set saves at most ~30–70 ms on the dashboard summary at 25k (a read that is memoised for 2 s and now yields between queries), costs three more index writes on the scans and passes tables on every redemption, and does nothing for exports. **No index is proposed from this work.** The orchestrator's `audit_lookup_idx` (added for another reason) has no measurable effect on these reads either way. A larger SQLite page cache (`PRAGMA cache_size = -32768`, first round only, shared machine) cut the 25k summary roughly in half; it was not re-measured on the quiet machine and is not proposed.
+
+### What changed and why (d99d7ff)
+
+- Exports stream in 500-row keyset chunks with backpressure and yield between chunks: a 25k export no longer blocks the event loop for ~1 s per download or holds the whole document in memory (phase c above).
+- Lists, feed, audit and exports check the event with a primary-key read instead of `getEvent`'s per-event counts; the pass list builds only the filters in use and pages by rowid.
+- The operations summary and the new report yield between their queries; dashboards that miss the memo together share one computation; the timeline buckets by string slicing.
+- `csvCell` also neutralises formulas behind leading whitespace or in full-width form and quotes cells containing `;`.
+
+### Limits of this run
+
+- Loopback, one Windows laptop, Node 24.14.1; Render's 0.1 CPU would make every in-process number several times larger [INFERENCE, not measured].
+- One quiet run per production configuration and three per saturation configuration; run order alone moves phase a by 15–30% on this machine.
+- 25,000 passes is the largest event measured; the scans table holds ~1.3 scans per pass. Not measured: longer runs, many concurrent exports, phones on Wi-Fi, TLS, a proxy.

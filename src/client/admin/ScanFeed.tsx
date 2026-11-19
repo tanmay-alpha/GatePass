@@ -1,11 +1,14 @@
+import { RefreshCw } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
-import type { EventSummary, ScanRecord } from '../../shared/types';
+import type { EventSummary, ScanMethod, ScanRecord } from '../../shared/types';
 import { ErrorNote, OutcomeBadge, TableMessage, errorMessage } from '../ui';
 import { formatTimeInZone, zoneLabel } from '../time';
 import { LIVE_POLL_MS, usePolling } from './hooks';
 import { adminApi } from './http';
 
 const MAX_ROWS = 300;
+/** How the door got the code; "Find attendee" marks an assisted admission (lost or unreadable QR code). */
+const METHOD_LABEL: Record<ScanMethod, string> = { camera: 'Camera', manual: 'Typed', lookup: 'Find attendee' };
 
 /** Polls for scans newer than the last seen id; cheap thanks to the (event_id, id) index. */
 export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged: () => Promise<void> }) {
@@ -14,8 +17,12 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
   const lastId = useRef(0);
   /** False until the first poll; that poll returns history, not new scans. */
   const loaded = useRef(false);
+  /** A manual retry must not overlap a scheduled poll: both would fetch after the same id and list scans twice. */
+  const inFlight = useRef(false);
 
   const poll = useCallback(async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     try {
       const fresh = await adminApi<ScanRecord[]>(`/api/events/${event.id}/scans?after=${lastId.current}&limit=100`);
       const isNew = loaded.current;
@@ -27,6 +34,8 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
       setError('');
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      inFlight.current = false;
     }
   }, [event.id, onChanged]);
 
@@ -34,7 +43,14 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
 
   return (
     <div className="stack-sm">
-      <ErrorNote message={error} />
+      {error ? (
+        <div className="actions">
+          <ErrorNote message={scans ? `The feed could not refresh: ${error} Older scans stay listed; it keeps retrying every ${LIVE_POLL_MS / 1000} s.` : error} />
+          <button type="button" className="btn btn-secondary btn-small" onClick={() => void poll()}>
+            <RefreshCw size={14} aria-hidden /> Retry now
+          </button>
+        </div>
+      ) : null}
       <div className="table-wrap">
         <table className="table-cards">
           <thead>
@@ -55,7 +71,10 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
                 </td>
                 <td className="strong cell-primary">{scan.passId ? scan.attendeeName || <code>{scan.passId.slice(0, 8)}</code> : <span className="muted">—</span>}</td>
                 <td className="cell-sub">{scan.gateName ?? <span className="muted">Any gate</span>}</td>
-                <td className="muted cell-sub">{scan.scannerLabel}</td>
+                <td className="muted cell-sub">
+                  {scan.scannerLabel}
+                  {scan.method ? ` · ${METHOD_LABEL[scan.method]}` : ''}
+                </td>
               </tr>
             ))}
             {scans === null && !error ? <TableMessage colSpan={5}>Loading scans…</TableMessage> : null}

@@ -26,6 +26,21 @@
  *   PREVIEW_URL             optional; a preview deployment to check for isolation
  *   RELEASE_CHECK_TIMEOUT   seconds to wait for step 1 (default 900)
  *   RELEASE_CHECK_INTERVAL  seconds between polls (default 15)
+ *   GATED_COMMIT            optional; the commit this run reports a GitHub check on
+ *                           (GITHUB_SHA in release-verify.yml). See "Deferral" below.
+ *   GATED_COMMIT_TIME       GATED_COMMIT's committer time, Unix seconds
+ *   DEPLOY_PENDING_GRACE    seconds after GATED_COMMIT_TIME during which a backend
+ *                           still on another commit counts as "deploy pending" (default 3600)
+ *
+ * Deferral: the Render service deploys a commit only after ALL of that commit's
+ * GitHub checks complete successfully (autoDeployTrigger: checksPass), and a
+ * release-verify run on main is one of them. If such a run waited for the
+ * backend to serve the commit, Render would wait for the run (a circular wait)
+ * and, when the run then failed, skip the deploy for good. So when GATED_COMMIT
+ * is younger than the grace period and the backend health reports a different
+ * commit, the check is deferred: it reports why, writes a "deferred" summary
+ * and exits 0 WITHOUT checking anything. A deferred run is not a release pass;
+ * run it again once the backend reports the commit.
  */
 import { randomBytes } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
@@ -75,6 +90,13 @@ if (expectedRaw && !/^[0-9a-f]{7,64}$/.test(expectedRaw)) fatal('EXPECTED_COMMIT
 const expected = expectedRaw;
 const timeoutMs = seconds('RELEASE_CHECK_TIMEOUT', 900) * 1000;
 const intervalMs = seconds('RELEASE_CHECK_INTERVAL', 15) * 1000;
+const gatedRaw = process.env.GATED_COMMIT?.trim().toLowerCase() || undefined;
+if (gatedRaw && !/^[0-9a-f]{7,64}$/.test(gatedRaw)) fatal('GATED_COMMIT must be a commit SHA (at least 7 hex characters)');
+const gated = gatedRaw;
+const gatedTimeRaw = process.env.GATED_COMMIT_TIME?.trim();
+if (gated && !(gatedTimeRaw && /^\d+$/.test(gatedTimeRaw))) fatal('GATED_COMMIT_TIME must be the commit time in Unix seconds when GATED_COMMIT is set');
+const gatedTimeMs = Number(gatedTimeRaw) * 1000;
+const pendingGraceMs = seconds('DEPLOY_PENDING_GRACE', 3600) * 1000;
 
 async function get(url: string, init: RequestInit = {}): Promise<Fetched> {
   const response = await fetch(url, { redirect: 'manual', ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
@@ -103,6 +125,8 @@ function sameCommit(actual: string, wanted: string): boolean {
 }
 
 const short = (commit: string | null | undefined) => (commit ? commit.slice(0, 12) : String(commit));
+/** A commit id read from a server: hex only, so nothing else from the response reaches logs or the step summary. */
+const asCommit = (value: unknown) => (typeof value === 'string' && /^[0-9a-f]{7,40}$/i.test(value) ? value.toLowerCase() : null);
 
 // ------------------------------------------------------------ step 1: commits
 
@@ -113,7 +137,7 @@ async function observeVersion(): Promise<Observation> {
     const res = await get(`${frontend}/version.json`, { headers: { 'Cache-Control': 'no-cache' } });
     const body = record(res.json);
     if (res.status !== 200 || !body || !('commit' in body)) return { ready: false, commit: undefined, detail: `HTTP ${res.status}, no commit field` };
-    const commit = typeof body.commit === 'string' ? body.commit.toLowerCase() : null;
+    const commit = asCommit(body.commit);
     if (expected && !(commit && sameCommit(commit, expected))) return { ready: false, commit, detail: `commit ${short(commit)}, want ${short(expected)}` };
     return { ready: true, commit, detail: `commit ${short(commit)}` };
   } catch (error) {
@@ -130,7 +154,7 @@ async function observeHealth(base: string): Promise<Observation> {
     }
     const build = record(body.build);
     if (!build || typeof build.schema !== 'number' || build.schema < 1) return { ready: false, commit: undefined, detail: 'ok, but no build.schema (server older than the release-check contract)' };
-    const commit = typeof build.commit === 'string' ? build.commit.toLowerCase() : null;
+    const commit = asCommit(build.commit);
     if (expected && !(commit && sameCommit(commit, expected))) return { ready: false, commit, detail: `schema ${build.schema}, commit ${short(commit)}, want ${short(expected)}` };
     return { ready: true, commit, detail: `schema ${build.schema}, commit ${short(commit)}${body.demo === true ? ', demo' : ''}` };
   } catch (error) {
@@ -242,6 +266,11 @@ async function smoke(results: Result[]): Promise<void> {
       const body = record(res.json);
       if (res.status === 503 && body?.preview === true) return { level: 'pass', detail: 'HTTP 503 preview-no-backend' };
       if (res.status === 401 || res.status === 403) return { level: 'pass', detail: `HTTP ${res.status}: protected by Vercel Deployment Protection; the no-backend body is not observable` };
+      // Vercel Authentication answers anonymous requests with a redirect to its SSO endpoint, not 401/403.
+      const location = res.headers.get('location') ?? '';
+      if (res.status >= 300 && res.status < 400 && /^https:\/\/vercel\.com\/sso-api(\?|$)/.test(location)) {
+        return { level: 'pass', detail: `HTTP ${res.status} to vercel.com/sso-api: protected by Vercel Deployment Protection; the no-backend body is not observable` };
+      }
       if (res.status === 200) {
         return { level: 'warn', detail: 'preview answers /api/health: it has its own backend (GATEPASS_PREVIEW_BACKEND_ORIGIN); vercel.mjs refuses the production origin at build time, confirm the target is not production' };
       }
@@ -278,7 +307,28 @@ function report(results: Result[]): boolean {
   return failed.length === 0;
 }
 
-const results: Result[] = [];
-await waitForRelease(results);
-await smoke(results);
-process.exitCode = report(results) ? 0 : 1;
+// ------------------------------------------------------------ deferral
+
+/** Why this run must not wait or fail (see "Deferral" above), or undefined to run the release check. */
+async function pendingDeploy(): Promise<string | undefined> {
+  if (!gated) return undefined;
+  const ageMs = Date.now() - gatedTimeMs;
+  if (ageMs >= pendingGraceMs) return undefined;
+  const serving = await observeHealth(backend ?? frontend);
+  // Only positive evidence defers: an unreachable backend is checked (and fails) as usual.
+  if (typeof serving.commit !== 'string' || sameCommit(serving.commit, gated)) return undefined;
+  return `the backend serves ${short(serving.commit)}, not ${short(gated)} (committed ${Math.max(0, Math.round(ageMs / 60_000))} min ago): its deploy waits for this commit's checks, including this run`;
+}
+
+const deferred = await pendingDeploy();
+if (deferred) {
+  console.log(`Release check DEFERRED, nothing was checked: ${deferred}. Run it again once the backend reports ${short(gated)}; a deferred run is not a release pass.`);
+  console.log(`::notice title=Release check deferred::${deferred}`);
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  if (summary) appendFileSync(summary, `### Release check deferred (not a pass)\n\nNothing was checked: ${deferred}. Run it again once the backend reports \`${short(gated)}\`.\n`);
+} else {
+  const results: Result[] = [];
+  await waitForRelease(results);
+  await smoke(results);
+  process.exitCode = report(results) ? 0 : 1;
+}

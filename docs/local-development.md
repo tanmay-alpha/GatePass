@@ -59,6 +59,7 @@ npm start       # node dist/server/index.js; serves dist/client and the API on :
 | `HTTPS_CERT_FILE`, `HTTPS_KEY_FILE` | unset | When both are set, Node serves HTTPS directly. |
 | `DEMO_MODE` | `false` | `true` shows the "data can reset" banner (deployments without durable storage). |
 | `RESEND_API_KEY`, `MAIL_FROM` | unset | Both set: invitations and password resets are emailed through Resend and "Forgot your password?" works. Unset: links are shown once to share by hand. |
+| `PASS_DELIVERY_KEY` | unset | With the two mail variables: lets organizers email attendees their pass links. 32 random bytes, base64; encrypts links waiting in the outbox. `PASS_DELIVERY_PREVIOUS_KEYS` (optional, comma-separated, at most 4) keeps older keys readable during a rotation. `PASS_EMAIL_PER_SECOND` (default 2) and `PASS_EMAIL_MAX_ATTEMPTS` (default 8) tune the worker. See [ADR 0012](decisions/0012-pass-email-outbox.md). |
 | `ORIGIN_SECRET`, `CLIENT_IP_HEADER` | unset | Only behind a CDN that fronts the API (see [deployment-vercel.md](deployment-vercel.md)). |
 | `GATEPASS_COMMIT` | unset | Build commit reported by `/api/health`; set by the Docker build argument, or by Render as `RENDER_GIT_COMMIT`. |
 

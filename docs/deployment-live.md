@@ -18,13 +18,17 @@ This document records the architecture, hosting configuration, operational runbo
 
 To make GatePass persistent for production, two paths are available:
 
-1. **Render Paid Instance with Persistent Disk ($7.25/month):**
-   - Upgrade the Render web service from Free to a paid instance tier ($7/month for 0.5 CPU / 512 MB).
-   - Attach a 1 GB persistent disk ($0.25/GB/month) mounted at `/data`.
-   - The Docker image defaults `DATABASE_FILE=/data/gatepass.db`, so the database automatically persists on the attached volume across restarts and redeploys.
-   - Render automatically performs daily disk snapshots that are retained for 7 days.
-2. **Single-Host Dedicated VM ($0/month on Oracle Cloud):**
-   - Follow the primary deployment guide in [deployment.md](deployment.md) on an Oracle Cloud Always Free Ampere A1 ARM64 VM running Docker and Caddy with automatic Let's Encrypt TLS.
+1. **Render Starter instance with a persistent disk (about $7.25/month, owner approval required):**
+   - Starter instance ($7/month for 0.5 CPU / 512 MB) plus a 1 GB persistent disk ($0.25/GB/month) mounted at `/data` (prices from render.com/pricing as of 2026-11-07; re-check before approving).
+   - The Docker image defaults `DATABASE_FILE=/data/gatepass.db`, so the database persists on the disk across restarts and redeploys. A disk means one instance and a few seconds of downtime per deploy.
+   - Render takes daily disk snapshots kept for 7 days; they are a last resort, not a backup plan.
+   - Steps: [deployment-runbook.md, "Durable switch-over"](deployment-runbook.md#durable-switch-over) (`render.yaml` Blueprint, or upgrading the existing service in place).
+2. **Single Docker host with Caddy ($0 on an Oracle Cloud Always Free Ampere A1 VM within its free allowance; otherwise the cost of a small VM and a domain):**
+   - Follow [deployment.md](deployment.md) (Docker Compose, `proxy` profile, automatic Let's Encrypt TLS, database in a named volume on local disk, `scripts/offsite-backup.sh` for off-host copies).
+
+Nothing above has been applied: on 2026-11-17 the live services are still the free demo (below).
+
+**Email:** `RESEND_API_KEY`, `MAIL_FROM` and `PASS_DELIVERY_KEY` are not set on the demo (`/api/health` → `"email":false`). Invitation, reset and attendee pass emails stay disabled until the owner provides a Resend API key, a sending domain verified in Resend, and a generated delivery key; links are handed over by hand meanwhile.
 
 ---
 
@@ -187,3 +191,14 @@ Production verification was executed against `https://gatepass-sandy.vercel.app`
 | Rollback | Documented in [deployment-runbook.md](deployment-runbook.md#rollback). Not exercised on production. Its parts are covered by tests: an older build refuses a newer schema (`tests/database.test.ts`), and `.pre-v3.bak` / `restore` bring back a version 2 file (`tests/migration.test.ts`, `tests/recovery.test.ts`). On this demo the disk is ephemeral, so redeploying `4ff70f1` would start from an empty database. |
 
 Still demo-only: Render free plan, no persistent disk, `DEMO_MODE=true`.
+
+## 8. Status check — 2026-11-17 (read-only)
+
+| Item | Observation |
+| --- | --- |
+| Frontend | `GET /version.json` → `{"commit":"8b86114ff1352777abb03d67ff5b0f038311c932"}`. Vercel production deployment `gatepass-htcvi5cjk` (Ready, created 2026-11-16), read with `vercel ls gatepass` / `vercel inspect` (CLI logged in as `tanmay-alpha`). |
+| Backend | `GET /api/health` (via Vercel and on the origin) → `{"ok":true,"service":"gatepass","signup":true,"demo":true,"email":false,"build":{"commit":"8b86114…","schema":4}}`. Origin `GET /api/events` without the secret → 403. |
+| Preview | Newest preview `gatepass-8n8btykmi` (Ready, 2026-11-17; `vercel inspect --json` shows no Git metadata, so it is not proven to be PR #15's). `/api/health` answers 302 to `vercel.com/sso-api` (Vercel Deployment Protection), so it reaches no backend for anonymous clients. |
+| Release check | `FRONTEND_URL=https://gatepass-sandy.vercel.app BACKEND_URL=https://gatepass-api-mvle.onrender.com EXPECTED_COMMIT=8b86114 PREVIEW_URL=<that preview> npx tsx scripts/release-check.ts` → 12/12 passed (after teaching the check that a redirect to `vercel.com/sso-api` is protection; before that fix: 11/12, the preview check failed on the 302). This verifies current `main`, not PR #15. |
+| Render plan / disk | Not read: the `render` command on the laptop is an unrelated npm package and no `RENDER_API_KEY` is available. Last known (2026-11-15 API read): Free plan, no disk. |
+| Branch protection | `main` not protected (`gh api …/branches/main/protection` → "Branch not protected"). Proposal: [branch-protection.md](branch-protection.md). |
