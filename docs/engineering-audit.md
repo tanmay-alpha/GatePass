@@ -275,3 +275,27 @@ Checked by the reviewer with no defect: concurrent and duplicate redemptions und
 | --- | --- | --- | --- | --- | --- |
 | OPS-1 | P2 | `release-check.ts` failed the preview-isolation check against this project's previews, which Vercel protects with a 302 to its SSO page. | A redirect to `https://vercel.com/sso-api` counts as protected; any other redirect still fails. | `tests/release-check.test.ts` | Fixed |
 | OPS-2 | P3 | Nothing tied a rollback rehearsal to the migration under test. | `EXPECT_OLD_SCHEMA`/`EXPECT_NEW_SCHEMA` in `scripts/rollback-rehearsal.sh`. | Script runs (4→5 pass; wrong expectation fails) | Fixed |
+
+## Post-merge review (`main` after PR #15, 2026-11-19)
+
+Code review of `main` at `efa03dc`. Server findings have API regression tests in `tests/events-api.test.ts` and `tests/accounts-api.test.ts`; client findings were checked by typecheck and the browser suites.
+
+| Task ID | Severity | Finding | Change | Regression tests | Status |
+| --- | --- | --- | --- | --- | --- |
+| PM-1 | P1 | Pass expiry was copied from the event end at issue time. Moving the end later, or reopening an event, made every default-expiry pass scan as `expired`; a late-entry policy closing after the event end never admitted them. | `updateEvent` moves passes still on the default expiry (and their queued email links) with the event end, audited as `passesExtended`; with no explicit expiry, a policy closing after the event end sets the default. | "extends default-expiry passes when the event end moves…", "defaults the expiry of a late-entry policy pass to the policy close" | Fixed |
+| PM-2 | P1 | Removing a member left the invitation links they created or held for that event valid; after an ownership transfer a removed former owner could rejoin through one. | `removeMember` revokes them in the same transaction (`invitationsRevoked` in the audit entry). | "revokes the pending invitations a removed member created for the event" | Fixed |
+| PM-3 | P2 | An existing account accepting an organizer or platform-admin invitation consumed it without granting anything. | The grant is applied and audited (`user.event_creation_granted`, `user.platform_admin_granted`). | "grants an existing signed-in account what an organizer or platform-admin invitation offers" | Fixed |
+| PM-4 | P2 | Archived events were read-only only for event fields and issuing: gates, policies, pass revocation/reissue/policy and scanner create/rotate still changed them. | Shared `assertEventWritable` (409) inside each transaction; revoking a scanner stays allowed. | "refuses changes to gates, passes and scanners but still allows revoking a scanner" | Fixed |
+| PM-5 | P2 | The dummy password hash for unknown emails was computed at import with no rejection handler: a failed scrypt (e.g. `Deriving bits failed`, LOCAL-01) could end the process or fail every later unknown-email sign-in. | Computed lazily, retried after a failure. | Existing sign-in tests | Fixed |
+| PM-6 | P3 | Date-times without an offset (`"2026-12-01T19:00"`, even `"1"`) were accepted and read in the server's zone. | RFC 3339 with `Z` or `±hh:mm` required. | "requires an explicit offset on date-times" | Fixed |
+| PM-7 | P3 | `/api/qr/custom`: data over the level-H capacity gave 500; `download=false` downloaded. | 400 over 1273 UTF-8 bytes; `download` parsed as a real boolean. | "answers 400 for QR data too long for the code, and honours download=false" | Fixed |
+| PM-8 | P3 | Bulk revoke counted duplicate ids as skipped. | Counts distinct ids. | "counts duplicate ids once when bulk revoking" | Fixed |
+| PM-9 | P2 | The live scan feed merged a full page of newer scans onto the old list, hiding a gap when more than 100 scans arrived between polls (e.g. a hidden tab). | A full page restarts the list. | — | Fixed |
+| PM-10 | P2 | Every event reload re-rendered every issued QR and badge (new `design` object), which could exhaust the 120/min QR limit; the badge sheet stayed printable over revoked images. | QR effects keyed on the serialized design; the badge sheet resets `ready` while it reloads. | — | Fixed |
+| PM-11 | P3 | QR previews (setup panel, design, camera test code, issued passes) revoked the blob URL still displayed and hid refetch errors. | A URL is revoked only after it is replaced or on unmount; errors clear the image. | — | Fixed |
+| PM-12 | P3 | Overlapping `/api/events` reloads could apply an older answer last. | Only the latest request is applied. | — | Fixed |
+| PM-13 | P2 (a11y, E2E-01) | Clicking **Done** on the scanner setup panel unmounted the focused element, leaving focus on `<body>` (WCAG 2.4.3). This is the likely cause of E2E-01: the next `fill` raced WebKit's focus fix-up. The setup-link expiry was also shown in the browser's zone. | Focus returns to the Device label input; the spec asserts the filled value; expiry shown in the event zone. | `e2e/admission.spec.ts` | Fixed (E2E-01 pending 50 WebKit runs) |
+| PM-14 | P3 | In the scanner's attendee finder, **Yes, admit** did nothing visible when a camera read was in flight. | Shows "Scanner busy, try again." | — | Fixed |
+| PM-15 | P3 (test reliability) | Local cold-start e2e runs failed sign-up on the 5 s expectation while every worker hashed a password at once. | `signUp` waits up to 20 s for the dashboard. | e2e suites | Fixed |
+
+Reviewed and left as documented: disabling an account does not revoke door-device keys it already enrolled (SECURITY.md lists what disabling cancels; revoking live door devices mid-event is an owner decision).

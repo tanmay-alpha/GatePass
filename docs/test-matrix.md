@@ -69,6 +69,8 @@ The same finalization pass's first local full-suite run failed five tests on 30/
 
 With the two-worker bound, a second local full run completed 40 test files successfully but still failed the delivery registration and process-recovery cases, and one worker crashed with native exit code `3221226505`. The registration log reported `Deriving bits failed`. These are unresolved local failures, not a passing final run; the worker bound fixed neither native failure. No application error was suppressed, and password security parameters were not weakened. CI results on the final commit must be reported separately from this host's results.
 
+Post-merge review (2026-11-19, Windows laptop with other projects' builds running): `npm test` on `efa03dc` passed completely (43 files, 501 passed, 4 skipped); after the PM-1…PM-15 fixes ([engineering audit](engineering-audit.md#post-merge-review-main-after-pr-15-2026-11-19)) a full run passed 508 tests with one 30 s timeout in the 13-hash sign-in throttle test (timeout now 90 s; the test passes alone in 13 s). `npm run typecheck`, `npm run build`, `npm run smoke:qr` and `npm run audit:ci` (0 vulnerabilities) passed. Playwright Chromium with two workers: 163/163 passed. WebKit `admission.spec.ts` × 50: 48 passed; the Device-label value assertion passed in all 50, and two overlapping repeats timed out opening a page. CI on `76b53f8`: all 9 CI jobs, Security and CodeQL green.
+
 Rows marked C or R below point to those dedicated runs for their detail; the same files also ran in V on the current state (all passed, SIGTERM test skipped).
 
 PR CI results are recorded in the PR. The last recorded CI run on `main` is PR #13's run (all 11 jobs passed, 2026-11-14).

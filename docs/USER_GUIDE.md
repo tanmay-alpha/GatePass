@@ -82,7 +82,7 @@ Click **New event** (on **Your events**, or the **+** next to **Events** in the 
   - **Draft**: set up gates, passes and devices first. Scanners refuse every pass until you open the event.
   - **Active**: scanners admit valid passes as soon as the event window starts.
 
-Passes expire when the event ends, unless you set another expiry when you issue them.
+Passes expire when the event ends, unless you set another expiry when you issue them. If you later move the event's end, passes that use the default expiry move with it; passes on a late-entry policy that closes after the event end expire when that policy closes.
 
 Click **Create event**. If something is missing or wrong (for example, the end is before the start), the form says what to fix.
 
@@ -318,7 +318,7 @@ To invite a manager:
 
 When the manager accepts, they appear in the team list. The owner can:
 
-- **Remove** a manager. They lose access to this event immediately. Their past actions stay in the audit log. If they set up door devices, those device keys are revoked too.
+- **Remove** a manager. They lose access to this event immediately. Their past actions stay in the audit log. If they set up door devices, those device keys are revoked too, and so are invitation links for this event that they created or still hold.
 - **Make owner** – hands the event to that manager. You become a manager and cannot undo this yourself.
 
 ![Team tab with an owner and a manager](screenshots/guide/24-team.png)
