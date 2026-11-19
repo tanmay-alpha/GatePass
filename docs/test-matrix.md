@@ -67,6 +67,8 @@ Final portfolio pass (2026-11-19): both `npm audit` and `npm audit --omit=dev` r
 
 The same finalization pass's first local full-suite run failed five tests on 30/60-second timeouts and exposed an assertion escaping an HTTP callback in `exports.test.ts`. The runner had no explicit worker bound. Test concurrency is now capped at two workers (all suites and assertions retained; timeouts unchanged), and the callback rejects its enclosing promise on an unexpected status instead of throwing an uncaught exception.
 
+With the two-worker bound, a second local full run completed 40 test files successfully but still failed the delivery registration and process-recovery cases, and one worker crashed with native exit code `3221226505`. The registration log reported `Deriving bits failed`. These are unresolved local failures, not a passing final run; the worker bound fixed neither native failure. No application error was suppressed, and password security parameters were not weakened. CI results on the final commit must be reported separately from this host's results.
+
 Rows marked C or R below point to those dedicated runs for their detail; the same files also ran in V on the current state (all passed, SIGTERM test skipped).
 
 PR CI results are recorded in the PR. The last recorded CI run on `main` is PR #13's run (all 11 jobs passed, 2026-11-14).

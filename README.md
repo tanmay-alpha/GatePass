@@ -148,6 +148,8 @@ npm run audit:ci                  # standard npm audit; high/critical findings b
 OLD_IMAGE=gatepass:old NEW_IMAGE=gatepass:new bash scripts/rollback-rehearsal.sh   # Docker: upgrade, then roll back on the pre-migration backup
 ```
 
+The counts above are from the recorded Phase 5 run, not a zero-bug guarantee. The latest local Windows recheck encountered native worker/password-derivation failures (`LOCAL-01`), and an intermittent WebKit test remains open (`E2E-01`). See the test matrix for failed runs as well as passing evidence.
+
 What each suite covers and the latest results — including what has **not** been verified, such as camera scanning on physical phones — are in [docs/test-matrix.md](docs/test-matrix.md).
 
 ## Production readiness
