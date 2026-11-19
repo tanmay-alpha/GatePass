@@ -29,7 +29,9 @@ export async function signUp(page: Page, name = 'E2E Organizer'): Promise<{ emai
   await page.getByLabel('Email').fill(email);
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByRole('button', { name: 'Create account' }).click();
-  await expect(page.getByRole('heading', { name: 'Events' })).toBeVisible();
+  // Sign-up derives a 32 MiB scrypt hash; when every worker signs up at once against a freshly
+  // started server (a loaded laptop), the first responses can take longer than the 5 s default.
+  await expect(page.getByRole('heading', { name: 'Events' })).toBeVisible({ timeout: 20_000 });
   return { email, name };
 }
 

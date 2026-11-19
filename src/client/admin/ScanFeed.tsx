@@ -7,6 +7,7 @@ import { LIVE_POLL_MS, usePolling } from './hooks';
 import { adminApi } from './http';
 
 const MAX_ROWS = 300;
+const PAGE_SIZE = 100;
 /** How the door got the code; "Find attendee" marks an assisted admission (lost or unreadable QR code). */
 const METHOD_LABEL: Record<ScanMethod, string> = { camera: 'Camera', manual: 'Typed', lookup: 'Find attendee' };
 
@@ -24,11 +25,13 @@ export function ScanFeed({ event, onChanged }: { event: EventSummary; onChanged:
     if (inFlight.current) return;
     inFlight.current = true;
     try {
-      const fresh = await adminApi<ScanRecord[]>(`/api/events/${event.id}/scans?after=${lastId.current}&limit=100`);
+      const fresh = await adminApi<ScanRecord[]>(`/api/events/${event.id}/scans?after=${lastId.current}&limit=${PAGE_SIZE}`);
       const isNew = loaded.current;
       loaded.current = true;
       if (fresh.length) lastId.current = fresh[0].id;
-      setScans((current) => [...fresh, ...(current ?? [])].slice(0, MAX_ROWS));
+      // The server answers with the newest scans after the id: a full page may have skipped older ones, so the list
+      // restarts from that page instead of showing a silent gap.
+      setScans((current) => (fresh.length === PAGE_SIZE ? fresh : [...fresh, ...(current ?? [])].slice(0, MAX_ROWS)));
       // New check-ins change the event's counters in the header and the setup checklist.
       if (fresh.length && isNew) void onChanged();
       setError('');

@@ -1,5 +1,5 @@
 import { Copy, Download, Printer, TriangleAlert, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { EventSummary, IssuedPass } from '../../shared/types';
 import { toCsv } from '../csv';
 import { errorMessage } from '../ui';
@@ -92,21 +92,32 @@ function IssuedCard({ event, pass }: { event: EventSummary; pass: IssuedPass }) 
   const [copied, setCopied] = useState(false);
   const name = pass.attendeeName ?? 'unnamed attendee';
 
+  // Reloading the event gives `design` a new identity; refetch only when its content changes.
+  const designKey = JSON.stringify(event.design);
+  // The image keeps showing its URL until a new one replaces it, so a URL is revoked only once replaced or unmounted.
+  const shown = useRef('');
+  useEffect(() => () => URL.revokeObjectURL(shown.current), []);
   useEffect(() => {
-    let url = '';
     let live = true;
-    adminQrUrl(pass.passUrl, event.design)
+    setError('');
+    adminQrUrl(pass.passUrl, JSON.parse(designKey))
       .then((value) => {
-        url = value;
-        if (live) setSrc(value);
-        else URL.revokeObjectURL(value);
+        if (!live) return URL.revokeObjectURL(value);
+        URL.revokeObjectURL(shown.current);
+        shown.current = value;
+        setSrc(value);
       })
-      .catch((err) => live && setError(errorMessage(err)));
+      .catch((err) => {
+        if (!live) return;
+        URL.revokeObjectURL(shown.current);
+        shown.current = '';
+        setSrc('');
+        setError(errorMessage(err));
+      });
     return () => {
       live = false;
-      if (url) URL.revokeObjectURL(url);
     };
-  }, [pass.passUrl, event.design]);
+  }, [pass.passUrl, designKey]);
 
   async function copy() {
     try {

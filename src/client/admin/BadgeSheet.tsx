@@ -35,16 +35,22 @@ export function BadgeSheet({ event, passes, policyNames, onDone }: Props) {
   const current = Math.min(pageIndex, pages.length - 1);
   const failed = urls?.filter((url) => url === null).length ?? 0;
 
+  // Reloading the event gives `design` a new identity; refetch only when its content changes.
+  const designKey = JSON.stringify(event.design);
   useEffect(() => {
     let live = true;
+    const design = JSON.parse(designKey);
     const created: string[] = [];
     const result: Array<string | null> = passes.map(() => null);
     let next = 0;
+    // The previous codes are revoked by the cleanup below: stop showing (and printing) them.
+    setUrls(null);
+    setReady(false);
     const worker = async () => {
       while (live && next < passes.length) {
         const index = next++;
         try {
-          const url = await adminQrUrl(passes[index].passUrl, event.design);
+          const url = await adminQrUrl(passes[index].passUrl, design);
           created.push(url);
           result[index] = url;
         } catch {
@@ -57,7 +63,7 @@ export function BadgeSheet({ event, passes, policyNames, onDone }: Props) {
       live = false;
       created.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [passes, event.design]);
+  }, [passes, designKey]);
 
   // Printing before every code has decoded would leave blank squares on paper.
   useEffect(() => {

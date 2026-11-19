@@ -39,6 +39,7 @@ test('organiser configures gates and a capped policy; door staff see admit, dupl
     ['South phone', 'South']
   ] as const) {
     await page.getByLabel('Device label').fill(label);
+    await expect(page.getByLabel('Device label')).toHaveValue(label);
     await page.getByRole('combobox', { name: 'Gate' }).selectOption({ label: gate });
     await page.getByRole('button', { name: 'Add device' }).click();
     const setup = page.getByRole('region', { name: `Setup for ${label}` });

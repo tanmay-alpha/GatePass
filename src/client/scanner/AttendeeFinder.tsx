@@ -15,8 +15,8 @@ interface Props {
   online: boolean;
   /** A verification is in flight; admitting waits for it. */
   checking: boolean;
-  /** Sends the reference through the normal redeem path (same requestId handling, same verdict overlay). */
-  onAdmit: (reference: string) => Promise<void>;
+  /** Sends the reference through the normal redeem path (same requestId handling, same verdict overlay); false when another check was in flight and nothing was sent. */
+  onAdmit: (reference: string) => Promise<boolean>;
   onUnauthorized: () => void;
 }
 
@@ -95,7 +95,8 @@ export function AttendeeFinder({ scannerKey, timeZone, online, checking, onAdmit
       confirmLabel: 'Yes, admit'
     });
     if (!ok) return;
-    await onAdmit(match.reference);
+    setError('');
+    if (!(await onAdmit(match.reference))) return setError('Scanner busy, try again.');
     // Show the pass as the server now sees it.
     if (result) void run(result.query);
   }

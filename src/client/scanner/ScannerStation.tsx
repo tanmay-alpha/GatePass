@@ -691,7 +691,12 @@ export function ScannerStation({ scannerKey, session: initialSession, onSignOut,
             timeZone={timeZone}
             online={online}
             checking={checking}
-            onAdmit={(reference) => submit(reference, 'lookup')}
+            onAdmit={async (reference) => {
+              // A scan confirmed while another is pending would be dropped by submit: report it instead.
+              if (busy.current) return false;
+              await submit(reference, 'lookup');
+              return true;
+            }}
             onUnauthorized={onUnauthorized}
           />
 

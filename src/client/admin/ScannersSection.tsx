@@ -1,5 +1,5 @@
 import { Ban, KeyRound, Plus, Smartphone } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
 import type { AdmissionPolicy, EventSummary, Gate, Scanner, ScannerSetupLink } from '../../shared/types';
 import { Consequences, useConfirm } from '../dialog';
 import { ErrorNote, SectionHead, TableMessage, ToneBadge, errorMessage } from '../ui';
@@ -75,9 +75,20 @@ export function ScannersSection({ event, gates, policies, scanners, onChanged }:
     knownReady.current = ready;
   }, [ready, onChanged]);
   const shownEnrolled = setup !== null && scanners.data?.find((scanner) => scanner.id === setup.scannerId)?.setup === 'enrolled';
+  const labelInput = useRef<HTMLInputElement>(null);
+  const setupPanel = useRef<HTMLElement>(null);
+  // Closing the panel unmounts what had focus: hand it to the device label so keyboard users (and the next
+  // device entry) continue from there instead of from the top of the page.
+  const closeSetup = useCallback(() => {
+    labelInput.current?.focus({ preventScroll: true });
+    setSetup(null);
+  }, []);
   useEffect(() => {
-    if (shownEnrolled) setSetup(null);
-  }, [shownEnrolled]);
+    if (!shownEnrolled) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body || setupPanel.current?.contains(active)) closeSetup();
+    else setSetup(null);
+  }, [shownEnrolled, closeSetup]);
 
   async function create(e: FormEvent) {
     e.preventDefault();
@@ -163,7 +174,7 @@ export function ScannersSection({ event, gates, policies, scanners, onChanged }:
           <form className="device-form" onSubmit={create}>
             <label className="grow">
               Device label
-              <input id="device-label-input" placeholder="e.g. North door phone 1" value={label} onChange={(e) => setLabel(e.target.value)} maxLength={100} required />
+              <input ref={labelInput} id="device-label-input" placeholder="e.g. North door phone 1" value={label} onChange={(e) => setLabel(e.target.value)} maxLength={100} required />
             </label>
             <label>
               Gate
@@ -238,7 +249,7 @@ export function ScannersSection({ event, gates, policies, scanners, onChanged }:
         <ScannerTestCode />
         {dialog}
       </section>
-      {setup ? <ScannerSetup {...setup} onClose={() => setSetup(null)} /> : null}
+      {setup ? <ScannerSetup {...setup} panel={setupPanel} zone={zone} startsAt={event.startsAt} onClose={closeSetup} /> : null}
     </div>
   );
 }
@@ -256,31 +267,39 @@ function ScannerState({ scanner, zone }: { scanner: Scanner; zone: string }) {
   return <ToneBadge tone="ok">Active</ToneBadge>;
 }
 
-function ScannerSetup({ label, gateName, setupUrl, expiresAt, rotated, onClose }: Setup & { onClose: () => void }) {
+function ScannerSetup({ label, gateName, setupUrl, expiresAt, rotated, panel, zone, startsAt, onClose }: Setup & { panel: RefObject<HTMLElement | null>; zone: string; startsAt: string; onClose: () => void }) {
   const [src, setSrc] = useState('');
-  const panel = useRef<HTMLElement>(null);
 
   // On a phone the panel stacks below the device list and the camera test code, out of sight of the button
   // that opened it: bring it into view and move focus to it, so the link and its Copy button come next.
   useEffect(() => {
     panel.current?.scrollIntoView({ block: 'nearest' });
     panel.current?.focus({ preventScroll: true });
-  }, [setupUrl]);
+  }, [setupUrl, panel]);
   const [qrError, setQrError] = useState('');
 
+  // The image keeps showing its URL until a new one replaces it, so a URL is revoked only once replaced or unmounted.
+  const shown = useRef('');
+  useEffect(() => () => URL.revokeObjectURL(shown.current), []);
   useEffect(() => {
-    let url = '';
     let live = true;
+    setQrError('');
     adminQrUrl(setupUrl, {})
       .then((value) => {
-        url = value;
-        if (live) setSrc(value);
-        else URL.revokeObjectURL(value);
+        if (!live) return URL.revokeObjectURL(value);
+        URL.revokeObjectURL(shown.current);
+        shown.current = value;
+        setSrc(value);
       })
-      .catch((err) => live && setQrError(errorMessage(err)));
+      .catch((err) => {
+        if (!live) return;
+        URL.revokeObjectURL(shown.current);
+        shown.current = '';
+        setSrc('');
+        setQrError(errorMessage(err));
+      });
     return () => {
       live = false;
-      if (url) URL.revokeObjectURL(url);
     };
   }, [setupUrl]);
 
@@ -290,7 +309,7 @@ function ScannerSetup({ label, gateName, setupUrl, expiresAt, rotated, onClose }
       <div className="setup-qr">{src ? <img src={src} alt={`Setup QR code for ${label}`} /> : <div className="qr-placeholder">{qrError ? <span className="small">{qrError}</span> : null}</div>}</div>
       <p className="muted small setup-note">
         {rotated ? 'The old key no longer works. ' : ''}Scan this code with the door device's camera, or open the link on it. The link works once, on one device, until{' '}
-        {new Date(expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. It is shown only here.
+        {formatTimeInZone(expiresAt, zone)} ({zoneLabel(zone, startsAt)}). It is shown only here.
       </p>
       <CopyField label="Setup link" value={setupUrl} />
       <button className="btn btn-primary btn-block" onClick={onClose}>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { defaultDesignConfig, logoGallery, templates } from '../../qr/design';
 import type { DesignConfig, EventSummary } from '../../shared/types';
 import { ErrorNote, SectionHead, errorMessage } from '../ui';
@@ -26,14 +26,19 @@ export function DesignPanel({ event, onChanged }: { event: EventSummary; onChang
   const [dirty, setDirty] = useState(false);
   const notify = useToast();
 
+  // The preview keeps showing its URL until a new one replaces it, so a URL is revoked only once replaced or unmounted.
+  const shown = useRef('');
+  useEffect(() => () => URL.revokeObjectURL(shown.current), []);
   useEffect(() => {
     let live = true;
-    let url = '';
     setCheck('checking');
+    setError('');
     (async () => {
       try {
-        url = await adminQrUrl(SAMPLE_URL, design);
+        const url = await adminQrUrl(SAMPLE_URL, design);
         if (!live) return URL.revokeObjectURL(url);
+        URL.revokeObjectURL(shown.current);
+        shown.current = url;
         setPreview(url);
         const image = new Image();
         image.src = url;
@@ -52,7 +57,6 @@ export function DesignPanel({ event, onChanged }: { event: EventSummary; onChang
     })();
     return () => {
       live = false;
-      if (url) URL.revokeObjectURL(url);
     };
   }, [design]);
 

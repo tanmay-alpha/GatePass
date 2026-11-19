@@ -1,5 +1,5 @@
 import { QrCode } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { diagnosticPayload } from '../../shared/diagnostic';
 import { errorMessage } from '../ui';
 import { adminQrUrl } from './http';
@@ -22,20 +22,29 @@ export function ScannerTestCode() {
   const [src, setSrc] = useState('');
   const [error, setError] = useState('');
 
+  // The image keeps showing its URL until a new one replaces it, so a URL is revoked only once replaced or unmounted.
+  const shown = useRef('');
+  useEffect(() => () => URL.revokeObjectURL(shown.current), []);
   useEffect(() => {
     if (!open) return;
-    let url = '';
     let live = true;
+    setError('');
     adminQrUrl(payload, {})
       .then((value) => {
-        url = value;
-        if (live) setSrc(value);
-        else URL.revokeObjectURL(value);
+        if (!live) return URL.revokeObjectURL(value);
+        URL.revokeObjectURL(shown.current);
+        shown.current = value;
+        setSrc(value);
       })
-      .catch((err) => live && setError(errorMessage(err)));
+      .catch((err) => {
+        if (!live) return;
+        URL.revokeObjectURL(shown.current);
+        shown.current = '';
+        setSrc('');
+        setError(errorMessage(err));
+      });
     return () => {
       live = false;
-      if (url) URL.revokeObjectURL(url);
     };
   }, [open, payload]);
 

@@ -1,5 +1,5 @@
 import { Plus, ScanLine, ShieldCheck } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AccountUser, EventSummary, SecurityNotice, SessionInfo } from '../../shared/types';
 import { api, ApiError, WAKING_MESSAGE } from '../api';
 import { EmptyState, ErrorNote, SectionHead, ToneBadge, errorMessage, formatShortDateTime } from '../ui';
@@ -208,12 +208,17 @@ function Dashboard({ user, demo, route, securityNotice, onSignOut, onSession }: 
   const isPlatformAdmin = user.platformRole === 'platform_admin';
   const eventRoute = route.kind === 'events' ? route : null;
 
+  // Overlapping reloads: only the latest request's answer is applied, so an older response never overwrites a newer one.
+  const eventsRequest = useRef(0);
   const loadEvents = useCallback(async () => {
+    const id = ++eventsRequest.current;
     try {
-      setEvents(await adminApi<EventSummary[]>('/api/events'));
+      const next = await adminApi<EventSummary[]>('/api/events');
+      if (id !== eventsRequest.current) return;
+      setEvents(next);
       setError('');
     } catch (err) {
-      setError(errorMessage(err));
+      if (id === eventsRequest.current) setError(errorMessage(err));
     }
   }, []);
 
